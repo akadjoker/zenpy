@@ -34,3 +34,6 @@ bin/zen_*
 
 # Não ignorar arquivos de configuração 
 !bin/zen_editor.json
+
+# leftovers if an io/os test aborts before its cleanup
+/_zen_*_tmp/

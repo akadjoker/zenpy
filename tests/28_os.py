@@ -1,48 +1,57 @@
 # Test os module
 import os
+import io
+
+# A directory beside the test run — Windows has no /tmp.
+TMP = "_zen_os_tmp"
+if not os.isdir(TMP):
+    os.mkdir(TMP)
 
 # getcwd
 cwd = os.getcwd()
 assert len(cwd) > 0
 
 # mkdir + isdir
-os.mkdir("/tmp/_zen_os_testdir")
-d1 = os.isdir("/tmp/_zen_os_testdir")
+subdir = TMP + "/testdir"
+os.mkdir(subdir)
+d1 = os.isdir(subdir)
 assert d1
-d2 = os.isdir("/tmp/_zen_no_such_dir_xyz")
+d2 = os.isdir(TMP + "/no_such_dir_xyz")
 assert not d2
-f1 = os.isfile("/tmp/_zen_os_testdir")
+f1 = os.isfile(subdir)
 assert not f1
 
 # listdir
-files = os.listdir("/tmp")
+files = os.listdir(TMP)
 assert len(files) > 0
 
 # getenv
-home = os.getenv("HOME")
-assert len(home) > 0
+path_var = os.getenv("PATH")
+assert len(path_var) > 0
 
 # isfile
-import io
-io.write("/tmp/_zen_os_testfile.txt", "hello")
-f2 = os.isfile("/tmp/_zen_os_testfile.txt")
+testfile = TMP + "/testfile.txt"
+io.write(testfile, "hello")
+f2 = os.isfile(testfile)
 assert f2
-f3 = os.isfile("/tmp/_zen_no_such_file_xyz")
+f3 = os.isfile(TMP + "/no_such_file_xyz")
 assert not f3
 
 # rename
-os.rename("/tmp/_zen_os_testfile.txt", "/tmp/_zen_os_testfile2.txt")
-e1 = io.exists("/tmp/_zen_os_testfile.txt")
+testfile2 = TMP + "/testfile2.txt"
+os.rename(testfile, testfile2)
+e1 = io.exists(testfile)
 assert not e1
-e2 = io.exists("/tmp/_zen_os_testfile2.txt")
+e2 = io.exists(testfile2)
 assert e2
 
 # remove
-os.remove("/tmp/_zen_os_testfile2.txt")
-e3 = io.exists("/tmp/_zen_os_testfile2.txt")
+os.remove(testfile2)
+e3 = io.exists(testfile2)
 assert not e3
-os.remove("/tmp/_zen_os_testdir")
-d3 = os.isdir("/tmp/_zen_os_testdir")
+os.remove(subdir)
+d3 = os.isdir(subdir)
 assert not d3
+os.remove(TMP)
 
 print("All os tests passed.")

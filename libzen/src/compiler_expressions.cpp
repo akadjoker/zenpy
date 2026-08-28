@@ -23,7 +23,36 @@ namespace zen
     ** Pratt parser: precedence climbing
     ** ========================================================= */
 
+    /* All expression recursion funnels through here — nested parens,
+    ** brackets, braces, calls, everything. One depth guard at the funnel
+    ** turns what was a C stack overflow (SIGSEGV) into a clean compile
+    ** error. 200 is far beyond hand-written code and far below the stack:
+    ** the wasm build crashed at ~6000 frames on an 8MB stack. */
+    static constexpr int kMaxExprDepth = 200;
+
     int Compiler::parse_precedence(int prec, int dest)
+    {
+        /* Once an error is raised, do not descend again. Several literals
+        ** (map/set, comprehensions) roll the lexer back and re-parse the
+        ** first sub-expression a different way; on malformed input that
+        ** retry, driven off a failed parse, is what turned `{{{{...` into an
+        ** exponential/endless reparse. Bailing here stops it — the compiler
+        ** discards the result on had_error_ regardless. */
+        if (panic_mode_ || abort_parse_)
+            return dest >= 0 ? dest : alloc_reg();
+        if (++expr_depth_ > kMaxExprDepth)
+        {
+            expr_depth_--;
+            error("Expression nested too deeply.");
+            abort_parse_ = true; /* unrecoverable: stop the whole parse */
+            return dest >= 0 ? dest : alloc_reg();
+        }
+        int reg = parse_precedence_inner(prec, dest);
+        expr_depth_--;
+        return reg;
+    }
+
+    int Compiler::parse_precedence_inner(int prec, int dest)
     {
         advance();
         Token token = previous_;

@@ -19,6 +19,7 @@ namespace zen
 
     ObjFunc *Compiler::compile(GC *gc, VM *vm, const char *source, const char *filename)
     {
+        expr_depth_ = 0;
         gc_ = gc;
         vm_ = vm;
 

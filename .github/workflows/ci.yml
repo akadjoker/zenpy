@@ -1,0 +1,212 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------- desktop --
+  linux:
+    name: linux-${{ matrix.cc }}-${{ matrix.build_type }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { cc: gcc,   cxx: g++,     build_type: Release }
+          - { cc: gcc,   cxx: g++,     build_type: Debug }
+          - { cc: clang, cxx: clang++, build_type: Debug }
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DCMAKE_C_COMPILER=${{ matrix.cc }} \
+            -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ./run_tests.sh
+      - name: Inspect binary
+        run: file bin/zen
+      - uses: actions/upload-artifact@v4
+        if: matrix.cc == 'gcc' && matrix.build_type == 'Release'
+        with:
+          name: zen-linux-x86_64
+          path: bin/zen
+
+  macos:
+    name: macos-arm64
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install ninja
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ./run_tests.sh
+      - name: Inspect binary
+        run: file bin/zen
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zen-macos-arm64
+          path: bin/zen
+
+  # ---------------------------------------------------------------- windows --
+  windows-msvc:
+    name: windows-msvc-x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -A x64
+      - name: Build
+        run: cmake --build build --config Release
+      - name: Test
+        shell: bash
+        run: ZEN=./bin/zen.exe EMBED=./bin/test_embedding.exe ./run_tests.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zen-windows-msvc-x64
+          path: bin/zen.exe
+
+  windows-mingw:
+    name: windows-mingw-x64 (cross)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build g++-mingw-w64-x86-64
+      - name: Cross-configure
+        run: |
+          cmake -S . -B build-mingw -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_SYSTEM_NAME=Windows \
+            -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc \
+            -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++ \
+            -DZEN_BIN_DIR=${{ github.workspace }}/out
+      - name: Build
+        run: cmake --build build-mingw
+      - name: Verify it is a Windows binary
+        run: |
+          file out/zen.exe
+          file out/zen.exe | grep -q 'PE32+ executable' \
+            || { echo "::error::zen.exe is not a PE32+ Windows binary"; exit 1; }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zen-windows-mingw-x64
+          path: out/zen.exe
+
+  # -------------------------------------------------------------------- web --
+  web:
+    name: web-wasm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: latest
+          actions-cache-folder: emsdk-cache
+      - name: Configure
+        run: |
+          emcmake cmake -S . -B build-web -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DZEN_BIN_DIR=${{ github.workspace }}/out
+      - name: Build
+        run: cmake --build build-web
+      - name: Verify the wasm output
+        run: |
+          ls -la out
+          test -f out/zen.js && test -f out/zen.wasm
+          file out/zen.wasm
+          file out/zen.wasm | grep -q 'WebAssembly' \
+            || { echo "::error::zen.wasm is not a WebAssembly binary"; exit 1; }
+      - name: Test under node
+        run: ZEN=./out/zen.js EMBED=./out/test_embedding.js ZEN_RUNNER=node ./run_tests.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zen-web-wasm
+          path: |
+            out/zen.js
+            out/zen.wasm
+
+  # ----------------------------------------------------------------- mobile --
+  android:
+    name: android-${{ matrix.abi }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { abi: arm64-v8a,   expect: 'ARM aarch64' }
+          - { abi: armeabi-v7a, expect: 'ARM, EABI5' }
+          - { abi: x86_64,      expect: 'x86-64' }
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Configure
+        run: |
+          cmake -S . -B build-android -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=${{ matrix.abi }} \
+            -DANDROID_PLATFORM=android-24 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DZEN_BIN_DIR=${{ github.workspace }}/out
+      - name: Build
+        run: cmake --build build-android
+      - name: Verify the binary targets ${{ matrix.abi }}
+        run: |
+          file out/zen build-android/libzen/libzen.a
+          file out/zen | grep -q '${{ matrix.expect }}' \
+            || { echo "::error::zen is not a ${{ matrix.abi }} binary"; exit 1; }
+      - name: Stage artifacts
+        run: cp build-android/libzen/libzen.a out/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zen-android-${{ matrix.abi }}
+          path: |
+            out/zen
+            out/libzen.a
+
+  # ---------------------------------------------------- cross-platform gate --
+  cross-check:
+    name: cross-platform binaries
+    needs: [linux, macos, windows-msvc, windows-mingw, web, android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Report every produced binary
+        run: find artifacts -type f -exec file {} \;
+      - name: Require one binary per target platform
+        run: |
+          missing=0
+          for expected in \
+            artifacts/zen-linux-x86_64/zen \
+            artifacts/zen-macos-arm64/zen \
+            artifacts/zen-windows-msvc-x64/zen.exe \
+            artifacts/zen-windows-mingw-x64/zen.exe \
+            artifacts/zen-web-wasm/zen.wasm \
+            artifacts/zen-android-arm64-v8a/zen \
+            artifacts/zen-android-armeabi-v7a/zen \
+            artifacts/zen-android-x86_64/zen
+          do
+            if [ -f "$expected" ]; then
+              echo "ok      $expected"
+            else
+              echo "MISSING $expected"
+              missing=1
+            fi
+          done
+          exit $missing

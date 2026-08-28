@@ -1,0 +1,36 @@
+
+/build
+/build_rel
+/build_release
+/build_asan
+/build_baseline
+/build_*/
+/build-web/
+/build-android/
+/build-mingw/
+/out/
+/emsdk-cache/
+/build-builder/
+/dist/
+/bin/web/
+/bin/android/
+/builder/bin/
+__pycache__/
+*.pyc
+/study
+/tmp
+bin/zen_runner
+bin/zengame
+bin/zen_editor
+bin/zen_gl
+bin/zen
+bin/test_embedding
+bin/zen_*
+
+# Ignorar tudo dentro de bin/
+#bin/*
+
+# Mas não ignorar a pasta bin/projects
+
+# Não ignorar arquivos de configuração 
+!bin/zen_editor.json

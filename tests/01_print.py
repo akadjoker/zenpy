@@ -1,0 +1,5 @@
+print(42)
+print(1 + 2)
+print(10 * 5)
+print(100 - 37)
+print(15 / 3)

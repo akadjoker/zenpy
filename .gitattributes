@@ -1,0 +1,2 @@
+# Keep every checkout LF — the Windows CI job runs run_tests.sh under bash.
+* text=auto eol=lf

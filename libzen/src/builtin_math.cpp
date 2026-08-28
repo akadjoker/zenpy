@@ -12,6 +12,7 @@
 #include "vm.h"
 #include "memory.h"
 #include <cmath>
+#include <limits>
 #include <cstdlib>
 
 namespace zen
@@ -324,8 +325,10 @@ namespace zen
         math_constants[0] = {"pi", val_float(3.14159265358979323846)};
         math_constants[1] = {"e", val_float(2.71828182845904523536)};
         math_constants[2] = {"tau", val_float(6.28318530717958647692)};
-        math_constants[3] = {"inf", val_float(1.0 / 0.0)};
-        math_constants[4] = {"nan", val_float(0.0 / 0.0)};
+        /* MSVC rejects a literal 1.0/0.0 outright (C2124) — take inf and nan
+        ** from <limits> instead of relying on the GCC/Clang extension. */
+        math_constants[3] = {"inf", val_float(std::numeric_limits<double>::infinity())};
+        math_constants[4] = {"nan", val_float(std::numeric_limits<double>::quiet_NaN())};
         math_constants_inited = true;
     }
 

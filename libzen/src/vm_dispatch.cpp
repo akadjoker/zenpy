@@ -638,6 +638,8 @@ namespace zen
             &&lbl_OP_HALT,
             &&lbl_OP_IMPORT,
             &&lbl_OP_CLASSFIELDDEF,
+            &&lbl_OP_GETGLOBAL_AUG,
+            &&lbl_OP_SETGLOBAL_AUG,
         };
 
 #define DISPATCH() goto *dispatch_table[ZEN_OP(*ip)]
@@ -722,7 +724,14 @@ namespace zen
         CASE(OP_GETGLOBAL)
         {
             uint32_t i = *ip;
-            R[ZEN_A(i)] = globals_[ZEN_BX(i)];
+            Value v = globals_[ZEN_BX(i)];
+            /* A string read into a register can outlive this frame's view of
+            ** it (locals, other frames) — mark it shared so in-place append
+            ** never mutates something a register still holds. The AUG pair
+            ** below is the one read that legitimately skips this. */
+            if (__builtin_expect(is_string(v) && is_obj(v), 0))
+                v.as.obj->flags |= OBJ_FLAG_SHARED;
+            R[ZEN_A(i)] = v;
             NEXT();
         }
 
@@ -733,6 +742,24 @@ namespace zen
             if (__builtin_expect(is_string(v), 0))
                 v.as.obj->flags |= OBJ_FLAG_SHARED;
             globals_[ZEN_BX(i)] = v;
+            NEXT();
+        }
+
+        /* --- Augmented assignment on a global: the non-marking pair.
+        ** See opcodes.h. The value loaded lands in a compiler temp that no
+        ** closure can capture, and the store rewrites the very slot the load
+        ** came from. --- */
+        CASE(OP_GETGLOBAL_AUG)
+        {
+            uint32_t i = *ip;
+            R[ZEN_A(i)] = globals_[ZEN_BX(i)];
+            NEXT();
+        }
+
+        CASE(OP_SETGLOBAL_AUG)
+        {
+            uint32_t i = *ip;
+            globals_[ZEN_BX(i)] = R[ZEN_A(i)];
             NEXT();
         }
 
@@ -794,9 +821,16 @@ namespace zen
                                     chk(*slot, "frame_reg", fi * 1000 + ri);
                                 }
                             }
-                            /* Globals */
+                            /* Globals — except the slot the augmented pair
+                            ** is about to rewrite: it legitimately holds the
+                            ** string while g += x runs. */
+                            int aug_slot = -1;
+                            if (ZEN_OP(ip[1]) == OP_SETGLOBAL_AUG &&
+                                ZEN_A(ip[1]) == ZEN_A(i))
+                                aug_slot = (int)ZEN_BX(ip[1]);
                             for (int gi = 0; gi < num_globals_; gi++)
-                                chk(globals_[gi], "global", gi);
+                                if (gi != aug_slot)
+                                    chk(globals_[gi], "global", gi);
                             /* Open upvalues */
                             for (ObjUpvalue *uv = fiber->open_upvalues; uv; uv = uv->next) {
                                 if (uv->location != &R[ZEN_A(i)])
@@ -3704,7 +3738,6 @@ namespace zen
             klass->field_defaults[field_idx] = K[ZEN_C(i)];
             NEXT();
         }
-
         /* --- Misc --- */
         CASE(OP_CONCAT)
         {

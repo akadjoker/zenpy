@@ -208,6 +208,7 @@ namespace zen
         /* --- Expressions (Pratt parser) --- */
         int expression(int dest = -1);
         int parse_precedence(int prec, int dest);
+        int parse_precedence_inner(int prec, int dest);
         int prefix_rule(Token token, int dest);
         int infix_rule(Token op, int left, int dest);
         int number(Token token, int dest);
@@ -283,6 +284,9 @@ namespace zen
         CompilerState *state_;  /* current function state */
         bool had_error_;
         bool panic_mode_;
+        /* Expression nesting depth — the recursive-descent parser otherwise
+        ** turns `((((...` into a C stack overflow. See parse_precedence. */
+        int expr_depth_ = 0;
         bool silent_;          /* suppress error output (for try-compile) */
         int error_count_;      /* number of reported compile errors */
         bool abort_parse_;     /* stop parsing early after too many errors */

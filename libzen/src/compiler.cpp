@@ -19,6 +19,7 @@ namespace zen
 
     ObjFunc *Compiler::compile(GC *gc, VM *vm, const char *source, const char *filename)
     {
+        expr_depth_ = 0;
         gc_ = gc;
         vm_ = vm;
 
@@ -700,7 +701,9 @@ namespace zen
         {
             Token op = current_;
             advance();
-            state_->emitter.emit_abx(OP_GETGLOBAL, r, gidx, previous_.line);
+            /* Non-marking pair: keeps a global string accumulator unshared
+            ** so ADD can append in place — see OP_GETGLOBAL_AUG. */
+            state_->emitter.emit_abx(OP_GETGLOBAL_AUG, r, gidx, previous_.line);
             int rhs = expression(-1);
             OpCode arith = OP_ADD;
             switch (op.type)
@@ -716,7 +719,7 @@ namespace zen
             }
             state_->emitter.emit_abc(arith, r, r, rhs, previous_.line);
             free_reg(rhs);
-            state_->emitter.emit_abx(OP_SETGLOBAL, r, gidx, previous_.line);
+            state_->emitter.emit_abx(OP_SETGLOBAL_AUG, r, gidx, previous_.line);
             return r;
         }
 

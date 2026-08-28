@@ -135,6 +135,9 @@ namespace zen
         obj->type = type;
         obj->color = GC_BLACK; /* born BLACK: survives current GC cycle */
         obj->interned = 0;
+        /* The arena recycles blocks without zeroing — a stale OBJ_FLAG_SHARED
+        ** here would silently pessimize string appends forever. */
+        obj->flags = 0;
         obj->hash = 0;
         obj->gc_next = gc->objects;
         gc->objects = obj;
@@ -298,6 +301,7 @@ namespace zen
         str->obj.type = OBJ_STRING;
         str->obj.color = GC_BLACK;
         str->obj.interned = 0;
+        str->obj.flags = 0;
         str->obj.hash = 0;
         str->obj.gc_next = gc->objects;
         gc->objects = (Obj *)str;

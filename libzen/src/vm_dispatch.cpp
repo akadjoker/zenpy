@@ -644,17 +644,22 @@ namespace zen
 #else
 
 /* --- Switch (portável) --- */
-#define DISPATCH() continue
+/* goto, not continue: NEXT() expands inside a do{...}while(0), where a
+** continue leaves the do-while instead of the dispatch loop and drops into
+** the next case — every opcode would run the one after it. A goto also
+** survives the for/while a handler opens around its own NEXT(). */
+#define DISPATCH() goto zen_dispatch_top
 #define CASE(op) case op:
-#define NEXT()    \
-    do            \
-    {             \
-        ++ip;     \
-        continue; \
+#define NEXT()                 \
+    do                         \
+    {                          \
+        ++ip;                  \
+        goto zen_dispatch_top; \
     } while (0)
 
         for (;;)
         {
+        zen_dispatch_top:
 
 #define SWITCH_TOP       \
     switch (ZEN_OP(*ip)) \

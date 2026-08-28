@@ -161,6 +161,17 @@ namespace zen
         ** last on purpose: the opcode numbering is part of the bytecode
         ** format, so existing ones must keep their values. */
         OP_CLASSFIELDDEF,
+        /* The augmented-assignment pair for globals: g += expr compiles to
+        ** GETGLOBAL_AUG r / <rhs> / ADD r,r,rhs / SETGLOBAL_AUG r. Neither
+        ** marks OBJ_FLAG_SHARED, so a global string accumulator stays
+        ** unshared and ADD's in-place append applies — the difference
+        ** between O(n) and O(n²) for `s += "x"` at top level. Sound because
+        ** every OTHER route a global takes into a register or slot does
+        ** mark: plain GETGLOBAL, SETGLOBAL, call arguments, yields, pushes.
+        ** An unshared global string therefore has exactly one holder — the
+        ** slot this pair reads and rewrites. */
+        OP_GETGLOBAL_AUG,
+        OP_SETGLOBAL_AUG,
     };
 
 /* Encode/Decode — ABC format */

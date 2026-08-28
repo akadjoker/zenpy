@@ -3,6 +3,6 @@ m = {}
 for i in range(100000):
     m[i] = i * 2
 total = 0
-for k in m:
+for k in m.keys():
     total = total + m[k]
 print("map done, total:", total)

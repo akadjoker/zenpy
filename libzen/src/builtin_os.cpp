@@ -112,7 +112,7 @@ namespace zen
             const char *name = find_data.cFileName;
             if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
                 continue;
-            *name_root = val_obj((Obj *)vm->make_string(name));
+            *name_root = val_obj((Obj *)create_string(gc, name, (int)strlen(name)));
             array_push(gc, arr, *name_root);
         } while (FindNextFileA(handle, &find_data));
         FindClose(handle);
@@ -122,7 +122,7 @@ namespace zen
         {
             if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
                 continue;
-            *name_root = val_obj((Obj *)vm->make_string(ent->d_name));
+            *name_root = val_obj((Obj *)create_string(gc, ent->d_name, (int)strlen(ent->d_name)));
             array_push(gc, arr, *name_root);
         }
         closedir(d);

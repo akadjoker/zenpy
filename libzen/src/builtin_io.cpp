@@ -402,7 +402,9 @@ namespace zen
             if (!nl) nl = e;
             int len = (int)(nl - p);
             if (len > 0 && p[len - 1] == '\r') len--;
-            *line_root = val_obj((Obj *)vm->make_string(p, len));
+            /* Unique lines: interning would grow the table with entries
+            ** nothing ever looks up again. create_string skips it. */
+            *line_root = val_obj((Obj *)create_string(gc, p, len));
             array_push(gc, arr, *line_root);
             p = nl + 1;
         }

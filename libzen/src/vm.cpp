@@ -487,7 +487,15 @@ namespace zen
     Value VM::get_global(const char *name) const
     {
         int idx = find_global(name);
-        return idx >= 0 ? globals_[idx] : val_nil();
+        if (idx < 0)
+            return val_nil();
+        Value v = globals_[idx];
+        /* The embedder now holds a reference the VM cannot see. Mark string
+        ** globals shared so the augmented-assign fast path never mutates a
+        ** string a C++ caller kept — same rule OP_GETGLOBAL applies. */
+        if (is_string(v) && is_obj(v))
+            v.as.obj->flags |= OBJ_FLAG_SHARED;
+        return v;
     }
 
     void VM::set_global(const char *name, Value val)

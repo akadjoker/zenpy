@@ -60,6 +60,20 @@ jobs:
       - name: Test
         run: bash ./run_tests.sh --verbose
 
+  # The embedder hook Kinetix2D and the other hosts build against.
+  linux-host-output:
+    name: linux-host-output
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DZEN_HOST_OUTPUT=ON
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: bash ./run_tests.sh --verbose
+
   macos:
     name: macos-arm64
     runs-on: macos-latest
@@ -198,7 +212,7 @@ jobs:
   # ---------------------------------------------------- cross-platform gate --
   cross-check:
     name: cross-platform binaries
-    needs: [linux, linux-switch-dispatch, macos, windows-msvc, windows-mingw, web, android]
+    needs: [linux, linux-switch-dispatch, linux-host-output, macos, windows-msvc, windows-mingw, web, android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

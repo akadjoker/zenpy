@@ -366,6 +366,24 @@ zen::ClassBuilder(vm, "Vec2")
 
 Script classes can inherit from C++ classes — the VM handles the vtable dispatch.
 
+### Host output
+
+An editor or game host usually wants `print()` and runtime errors in its own
+console rather than on stdout. Build with `-DZEN_HOST_OUTPUT=ON` and register a
+writer:
+
+```cpp
+#include <zen/zen_host_output.h>
+
+zen_host_set_writer([](const char *text, size_t len, int is_error, void *user) {
+    ((Console *)user)->append(text, len, is_error);
+}, &my_console);
+```
+
+The option is off by default, so the CLI keeps writing straight to stdout with
+no indirection. With it on and no writer registered, output still falls back to
+stdout/stderr.
+
 ### Plugins
 
 Shared libraries exporting `zen_open_<name>()` are loaded automatically on `import`:

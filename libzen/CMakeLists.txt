@@ -9,6 +9,14 @@ set(ZEN_VENDOR_INCLUDES "")
 set(ZEN_DEFINITIONS "")
  
  
+# Route print() and runtime errors through a host-supplied writer instead of
+# stdout — see include/zen/zen_host_output.h. Off by default: no indirection,
+# no behaviour change for the CLI.
+option(ZEN_HOST_OUTPUT "Route script output through a host writer hook" OFF)
+if(ZEN_HOST_OUTPUT)
+    list(APPEND ZEN_DEFINITIONS ZEN_HOST_OUTPUT)
+endif()
+
 # Core library sources
 file(GLOB CORE_SRCS CONFIGURE_DEPENDS src/*.cpp)
 

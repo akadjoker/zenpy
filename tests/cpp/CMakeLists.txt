@@ -20,3 +20,13 @@ if(EMSCRIPTEN)
         -sEXIT_RUNTIME=1
         -sSTACK_SIZE=8388608)
 endif()
+
+# --- Host output hook (only meaningful with the option on) ---
+if(ZEN_HOST_OUTPUT)
+    add_executable(test_host_output test_host_output.cpp)
+    set_target_properties(test_host_output PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${ZEN_BIN_DIR})
+    foreach(cfg DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+        set_target_properties(test_host_output PROPERTIES RUNTIME_OUTPUT_DIRECTORY_${cfg} ${ZEN_BIN_DIR})
+    endforeach()
+    target_link_libraries(test_host_output zen_static)
+endif()

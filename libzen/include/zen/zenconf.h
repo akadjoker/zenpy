@@ -12,6 +12,13 @@
 #include <cstdio>
 #include <cstddef>
 
+/* --- Embedder hook ---
+** With -DZEN_HOST_OUTPUT the host owns every zen_write*; the guards below then
+** find them already defined and leave the platform defaults alone. */
+#if defined(ZEN_HOST_OUTPUT)
+  #include "zen_host_output.h"
+#endif
+
 /* --- Output: write raw bytes --- */
 #if !defined(zen_write)
   #if defined(__ANDROID__)

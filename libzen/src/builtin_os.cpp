@@ -146,9 +146,20 @@ namespace zen
             vm->runtime_error("os.remove: expected string path");
             return -1;
         }
-        if (::remove(as_cstring(args[0])) != 0)
+        const char *path = as_cstring(args[0]);
+#if defined(_WIN32)
+        /* glibc's remove() unlinks files and rmdir's directories; MSVCRT's
+        ** refuses directories outright. Keep both platforms behaving alike. */
+        const DWORD attributes = GetFileAttributesA(path);
+        const bool is_dir = attributes != INVALID_FILE_ATTRIBUTES &&
+                            (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        const bool ok = is_dir ? RemoveDirectoryA(path) != 0 : ::remove(path) == 0;
+#else
+        const bool ok = ::remove(path) == 0;
+#endif
+        if (!ok)
         {
-            vm->runtime_error("os.remove: cannot remove '%s'", as_cstring(args[0]));
+            vm->runtime_error("os.remove: cannot remove '%s'", path);
             return -1;
         }
         return 0;

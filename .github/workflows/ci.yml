@@ -133,7 +133,7 @@ jobs:
         run: cmake --build build --config Release
       - name: Test
         shell: bash
-        run: ZEN=./bin/zen.exe EMBED=./bin/test_embedding.exe bash ./run_tests.sh --verbose
+        run: ZEN=./bin/zen.exe EMBED=./bin/test_embedding.exe INFO=./bin/test_script_info.exe bash ./run_tests.sh --verbose
       - uses: actions/upload-artifact@v4
         with:
           name: zen-windows-msvc-x64
@@ -191,7 +191,7 @@ jobs:
           file out/zen.wasm | grep -q 'WebAssembly' \
             || { echo "::error::zen.wasm is not a WebAssembly binary"; exit 1; }
       - name: Test under node
-        run: ZEN=./out/zen.js EMBED=./out/test_embedding.js ZEN_RUNNER=node bash ./run_tests.sh --verbose
+        run: ZEN=./out/zen.js EMBED=./out/test_embedding.js INFO=./out/test_script_info.js ZEN_RUNNER=node bash ./run_tests.sh --verbose
       - uses: actions/upload-artifact@v4
         with:
           name: zen-web-wasm

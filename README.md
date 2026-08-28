@@ -366,6 +366,21 @@ zen::ClassBuilder(vm, "Vec2")
 
 Script classes can inherit from C++ classes — the VM handles the vtable dispatch.
 
+### Trimming modules
+
+A host that does not ship a module can leave it out of the build instead of
+maintaining its own source list:
+
+```bash
+cmake -B build -DZEN_MODULE_NUMPY=OFF -DZEN_MODULE_NET=OFF -DZEN_MODULE_HTTP=OFF
+```
+
+Options exist for `math`, `time`, `struct`, `numpy`, `io`, `os`, `path`, `json`,
+`net` and `http`, all `ON` by default (`base` is opened as globals, not
+imported, so it is always in). Imports resolve through a runtime registry, so a
+module that was not compiled is simply one nothing can register — `import numpy`
+then fails with `module 'numpy' not found` rather than failing to link.
+
 ### Host output
 
 An editor or game host usually wants `print()` and runtime errors in its own
@@ -406,6 +421,26 @@ g++ -shared -fPIC -o myplugin.so myplugin.cpp -Ilibzen/include/zen
 import myplugin
 myplugin.hello()
 ```
+
+## Using zen as a submodule
+
+This repository is the single source of truth for the VM. Projects consume it
+whole and build the library out of it:
+
+```bash
+git submodule add https://github.com/akadjoker/zenpy.git external/zen
+```
+
+```cmake
+set(ZEN_HOST_OUTPUT ON CACHE BOOL "" FORCE)   # optional, see above
+set(ZEN_MODULE_NUMPY OFF CACHE BOOL "" FORCE) # optional, see above
+add_subdirectory(external/zen/libzen)
+target_link_libraries(my_target PRIVATE zen_static)
+```
+
+`libzen/CMakeLists.txt` builds only the library — the CLI, tests and CI live in
+the root `CMakeLists.txt` and are not pulled in. Fixes belong here first; a
+project should never patch its checkout of the submodule.
 
 ## Architecture
 

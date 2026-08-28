@@ -74,6 +74,34 @@ jobs:
       - name: Test
         run: bash ./run_tests.sh --verbose
 
+  # A host that trims modules it does not ship must still link and run — this is
+  # the shape Radion builds. Keeping it in CI means adding a builtin_*.cpp
+  # upstream cannot quietly break the trimmed builds.
+  linux-trimmed-modules:
+    name: linux-trimmed-modules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Configure without numpy, net and http
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DZEN_MODULE_NUMPY=OFF -DZEN_MODULE_NET=OFF -DZEN_MODULE_HTTP=OFF
+      - name: Build
+        run: cmake --build build
+      - name: The trimmed binary runs, and the dropped modules are gone
+        run: |
+          ./bin/zen -e 'import math'
+          ./bin/zen -e 'import numpy' 2>&1 | grep -q "module 'numpy' not found"
+          ./bin/zen -e 'import net'   2>&1 | grep -q "module 'net' not found"
+          ./bin/zen -e 'import http'  2>&1 | grep -q "module 'http' not found"
+      - name: The suite still passes for what is left
+        run: |
+          for t in tests/[0-9]*.py; do
+            case "$t" in *26_numpy*|*33_net*|*34_http*) continue ;; esac
+            ./bin/zen "$t" > /dev/null || { echo "::error::$t failed"; exit 1; }
+          done
+
   macos:
     name: macos-arm64
     runs-on: macos-latest
@@ -212,7 +240,7 @@ jobs:
   # ---------------------------------------------------- cross-platform gate --
   cross-check:
     name: cross-platform binaries
-    needs: [linux, linux-switch-dispatch, linux-host-output, macos, windows-msvc, windows-mingw, web, android]
+    needs: [linux, linux-switch-dispatch, linux-host-output, linux-trimmed-modules, macos, windows-msvc, windows-mingw, web, android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

@@ -69,17 +69,38 @@ static void register_default_libs(VM &vm)
 {
     vm.open_lib_globals(&zen_lib_base); /* always available */
 
-    /* Core modules — available via 'import <name>' */
+    /* Core modules — available via 'import <name>'. A module the build
+    ** left out (-DZEN_MODULE_<NAME>=OFF) has no zen_lib_<name> to link. */
+#ifndef ZEN_NO_MODULE_MATH
     vm.register_lib(&zen_lib_math);
+#endif
+#ifndef ZEN_NO_MODULE_TIME
     vm.register_lib(&zen_lib_time);
+#endif
+#ifndef ZEN_NO_MODULE_STRUCT
     vm.register_lib(&zen_lib_struct);
+#endif
+#ifndef ZEN_NO_MODULE_NUMPY
     vm.register_lib(&zen_lib_numpy);
+#endif
+#ifndef ZEN_NO_MODULE_IO
     vm.register_lib(&zen_lib_io);
+#endif
+#ifndef ZEN_NO_MODULE_OS
     vm.register_lib(&zen_lib_os);
+#endif
+#ifndef ZEN_NO_MODULE_PATH
     vm.register_lib(&zen_lib_path);
+#endif
+#ifndef ZEN_NO_MODULE_JSON
     vm.register_lib(&zen_lib_json);
+#endif
+#ifndef ZEN_NO_MODULE_NET
     vm.register_lib(&zen_lib_net);
+#endif
+#ifndef ZEN_NO_MODULE_HTTP
     vm.register_lib(&zen_lib_http);
+#endif
 
     for (int i = 0; i < g_num_search_paths; i++)
         vm.add_search_path(g_search_paths[i]);

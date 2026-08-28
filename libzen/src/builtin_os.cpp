@@ -90,16 +90,30 @@ namespace zen
             return -1;
         }
 #endif
+        /* GC_SAFE: root the array through the args window right away (path
+        ** was consumed above), and give the string in flight one reusable
+        ** root slot — array_push may allocate before storing it. */
         GC *gc = &vm->get_gc();
         ObjArray *arr = new_array(gc);
+        args[0] = val_obj((Obj *)arr);
+        Value *name_root = vm->root(val_nil());
+        if (!name_root)
+        {
+#if defined(_WIN32)
+            FindClose(handle);
+#else
+            closedir(d);
+#endif
+            return -1;
+        }
 #if defined(_WIN32)
         do
         {
             const char *name = find_data.cFileName;
             if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
                 continue;
-            ObjString *s = vm->make_string(name);
-            array_push(gc, arr, val_obj((Obj *)s));
+            *name_root = val_obj((Obj *)vm->make_string(name));
+            array_push(gc, arr, *name_root);
         } while (FindNextFileA(handle, &find_data));
         FindClose(handle);
 #else
@@ -108,12 +122,11 @@ namespace zen
         {
             if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
                 continue;
-            ObjString *s = vm->make_string(ent->d_name);
-            array_push(gc, arr, val_obj((Obj *)s));
+            *name_root = val_obj((Obj *)vm->make_string(ent->d_name));
+            array_push(gc, arr, *name_root);
         }
         closedir(d);
 #endif
-        args[0] = val_obj((Obj *)arr);
         return 1;
     }
 
@@ -255,7 +268,7 @@ namespace zen
     static const NativeReg os_functions[] = {
         {"getcwd",  nat_getcwd,  0},
         {"chdir",   nat_chdir,   1},
-        {"listdir", nat_listdir, 1},
+        {"listdir", nat_listdir, 1, ZEN_NATIVE_GC_SAFE},
         {"mkdir",   nat_mkdir,   1},
         {"remove",  nat_remove,  1},
         {"rename",  nat_rename,  2},

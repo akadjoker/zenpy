@@ -307,6 +307,19 @@ namespace zen
         main_fiber_->state = FIBER_RUNNING;
     }
 
+    Value *VM::root(Value v)
+    {
+        ObjFiber *f = current_fiber_;
+        if (f->stack_top >= f->stack + f->stack_capacity)
+        {
+            runtime_error("native root overflow: fiber stack is full");
+            return nullptr;
+        }
+        Value *slot = f->stack_top++;
+        *slot = v;
+        return slot;
+    }
+
     Value VM::call_global(int idx, Value *args, int nargs)
     {
         had_error_ = false;
@@ -527,11 +540,11 @@ namespace zen
         return idx;
     }
 
-    int VM::def_native(const char *name, NativeFn fn, int arity)
+    int VM::def_native(const char *name, NativeFn fn, int arity, int flags)
     {
         ObjString *s = intern_string(&gc_, name, (int)strlen(name),
                                      hash_string(name, (int)strlen(name)));
-        ObjNative *nat = new_native(&gc_, fn, arity, s);
+        ObjNative *nat = new_native(&gc_, fn, arity, s, flags);
         return def_global(name, val_obj((Obj *)nat));
     }
 
@@ -594,7 +607,8 @@ namespace zen
                 return base;
             int idx = num_globals_++;
             ObjString *s = intern_string(&gc_, global_name, nlen, hash_string(global_name, nlen));
-            ObjNative *nat = new_native(&gc_, lib->functions[i].fn, lib->functions[i].arity, s);
+            ObjNative *nat = new_native(&gc_, lib->functions[i].fn, lib->functions[i].arity, s,
+                                        lib->functions[i].flags);
             global_names_[idx] = s;
             globals_[idx] = val_obj((Obj *)nat);
         }
@@ -666,7 +680,8 @@ namespace zen
                             ObjString *s = intern_string(&gc_, name, name_len,
                                                          hash_string(name, name_len));
                             ObjNative *nat = new_native(&gc_, lib->functions[fi].fn,
-                                                        lib->functions[fi].arity, s);
+                                                        lib->functions[fi].arity, s,
+                                                        lib->functions[fi].flags);
                             globals_[i] = val_obj((Obj *)nat);
                             found = true;
                             break;
@@ -704,7 +719,8 @@ namespace zen
                             ObjString *s = intern_string(&gc_, name, name_len,
                                                          hash_string(name, name_len));
                             ObjNative *nat = new_native(&gc_, lib->functions[fi].fn,
-                                                        lib->functions[fi].arity, s);
+                                                        lib->functions[fi].arity, s,
+                                                        lib->functions[fi].flags);
                             globals_[i] = val_obj((Obj *)nat);
                             found = true;
                             break;
@@ -1025,9 +1041,18 @@ namespace zen
             {
                 ObjNative *nat = as_native(callee);
                 Value *args = fiber->stack_top - nargs;
-                gc_pause(&gc_);
+                /* GC-safe natives run with the collector live — anything they
+                ** vm->root() sits above stack_top and gets marked. Everyone
+                ** else keeps the pause. Either way the top is restored, so
+                ** roots die with the call. */
+                Value *saved_top = fiber->stack_top;
+                const bool paused = !(nat->flags & ZEN_NATIVE_GC_SAFE);
+                if (paused)
+                    gc_pause(&gc_);
                 int nret = nat->fn(this, args, nargs);
-                gc_resume(&gc_);
+                if (paused)
+                    gc_resume(&gc_);
+                fiber->stack_top = saved_top;
                 /* Coloca resultado onde estava o callable */
                 fiber->stack_top -= nargs;
                 *(fiber->stack_top - 1) = (nret > 0) ? args[0] : val_nil();

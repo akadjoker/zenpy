@@ -130,7 +130,7 @@ map_key_lookup:
     {
         ObjNative *nat = as_native(callable);
         /* Module functions don't take receiver (no self) */
-        int nret = call_native(this, nat->fn, args, arg_count);
+        int nret = call_native(this, nat, args, arg_count);
         if (nret >= 0)
             copy_native_results(&R[base], args, nret, nresults);
         else

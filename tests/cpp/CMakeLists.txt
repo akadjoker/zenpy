@@ -20,8 +20,16 @@ foreach(cfg DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
 endforeach()
 target_link_libraries(test_script_info zen_static)
 
+# --- GC-safe natives ---
+add_executable(test_gc_native test_gc_native.cpp)
+set_target_properties(test_gc_native PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${ZEN_BIN_DIR})
+foreach(cfg DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+    set_target_properties(test_gc_native PROPERTIES RUNTIME_OUTPUT_DIRECTORY_${cfg} ${ZEN_BIN_DIR})
+endforeach()
+target_link_libraries(test_gc_native zen_static)
+
 if(EMSCRIPTEN)
-    foreach(t test_embedding test_script_info)
+    foreach(t test_embedding test_script_info test_gc_native)
         set_target_properties(${t} PROPERTIES SUFFIX ".js")
         target_link_options(${t} PRIVATE
             -sNODERAWFS=1

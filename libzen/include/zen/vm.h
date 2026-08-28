@@ -126,7 +126,7 @@ namespace zen
         const char *global_name(int idx) const { return global_names_[idx] ? global_names_[idx]->chars : nullptr; }
 
         /* --- Natives --- */
-        int def_native(const char *name, NativeFn fn, int arity);
+        int def_native(const char *name, NativeFn fn, int arity, int flags = 0);
 
         /* --- Module registry --- */
         void register_lib(const NativeLib *lib);  /* make available for import */
@@ -248,6 +248,17 @@ namespace zen
         /* --- GC --- */
         GC &get_gc() { return gc_; }
         ObjFiber *current_fiber() const { return current_fiber_; }
+
+        /* --- GC root for natives (Lua-style) ---
+        ** Copies v into the slot at the current fiber's stack_top and bumps
+        ** it. The GC marks the fiber stack up to stack_top, so the value
+        ** survives any collection a later allocation triggers. The VM resets
+        ** stack_top when the native returns — roots live exactly as long as
+        ** the call, no cleanup in the native. Only meaningful inside a
+        ** ZEN_NATIVE_GC_SAFE native; under the default paused-GC convention
+        ** it is harmless and does nothing useful. Returns the slot, or NULL
+        ** (with a runtime error raised) if the fiber stack is full. */
+        Value *root(Value v);
         void collect();
         void gc_mark_roots(); /* mark all VM roots for GC */
 

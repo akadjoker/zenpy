@@ -9,11 +9,24 @@ namespace zen
 
     typedef int (*NativeFn)(VM *vm, Value *args, int nargs);
 
+    /* Native flags. GC_SAFE promises the function roots every allocation it
+    ** must keep (vm->root(v), or storing into an already-reachable object)
+    ** before the next allocation. The VM then leaves the GC running while the
+    ** function executes, instead of pausing it for the whole call — see
+    ** call_native in vm_dispatch.cpp. Applies to script-made calls, whose
+    ** argument window lives on the marked fiber stack; C++-side invoke()
+    ** paths keep the pause (their arg window is a C array the GC never sees). */
+    enum NativeFlags
+    {
+        ZEN_NATIVE_GC_SAFE = 1,
+    };
+
     struct NativeReg
     {
         const char *name;
         NativeFn fn;
         int arity; /* -1 = variadic */
+        int flags; /* NativeFlags; brace-inits without it read as 0 */
     };
 
     struct NativeConst

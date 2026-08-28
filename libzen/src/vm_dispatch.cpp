@@ -20,14 +20,24 @@ namespace zen
             dst[j] = val_nil();
     }
 
-    /* Call a native function with GC paused — natives may do multi-step
-       allocations (new_array + push, new_map + set, etc.) that must not
-       be interrupted by a collection. */
-    static inline int call_native(VM *vm, NativeFn fn, Value *args, int nargs)
+    /* Call a native function. The default convention pauses the GC for the
+       whole call — natives do multi-step allocations (new_array + push,
+       new_map + set, ...) holding intermediates only in C locals, which the
+       collector cannot see. A ZEN_NATIVE_GC_SAFE native instead promises to
+       vm->root() everything it must keep before the next allocation, so the
+       GC stays live while it runs. Roots land above stack_top on the marked
+       fiber stack; restoring the top afterwards frees them all at once. */
+    static inline int call_native(VM *vm, ObjNative *nat, Value *args, int nargs)
     {
-        gc_pause(&vm->get_gc());
-        int ret = fn(vm, args, nargs);
-        gc_resume(&vm->get_gc());
+        ObjFiber *fiber = vm->current_fiber();
+        Value *saved_top = fiber->stack_top;
+        const bool paused = !(nat->flags & ZEN_NATIVE_GC_SAFE);
+        if (paused)
+            gc_pause(&vm->get_gc());
+        int ret = nat->fn(vm, args, nargs);
+        if (paused)
+            gc_resume(&vm->get_gc());
+        fiber->stack_top = saved_top;
         return ret;
     }
 
@@ -1813,7 +1823,7 @@ namespace zen
             if (is_native(callee))
             {
                 ObjNative *nat = as_native(callee);
-                int nret = call_native(this, nat->fn, &R[a + 1], nargs);
+                int nret = call_native(this, nat, &R[a + 1], nargs);
                 if (had_error_)
                     return;
                 copy_native_results(&R[a], &R[a + 1], nret, nresults);
@@ -1910,7 +1920,7 @@ namespace zen
                 {
                     /* Native __init__ — call it directly with self at R[a] */
                     ObjNative *nat = as_native(init_method);
-                    call_native(this, nat->fn, &R[a + 1], nargs);
+                    call_native(this, nat, &R[a + 1], nargs);
                     if (had_error_)
                         return;
                     /* Result is still R[a] = the instance */
@@ -2027,7 +2037,7 @@ namespace zen
             if (is_native(callee))
             {
                 ObjNative *nat = as_native(callee);
-                int nret = call_native(this, nat->fn, &R[a + 1], nargs);
+                int nret = call_native(this, nat, &R[a + 1], nargs);
                 if (had_error_)
                     return;
                 copy_native_results(&R[a], &R[a + 1], nret, nresults);
@@ -3360,7 +3370,7 @@ namespace zen
                 {
                     ObjNative *nat = as_native(mval);
                     /* ClassBuilder convention: args[-1]=self, args[0..n-1]=arguments */
-                    int nret = call_native(this, nat->fn, &R[base + 1], arg_count);
+                    int nret = call_native(this, nat, &R[base + 1], arg_count);
                     if (nret >= 0)
                         copy_native_results(&R[base], &R[base + 1], nret, nresults);
                     else
@@ -3424,7 +3434,7 @@ namespace zen
             {
                 ObjNative *nat = as_native(mval);
                 /* ClassBuilder convention: args[-1]=self, args[0..n-1]=arguments */
-                int nret = call_native(this, nat->fn, &R[base + 1], arg_count);
+                int nret = call_native(this, nat, &R[base + 1], arg_count);
                 if (nret > 0)
                     R[base] = R[base + 1];
                 else if (nret == 0)
@@ -3545,7 +3555,7 @@ namespace zen
             {
                 ObjNative *nat = as_native(mval);
                 /* ClassBuilder convention: args[-1]=self, args[0..n-1]=arguments */
-                int nret = call_native(this, nat->fn, &R[base + 1], arg_count);
+                int nret = call_native(this, nat, &R[base + 1], arg_count);
                 if (nret > 0)
                     R[base] = R[base + 1];
                 else if (nret == 0)
@@ -4224,7 +4234,8 @@ namespace zen
                 int flen = (int)strlen(fname);
                 ObjString *key = intern_string(&gc_, fname, flen, hash_string(fname, flen));
                 ObjNative *nat = new_native(&gc_, lib->functions[fi].fn,
-                                            lib->functions[fi].arity, key);
+                                            lib->functions[fi].arity, key,
+                                            lib->functions[fi].flags);
                 map_set(&gc_, as_map(R[dest]), val_obj((Obj *)key), val_obj((Obj *)nat));
             }
             for (int ci = 0; ci < lib->num_constants; ci++)

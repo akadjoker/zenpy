@@ -83,6 +83,7 @@ namespace zen
         gc->gray_count = 0;
         gc->gray_capacity = 0;
         gc->bytes_allocated = 0;
+        gc->collections = 0;
         gc->next_gc = kGCInitThreshold;
         gc->pause_saved_next_gc = kGCInitThreshold;
         gc->pause_depth = 0;
@@ -431,11 +432,12 @@ namespace zen
         return fn;
     }
 
-    ObjNative *new_native(GC *gc, NativeFn fn, int arity, ObjString *name)
+    ObjNative *new_native(GC *gc, NativeFn fn, int arity, ObjString *name, int flags)
     {
         ObjNative *nat = (ObjNative *)alloc_obj(gc, sizeof(ObjNative), OBJ_NATIVE);
         nat->fn = fn;
         nat->arity = arity;
+        nat->flags = flags;
         nat->name = name;
         return nat;
     }
@@ -1995,6 +1997,7 @@ namespace zen
     /* gc_collect — chamado pelo VM quando bytes_allocated > next_gc */
     void gc_collect(VM *vm)
     {
+        vm->get_gc().collections++;
         GC *gc = &vm->get_gc();
 
         /* Prevent re-entrant GC */

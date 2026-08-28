@@ -385,9 +385,15 @@ namespace zen
         if (n < 0) n = 0;
         raw[n] = '\0';
 
+        /* GC_SAFE: the collector stays live in here. The array is rooted
+        ** through the args window (marked fiber stack); each line gets one
+        ** reusable root slot for the gap between make_string and the store —
+        ** array_push can allocate while growing, before the line is inside. */
         GC *gc = &vm->get_gc();
         ObjArray *arr = new_array(gc);
-        args[0] = val_obj((Obj *)arr); /* root array against GC during string creation */
+        args[0] = val_obj((Obj *)arr);
+        Value *line_root = vm->root(val_nil());
+        if (!line_root) { free(raw); return -1; }
         const char *p = raw;
         const char *e = raw + n;
         while (p < e)
@@ -396,8 +402,8 @@ namespace zen
             if (!nl) nl = e;
             int len = (int)(nl - p);
             if (len > 0 && p[len - 1] == '\r') len--;
-            ObjString *line = vm->make_string(p, len);
-            array_push(gc, as_array(args[0]), val_obj((Obj *)line));
+            *line_root = val_obj((Obj *)vm->make_string(p, len));
+            array_push(gc, arr, *line_root);
             p = nl + 1;
         }
         free(raw);
@@ -414,7 +420,7 @@ namespace zen
         {"writebytes", nat_writebytes, 2},
         {"exists",     nat_exists,     1},
         {"size",       nat_size,       1},
-        {"readlines",  nat_readlines,  1},
+        {"readlines",  nat_readlines,  1, ZEN_NATIVE_GC_SAFE},
         {nullptr, nullptr, 0}
     };
 

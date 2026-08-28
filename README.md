@@ -399,6 +399,32 @@ The option is off by default, so the CLI keeps writing straight to stdout with
 no indirection. With it on and no writer registered, output still falls back to
 stdout/stderr.
 
+### GC and natives
+
+By default the VM pauses the GC for the whole native call, so intermediates held
+only in C locals are safe. A native that allocates a lot can opt into running
+with the collector live by registering with `ZEN_NATIVE_GC_SAFE` and rooting
+what it keeps:
+
+```cpp
+static int nat_lines(zen::VM *vm, zen::Value *args, int nargs) {
+    zen::ObjArray *arr = zen::new_array(&vm->get_gc());
+    args[0] = zen::val_obj((zen::Obj *)arr);      // args window is GC-marked
+    zen::Value *tmp = vm->root(zen::val_nil());   // one reusable root slot
+    for (...) {
+        *tmp = zen::val_obj((zen::Obj *)vm->make_string(p, len));
+        zen::array_push(gc, arr, *tmp);           // push may allocate first
+    }
+    return 1;                                     // roots die with the call
+}
+// registration:  {"lines", nat_lines, 1, ZEN_NATIVE_GC_SAFE}
+```
+
+`vm->root(v)` copies v above the fiber's stack_top, which the GC marks; the VM
+resets the top when the native returns, so there is no cleanup. The flag applies
+to script-made calls — C++-side `invoke()` keeps the pause, since its argument
+window is a C array the GC never sees.
+
 ### Plugins
 
 Shared libraries exporting `zen_open_<name>()` are loaded automatically on `import`:

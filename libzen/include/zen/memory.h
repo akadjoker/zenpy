@@ -37,6 +37,7 @@ namespace zen
         Obj **gray_list; /* array dinâmico de gray objects */
 
         size_t bytes_allocated;
+        size_t collections; /* completed GC cycles (diagnostics/tests) */
         size_t next_gc; /* threshold para próximo ciclo */
         size_t pause_saved_next_gc;
         int pause_depth;
@@ -74,7 +75,7 @@ namespace zen
     Value new_string_sso(GC *gc, const char *chars, int length);
     
     ObjFunc *new_func(GC *gc);
-    ObjNative *new_native(GC *gc, NativeFn fn, int arity, ObjString *name);
+    ObjNative *new_native(GC *gc, NativeFn fn, int arity, ObjString *name, int flags = 0);
     ObjArray *new_array(GC *gc);
     ObjMap *new_map(GC *gc);
     ObjClass *new_class(GC *gc, ObjString *name, ObjClass *parent);

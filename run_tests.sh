@@ -163,6 +163,27 @@ if have_info; then
     fi
 fi
 
+# --- GC-safe natives ---
+GCNATIVE="${GCNATIVE:-$ROOT/bin/test_gc_native}"
+if [[ -n "$ZEN_RUNNER" ]]; then have_gcnative() { [[ -f "$GCNATIVE" ]]; }
+else have_gcnative() { [[ -x "$GCNATIVE" ]]; }; fi
+if have_gcnative; then
+    printf "  %-40s" "test_gc_native (C++)"
+    if [[ -n "$ZEN_RUNNER" ]]; then output=$("$ZEN_RUNNER" "$GCNATIVE" 2>&1) && ret=0 || ret=$?
+    else output=$("$GCNATIVE" 2>&1) && ret=0 || ret=$?; fi
+    if [[ $ret -eq 0 ]]; then
+        echo -e "${GREEN}OK${NC}"
+        passed=$((passed + 1))
+    else
+        echo -e "${RED}FAIL${NC} (exit $ret)"
+        failed=$((failed + 1))
+        failures+=("test_gc_native")
+        if [[ "$VERBOSE" == "1" ]]; then
+            echo "$output" | tail -20 | sed 's/^/    /'
+        fi
+    fi
+fi
+
 # --- Host output hook test (only built with -DZEN_HOST_OUTPUT=ON) ---
 HOSTOUT="${HOSTOUT:-$ROOT/bin/test_host_output}"
 if [[ -n "$ZEN_RUNNER" ]]; then have_hostout() { [[ -f "$HOSTOUT" ]]; }

@@ -179,6 +179,7 @@ namespace zen
         Obj obj;
         NativeFn fn;
         int32_t arity; /* -1 = variadic */
+        int32_t flags; /* NativeFlags (module.h) */
         ObjString *name;
     };
 

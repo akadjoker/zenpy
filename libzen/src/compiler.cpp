@@ -43,6 +43,12 @@ namespace zen
         class_field_count_ = 0;
         class_field_default_count_ = 0;
         class_registry_count_ = 0;
+        pending_callee_valid_ = false;
+
+        sigs_ = nullptr; sig_count_ = 0; sig_cap_ = 0;
+        sig_params_ = nullptr; sig_param_count_ = 0; sig_param_cap_ = 0;
+        sig_classes_ = nullptr; sig_class_count_ = 0; sig_class_cap_ = 0;
+        prescan_signatures(source, filename);
 
         lexer_.init(source, filename);
 
@@ -87,6 +93,7 @@ namespace zen
         ObjFunc *script = state_->emitter.end(state_->max_reg);
         script->arity = 0;
 
+        free_signatures();
         gc_resume(gc_);
         return had_error_ ? nullptr : script;
     }
@@ -108,6 +115,12 @@ namespace zen
         in_class_ = false;
         class_has_parent_ = false;
         pending_decorator_count_ = 0;
+        pending_callee_valid_ = false;
+
+        sigs_ = nullptr; sig_count_ = 0; sig_cap_ = 0;
+        sig_params_ = nullptr; sig_param_count_ = 0; sig_param_cap_ = 0;
+        sig_classes_ = nullptr; sig_class_count_ = 0; sig_class_cap_ = 0;
+        prescan_signatures(source, filename);
 
         lexer_.init(source, filename);
 
@@ -163,6 +176,7 @@ namespace zen
         ObjFunc *script = state_->emitter.end(state_->max_reg);
         script->arity = 0;
 
+        free_signatures();
         gc_resume(gc_);
         return had_error_ ? nullptr : script;
     }
@@ -819,6 +833,546 @@ namespace zen
     bool Compiler::is_right_associative(TokenType type) const
     {
         return type == TOK_DSTAR; /* ** is right-associative */
+    }
+
+    /* =========================================================
+    ** Keyword arguments — the compile-time signature registry.
+    **
+    ** The parser is single-pass, so a call written before the `def` it
+    ** targets has nothing to resolve against.  A cheap token-only
+    ** pre-scan runs first and records every signature, which also makes
+    ** `self.helper(x=1)` work regardless of where `helper` sits in the
+    ** class body.
+    ** ========================================================= */
+
+    bool Compiler::sig_reserve(int extra_sigs, int extra_params)
+    {
+        if (sig_count_ + extra_sigs > sig_cap_)
+        {
+            int cap = sig_cap_ ? sig_cap_ * 2 : 64;
+            while (cap < sig_count_ + extra_sigs)
+                cap *= 2;
+            FuncSig *n = (FuncSig *)zen_alloc_now(gc_, (size_t)cap * sizeof(FuncSig));
+            if (!n)
+                return false;
+            if (sigs_)
+            {
+                memcpy(n, sigs_, (size_t)sig_count_ * sizeof(FuncSig));
+                zen_free(gc_, sigs_, (size_t)sig_cap_ * sizeof(FuncSig));
+            }
+            sigs_ = n;
+            sig_cap_ = cap;
+        }
+        if (sig_param_count_ + extra_params > sig_param_cap_)
+        {
+            int cap = sig_param_cap_ ? sig_param_cap_ * 2 : 256;
+            while (cap < sig_param_count_ + extra_params)
+                cap *= 2;
+            SigParam *n = (SigParam *)zen_alloc_now(gc_, (size_t)cap * sizeof(SigParam));
+            if (!n)
+                return false;
+            if (sig_params_)
+            {
+                memcpy(n, sig_params_, (size_t)sig_param_count_ * sizeof(SigParam));
+                zen_free(gc_, sig_params_, (size_t)sig_param_cap_ * sizeof(SigParam));
+            }
+            sig_params_ = n;
+            sig_param_cap_ = cap;
+        }
+        return true;
+    }
+
+    void Compiler::free_signatures()
+    {
+        if (sigs_)
+            zen_free(gc_, sigs_, (size_t)sig_cap_ * sizeof(FuncSig));
+        if (sig_params_)
+            zen_free(gc_, sig_params_, (size_t)sig_param_cap_ * sizeof(SigParam));
+        if (sig_classes_)
+            zen_free(gc_, sig_classes_, (size_t)sig_class_cap_ * sizeof(SigClass));
+        sigs_ = nullptr;
+        sig_params_ = nullptr;
+        sig_classes_ = nullptr;
+        sig_count_ = sig_cap_ = 0;
+        sig_param_count_ = sig_param_cap_ = 0;
+        sig_class_count_ = sig_class_cap_ = 0;
+    }
+
+    static bool name_eq(const char *a, int32_t alen, const char *b, int32_t blen)
+    {
+        return alen == blen && memcmp(a, b, (size_t)alen) == 0;
+    }
+
+    const FuncSig *Compiler::find_signature(const char *owner, int owner_len,
+                                            const char *name, int name_len) const
+    {
+        for (int i = 0; i < sig_count_; i++)
+        {
+            const FuncSig &s = sigs_[i];
+            if (!name_eq(s.name, s.name_len, name, name_len))
+                continue;
+            if ((owner == nullptr) != (s.owner == nullptr))
+                continue;
+            if (owner && !name_eq(s.owner, s.owner_len, owner, owner_len))
+                continue;
+            return &s;
+        }
+        return nullptr;
+    }
+
+    const SigClass *Compiler::find_sig_class(const char *name, int name_len) const
+    {
+        for (int i = 0; i < sig_class_count_; i++)
+            if (name_eq(sig_classes_[i].name, sig_classes_[i].name_len, name, name_len))
+                return &sig_classes_[i];
+        return nullptr;
+    }
+
+    /* Walk the token stream of one `def` header and record its parameters.
+    ** Returns the first token after the closing ')'. */
+    Token Compiler::scan_signature(Lexer &scan, const char *owner, int owner_len,
+                                   const Token &name)
+    {
+        SigParam tmp[kMaxSigParams];
+        int n = 0;
+        bool usable = true;
+
+        Token t = scan.next_token();
+
+        /* Generic parameters are hidden leading arguments, exactly as the
+        ** real parser treats them. */
+        if (t.type == TOK_LT)
+        {
+            for (;;)
+            {
+                t = scan.next_token();
+                if (t.type != TOK_IDENTIFIER)
+                {
+                    usable = false;
+                    break;
+                }
+                if (n < kMaxSigParams)
+                {
+                    tmp[n].name = t.start;
+                    tmp[n].name_len = t.length;
+                    tmp[n].has_default = false;
+                    tmp[n].default_negate = false;
+                }
+                n++;
+                t = scan.next_token();
+                if (t.type != TOK_COMMA)
+                    break;
+            }
+            if (t.type == TOK_GT)
+                t = scan.next_token();
+            else
+                usable = false;
+        }
+
+        if (t.type != TOK_LPAREN)
+            return t; /* malformed — the real parser will report it */
+
+        t = scan.next_token();
+        bool first = true;
+        while (t.type != TOK_RPAREN && t.type != TOK_EOF && t.type != TOK_ERROR)
+        {
+            if (t.type == TOK_STAR)
+            {
+                usable = false; /* *args: positions stop being fixed */
+                break;
+            }
+            if (first && owner && t.type == TOK_SELF)
+            {
+                /* explicit `self` is not a parameter */
+                t = scan.next_token();
+                if (t.type == TOK_COMMA)
+                    t = scan.next_token();
+                first = false;
+                continue;
+            }
+            if (t.type != TOK_IDENTIFIER)
+            {
+                usable = false;
+                break;
+            }
+
+            SigParam p;
+            p.name = t.start;
+            p.name_len = t.length;
+            p.has_default = false;
+            p.default_negate = false;
+            p.default_tok = t;
+
+            t = scan.next_token();
+
+            /* Type hint: skip to the ',', '=' or ')' that closes it.  The
+            ** hint may itself carry brackets (`list[int]`). */
+            if (t.type == TOK_COLON)
+            {
+                int bracket = 0;
+                t = scan.next_token();
+                while (t.type != TOK_EOF && t.type != TOK_ERROR)
+                {
+                    if (t.type == TOK_LBRACKET || t.type == TOK_LPAREN)
+                        bracket++;
+                    else if (t.type == TOK_RBRACKET)
+                        bracket--;
+                    else if (t.type == TOK_RPAREN)
+                    {
+                        if (bracket == 0)
+                            break;
+                        bracket--;
+                    }
+                    else if (bracket == 0 && (t.type == TOK_COMMA || t.type == TOK_EQ))
+                        break;
+                    t = scan.next_token();
+                }
+            }
+
+            if (t.type == TOK_EQ)
+            {
+                t = scan.next_token();
+                if (t.type == TOK_MINUS)
+                {
+                    p.default_negate = true;
+                    t = scan.next_token();
+                }
+                p.has_default = true;
+                p.default_tok = t;
+                t = scan.next_token();
+            }
+
+            if (n < kMaxSigParams)
+                tmp[n] = p;
+            n++;
+            first = false;
+
+            if (t.type != TOK_COMMA)
+                break;
+            t = scan.next_token();
+        }
+
+        /* Skip whatever is left of the header (return hint, stray tokens). */
+        while (t.type != TOK_RPAREN && t.type != TOK_EOF && t.type != TOK_ERROR &&
+               t.type != TOK_NEWLINE)
+            t = scan.next_token();
+        if (t.type == TOK_RPAREN)
+            t = scan.next_token();
+
+        if (n > kMaxSigParams)
+            usable = false;
+
+        /* A second `def` under the same key makes the position of a name
+        ** unknowable — refuse keywords on both rather than guess. */
+        for (int i = 0; i < sig_count_; i++)
+        {
+            FuncSig &e = sigs_[i];
+            if (!name_eq(e.name, e.name_len, name.start, name.length))
+                continue;
+            if ((owner == nullptr) != (e.owner == nullptr))
+                continue;
+            if (owner && !name_eq(e.owner, e.owner_len, owner, owner_len))
+                continue;
+            e.takes_keywords = false;
+            return t;
+        }
+
+        int keep = n > kMaxSigParams ? kMaxSigParams : n;
+        if (!sig_reserve(1, keep))
+            return t;
+
+        FuncSig sig;
+        sig.owner = owner;
+        sig.owner_len = owner_len;
+        sig.name = name.start;
+        sig.name_len = name.length;
+        sig.param_start = sig_param_count_;
+        sig.param_count = keep;
+        sig.takes_keywords = usable;
+        for (int i = 0; i < keep; i++)
+            sig_params_[sig_param_count_++] = tmp[i];
+        sigs_[sig_count_++] = sig;
+        return t;
+    }
+
+    void Compiler::prescan_signatures(const char *source, const char *filename)
+    {
+        Lexer scan;
+        scan.init(source, filename);
+
+        /* Innermost classes and the depth their bodies live at. */
+        static const int kMaxClassNest = 8;
+        struct { const char *name; int32_t len; int body_depth; } stack[kMaxClassNest];
+        int nest = 0;
+        int depth = 0;
+
+        Token t = scan.next_token();
+        while (t.type != TOK_EOF && t.type != TOK_ERROR)
+        {
+            if (t.type == TOK_INDENT)
+            {
+                depth++;
+                t = scan.next_token();
+                continue;
+            }
+            if (t.type == TOK_DEDENT)
+            {
+                if (depth > 0)
+                    depth--;
+                while (nest > 0 && depth < stack[nest - 1].body_depth)
+                    nest--;
+                t = scan.next_token();
+                continue;
+            }
+            if (t.type == TOK_CLASS)
+            {
+                Token cname = scan.next_token();
+                if (cname.type != TOK_IDENTIFIER)
+                {
+                    t = cname;
+                    continue;
+                }
+                const char *parent = nullptr;
+                int32_t parent_len = 0;
+                t = scan.next_token();
+                if (t.type == TOK_LPAREN)
+                {
+                    Token pt = scan.next_token();
+                    if (pt.type == TOK_IDENTIFIER)
+                    {
+                        parent = pt.start;
+                        parent_len = pt.length;
+                    }
+                    while (t.type != TOK_RPAREN && t.type != TOK_EOF && t.type != TOK_NEWLINE)
+                        t = scan.next_token();
+                }
+                if (nest < kMaxClassNest)
+                {
+                    stack[nest].name = cname.start;
+                    stack[nest].len = cname.length;
+                    stack[nest].body_depth = depth + 1;
+                    nest++;
+                }
+                if (sig_class_count_ + 1 > sig_class_cap_)
+                {
+                    int cap = sig_class_cap_ ? sig_class_cap_ * 2 : 32;
+                    SigClass *nc = (SigClass *)zen_alloc_now(gc_, (size_t)cap * sizeof(SigClass));
+                    if (nc)
+                    {
+                        if (sig_classes_)
+                        {
+                            memcpy(nc, sig_classes_, (size_t)sig_class_count_ * sizeof(SigClass));
+                            zen_free(gc_, sig_classes_, (size_t)sig_class_cap_ * sizeof(SigClass));
+                        }
+                        sig_classes_ = nc;
+                        sig_class_cap_ = cap;
+                    }
+                }
+                if (sig_class_count_ < sig_class_cap_)
+                {
+                    SigClass &c = sig_classes_[sig_class_count_++];
+                    c.name = cname.start;
+                    c.name_len = cname.length;
+                    c.parent = parent;
+                    c.parent_len = parent_len;
+                }
+                continue;
+            }
+            if (t.type == TOK_DEF)
+            {
+                Token fname = scan.next_token();
+                if (fname.type != TOK_IDENTIFIER)
+                {
+                    t = fname;
+                    continue;
+                }
+                bool is_method = nest > 0 && depth == stack[nest - 1].body_depth;
+                bool is_free = depth == 0;
+                if (is_method)
+                    t = scan_signature(scan, stack[nest - 1].name, stack[nest - 1].len, fname);
+                else if (is_free)
+                    t = scan_signature(scan, nullptr, 0, fname);
+                else
+                    t = scan.next_token(); /* nested def: not addressable by name */
+                continue;
+            }
+            t = scan.next_token();
+        }
+    }
+
+    /* --- Resolving a call site to a signature --- */
+
+    bool Compiler::receiver_class(int reg, const char *&name, int32_t &len) const
+    {
+        if (state_->is_method && in_class_ && reg == 0)
+        {
+            name = current_class_.start;
+            len = current_class_.length;
+            return true;
+        }
+        for (int i = 0; i < state_->local_count; i++)
+        {
+            if (state_->locals[i].reg == reg && state_->locals[i].has_type_hint)
+            {
+                name = state_->locals[i].type_hint.start;
+                len = state_->locals[i].type_hint.length;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /* Look up `name` on `owner`, then on what `owner` inherits from. */
+    static const int kMaxSigInherit = 8;
+
+    /* Fallback for a receiver with no static type: if exactly one class in
+    ** the file declares a method by this name, its parameter names are the
+    ** only ones a keyword could have meant.  Two classes declaring it makes
+    ** the position of a name unknowable, and the call site says so rather
+    ** than picking one. */
+    const FuncSig *Compiler::unique_method_signature(const Token &method) const
+    {
+        const FuncSig *found = nullptr;
+        for (int i = 0; i < sig_count_; i++)
+        {
+            const FuncSig &s = sigs_[i];
+            if (!s.owner || !name_eq(s.name, s.name_len, method.start, method.length))
+                continue;
+            if (found)
+                return nullptr; /* ambiguous */
+            found = &s;
+        }
+        return found;
+    }
+
+    const FuncSig *Compiler::method_signature(int recv_reg, const Token &method) const
+    {
+        const char *cls = nullptr;
+        int32_t cls_len = 0;
+        if (!receiver_class(recv_reg, cls, cls_len))
+            return unique_method_signature(method);
+
+        for (int hop = 0; hop < kMaxSigInherit && cls; hop++)
+        {
+            const FuncSig *s = find_signature(cls, cls_len, method.start, method.length);
+            if (s)
+                return s;
+            const SigClass *c = find_sig_class(cls, cls_len);
+            if (!c || !c->parent)
+                return unique_method_signature(method);
+            cls = c->parent;
+            cls_len = c->parent_len;
+        }
+        return nullptr;
+    }
+
+    const FuncSig *Compiler::super_signature(const Token &method) const
+    {
+        if (!in_class_ || !class_has_parent_)
+            return nullptr;
+        const char *cls = current_class_parent_.start;
+        int32_t cls_len = current_class_parent_.length;
+        for (int hop = 0; hop < kMaxSigInherit && cls; hop++)
+        {
+            const FuncSig *s = find_signature(cls, cls_len, method.start, method.length);
+            if (s)
+                return s;
+            const SigClass *c = find_sig_class(cls, cls_len);
+            if (!c || !c->parent)
+                return nullptr;
+            cls = c->parent;
+            cls_len = c->parent_len;
+        }
+        return nullptr;
+    }
+
+    /* A bare `name(...)`: either a free function, or a class, in which case
+    ** the arguments are its init()'s. */
+    const FuncSig *Compiler::callee_signature()
+    {
+        if (!pending_callee_valid_)
+            return nullptr;
+        const Token &n = pending_callee_;
+
+        /* A local or upvalue of the same name shadows the declaration the
+        ** pre-scan saw, and we cannot know what it holds. */
+        if (resolve_local(state_, n) != -1)
+            return nullptr;
+
+        const FuncSig *s = find_signature(nullptr, 0, n.start, n.length);
+        if (s)
+            return s;
+
+        if (find_sig_class(n.start, n.length))
+        {
+            const char *cls = n.start;
+            int32_t cls_len = n.length;
+            for (int hop = 0; hop < kMaxSigInherit && cls; hop++)
+            {
+                const FuncSig *init = find_signature(cls, cls_len, "__init__", 8);
+                if (init)
+                    return init;
+                const SigClass *c = find_sig_class(cls, cls_len);
+                if (!c || !c->parent)
+                    return nullptr;
+                cls = c->parent;
+                cls_len = c->parent_len;
+            }
+        }
+        return nullptr;
+    }
+
+    int Compiler::sig_param_index(const FuncSig *sig, const Token &name) const
+    {
+        for (int i = 0; i < sig->param_count; i++)
+        {
+            const SigParam &p = sig_params_[sig->param_start + i];
+            if (name_eq(p.name, p.name_len, name.start, name.length))
+                return i;
+        }
+        return -1;
+    }
+
+    void Compiler::emit_sig_default(const SigParam &p, int reg)
+    {
+        switch (p.default_tok.type)
+        {
+        case TOK_INT:
+        {
+            int64_t v = strtoll(p.default_tok.start, nullptr, 0);
+            if (p.default_negate)
+                v = -v;
+            if (v >= -32768 && v <= 32767)
+                state_->emitter.emit_asbx(OP_LOADI, reg, (int)v, p.default_tok.line);
+            else
+            {
+                int ki = state_->emitter.add_constant(val_int(v));
+                state_->emitter.emit_abx(OP_LOADK, reg, ki, p.default_tok.line);
+            }
+            break;
+        }
+        case TOK_FLOAT:
+        {
+            double v = strtod(p.default_tok.start, nullptr);
+            if (p.default_negate)
+                v = -v;
+            int ki = state_->emitter.add_constant(val_float(v));
+            state_->emitter.emit_abx(OP_LOADK, reg, ki, p.default_tok.line);
+            break;
+        }
+        case TOK_STRING:
+            string_literal(p.default_tok, reg);
+            break;
+        case TOK_TRUE:
+        case TOK_FALSE:
+        case TOK_NONE:
+            literal(p.default_tok, reg);
+            break;
+        default:
+            error("Default value of skipped parameter is not a literal.");
+            state_->emitter.emit_abc(OP_LOADNIL, reg, 0, 0, p.default_tok.line);
+            break;
+        }
     }
 
 } /* namespace zen */

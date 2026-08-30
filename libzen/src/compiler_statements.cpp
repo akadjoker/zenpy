@@ -221,6 +221,11 @@ namespace zen
         bool is_vararg = false;
         static const int kMaxDefaults = 32;
         Value default_vals[kMaxDefaults];
+        /* True for a default that is a string-constant-pool index rather
+        ** than a literal Value.  A tagged high bit on the int used to mark
+        ** this, but a small negative default (e.g. -3 is 0xFFFFFFFD) sets
+        ** that same bit legitimately, colliding with the sentinel. */
+        bool default_is_strk[kMaxDefaults];
         int default_start_idx = -1; /* param index of first default */
         if (!check(TOK_RPAREN))
         {
@@ -271,6 +276,7 @@ namespace zen
                 {
                     if (default_start_idx < 0) default_start_idx = arity;
                     int di = arity - default_start_idx;
+                    default_is_strk[di] = false;
                     if (check(TOK_MINUS)) { advance();
                         if (check(TOK_INT)) { advance(); default_vals[di] = val_int(-(int32_t)strtol(previous_.start, nullptr, 0)); }
                         else if (check(TOK_FLOAT)) { advance(); default_vals[di] = val_float(-strtod(previous_.start, nullptr)); }
@@ -281,9 +287,9 @@ namespace zen
                     else if (check(TOK_STRING)) {
                         advance();
                         int ki = state_->emitter.add_escaped_string_constant(previous_.start + 1, previous_.length - 2);
-                        /* Store ki as a tagged integer sentinel: high bit set */
                         default_vals[di].type = VAL_INT;
-                        default_vals[di].as.integer = ki | (1 << 30); /* sentinel */
+                        default_vals[di].as.integer = ki;
+                        default_is_strk[di] = true;
                     }
                     else if (match(TOK_TRUE))  { default_vals[di] = val_bool(true); }
                     else if (match(TOK_FALSE)) { default_vals[di] = val_bool(false); }
@@ -345,12 +351,10 @@ namespace zen
             fn->defaults = (Value *)zen_alloc(gc_, default_count * sizeof(Value));
             for (int di = 0; di < default_count; di++)
             {
-                Value v = default_vals[di];
-                /* String sentinel: VAL_INT with high bit set encodes constant pool index */
-                if (v.type == VAL_INT && (v.as.integer & (1 << 30)))
-                    fn->defaults[di] = fn->constants[v.as.integer & ~(1 << 30)];
+                if (default_is_strk[di])
+                    fn->defaults[di] = fn->constants[default_vals[di].as.integer];
                 else
-                    fn->defaults[di] = v;
+                    fn->defaults[di] = default_vals[di];
             }
         }
 
@@ -573,6 +577,7 @@ namespace zen
                 bool is_vararg = false;
                 static const int kMaxDefaults = 32;
                 Value default_vals[kMaxDefaults];
+                bool default_is_strk[kMaxDefaults];
                 int default_start_idx = -1;
                 if (!check(TOK_RPAREN))
                 {
@@ -618,6 +623,7 @@ namespace zen
                         {
                             if (default_start_idx < 0) default_start_idx = arity;
                             int di = arity - default_start_idx;
+                            default_is_strk[di] = false;
                             if (check(TOK_MINUS)) { advance();
                                 if (check(TOK_INT)) { advance(); default_vals[di] = val_int(-(int64_t)strtoll(previous_.start, nullptr, 0)); }
                                 else if (check(TOK_FLOAT)) { advance(); default_vals[di] = val_float(-strtod(previous_.start, nullptr)); }
@@ -629,7 +635,8 @@ namespace zen
                                 advance();
                                 int ki = state_->emitter.add_escaped_string_constant(previous_.start + 1, previous_.length - 2);
                                 default_vals[di].type = VAL_INT;
-                                default_vals[di].as.integer = ki | (1 << 30);
+                                default_vals[di].as.integer = ki;
+                                default_is_strk[di] = true;
                             }
                             else if (match(TOK_TRUE))  { default_vals[di] = val_bool(true); }
                             else if (match(TOK_FALSE)) { default_vals[di] = val_bool(false); }
@@ -673,11 +680,10 @@ namespace zen
                     fn->defaults = (Value *)zen_alloc(gc_, default_count * sizeof(Value));
                     for (int di = 0; di < default_count; di++)
                     {
-                        Value v = default_vals[di];
-                        if (v.type == VAL_INT && (v.as.integer & (1 << 30)))
-                            fn->defaults[di] = fn->constants[v.as.integer & ~(1 << 30)];
+                        if (default_is_strk[di])
+                            fn->defaults[di] = fn->constants[default_vals[di].as.integer];
                         else
-                            fn->defaults[di] = v;
+                            fn->defaults[di] = default_vals[di];
                     }
                 }
 

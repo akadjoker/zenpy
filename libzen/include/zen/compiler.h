@@ -101,6 +101,49 @@ namespace zen
     };
 
     /* =========================================================
+    ** Call signature registry (compile-time only)
+    **
+    ** A pre-scan of the source records the parameter names of every
+    ** top-level `def` and of every method, so a call site can rewrite
+    **     f(a, b, flag=True)
+    ** into the plain positional call the VM already knows how to run.
+    ** Nothing here survives compilation: no bytecode, no ObjFunc field,
+    ** no branch in the dispatch loop.
+    ** ========================================================= */
+
+    static const int kMaxSigParams = 64; /* the fill mask is a uint64_t */
+
+    struct SigParam
+    {
+        const char *name;    /* points into the source buffer */
+        int32_t name_len;
+        bool has_default;
+        bool default_negate; /* the literal was written as -N */
+        Token default_tok;   /* the literal itself, valid if has_default */
+    };
+
+    struct FuncSig
+    {
+        const char *owner; /* class name, nullptr for a free function */
+        int32_t owner_len;
+        const char *name;
+        int32_t name_len;
+        int32_t param_start; /* first slot in the shared parameter pool */
+        int32_t param_count;
+        bool takes_keywords; /* false for *args, overloads, oversized lists */
+    };
+
+    /* Class → parent, so `self.method()` can find a method the class
+    ** inherited rather than declared. */
+    struct SigClass
+    {
+        const char *name;
+        int32_t name_len;
+        const char *parent; /* nullptr if the class has no base */
+        int32_t parent_len;
+    };
+
+    /* =========================================================
     ** CompilerState — one per function being compiled.
     ** Forms a linked list (parent) for nested functions.
     ** ========================================================= */
@@ -237,9 +280,27 @@ namespace zen
         int super_expr(int dest);
 
         /* --- Argument list --- */
-        int argument_list(int base, int initial_nargs = 0);
-        int generic_argument_list(int base);
+        int argument_list(int base, int initial_nargs = 0, const FuncSig *sig = nullptr);
+        int generic_argument_list(int base, const FuncSig *sig = nullptr);
         bool generic_call_ahead();
+
+        /* --- Keyword arguments (compile-time, see FuncSig) --- */
+        void prescan_signatures(const char *source, const char *filename);
+        Token scan_signature(Lexer &scan, const char *owner, int owner_len,
+                             const Token &name);
+        bool sig_reserve(int extra_sigs, int extra_params);
+        void free_signatures();
+        const FuncSig *find_signature(const char *owner, int owner_len,
+                                      const char *name, int name_len) const;
+        const SigClass *find_sig_class(const char *name, int name_len) const;
+        const FuncSig *callee_signature();
+        const FuncSig *method_signature(int recv_reg, const Token &method) const;
+        const FuncSig *unique_method_signature(const Token &method) const;
+        const FuncSig *super_signature(const Token &method) const;
+        bool receiver_class(int reg, const char *&name, int32_t &len) const;
+        int sig_param_index(const FuncSig *sig, const Token &name) const;
+        void emit_sig_default(const SigParam &p, int reg);
+        bool next_is_keyword_arg();
 
         /* --- Name resolution (the core of compile-time work) --- */
         int resolve_local(CompilerState *state, const Token &name);
@@ -340,6 +401,23 @@ namespace zen
         };
         ClassFieldRegistry class_registry_[kMaxClasses];
         int class_registry_count_;
+
+        /* Signature registry, heap-allocated: the Compiler already carries
+        ** several kilobytes of fixed tables on the stack. Freed by compile(). */
+        FuncSig *sigs_;
+        int sig_count_;
+        int sig_cap_;
+        SigParam *sig_params_;
+        int sig_param_count_;
+        int sig_param_cap_;
+        SigClass *sig_classes_;
+        int sig_class_count_;
+        int sig_class_cap_;
+
+        /* The identifier a bare `name(...)` call was written with — set by
+        ** the Pratt loop, the only place that still knows it. */
+        Token pending_callee_;
+        bool pending_callee_valid_;
 
         int lookup_class_field(ObjString *name) const;
         int add_class_field(ObjString *name);

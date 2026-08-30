@@ -226,6 +226,7 @@ namespace zen
             SLOT_LT,
             SLOT_LE,
             SLOT_STR,
+            SLOT_LEN,
             SLOT_OPERATOR_COUNT = kOperatorSlotCount
         };
 

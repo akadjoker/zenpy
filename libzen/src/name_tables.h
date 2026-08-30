@@ -29,6 +29,7 @@ namespace zen
         {"__lt__", 6, VM::SLOT_LT},
         {"__le__", 6, VM::SLOT_LE},
         {"__str__", 7, VM::SLOT_STR},
+        {"__len__", 7, VM::SLOT_LEN},
     };
 
     static inline int operator_slot_for_name(const char *name, int len)

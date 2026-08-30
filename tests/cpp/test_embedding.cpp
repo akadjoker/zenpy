@@ -856,6 +856,59 @@ static void test_run_from_inside_script()
 }
 
 /* =========================================================
+** TEST 12: VM::resume_fiber() — the embedding API a host uses to drive a
+** fiber directly (a coroutine stepped once per frame, say), as opposed to
+** the in-script `for`/`await` paths which already checked this.
+** ========================================================= */
+static void test_resume_fiber_error_handling()
+{
+    printf("\n[Test 12] resume_fiber() reports fiber errors instead of swallowing them\n");
+
+    VM vm;
+    vm.open_lib_globals(&zen_lib_base);
+
+    const bool compiled = run_source(vm,
+        "def gen():\n"
+        "    yield 1\n"
+        "    error(\"boom\")\n"
+        "    yield 2\n"
+        "g = gen()\n");
+
+    TEST("generator call produced a suspended fiber");
+    Value gv = vm.get_global("g");
+    CHECK(compiled && !vm.had_error() && is_fiber(gv), "expected g to be a fiber");
+
+    ObjFiber *fiber = as_fiber(gv);
+    ObjFiber *caller_before = vm.current_fiber();
+
+    TEST("first resume yields 1 with no error");
+    Value r1 = vm.resume_fiber(fiber, val_nil());
+    CHECK(!vm.had_error() && r1.type == VAL_INT && r1.as.integer == 1,
+          "expected 1 with had_error() == false");
+
+    TEST("resume_fiber() restores the caller as current_fiber() afterwards");
+    CHECK(vm.current_fiber() == caller_before,
+          "current_fiber() was left pointing at the target fiber");
+
+    TEST("second resume hits error() inside the fiber");
+    Value r2 = vm.resume_fiber(fiber, val_nil());
+    CHECK(vm.had_error(), "expected had_error() == true, error() did not propagate");
+
+    TEST("a fiber error does not hand back a stale transfer_value");
+    CHECK(is_nil(r2), "expected nil, not the previous yield's stale value");
+
+    TEST("current_fiber() is still restored after an erroring resume");
+    CHECK(vm.current_fiber() == caller_before,
+          "current_fiber() was left pointing at the errored fiber");
+
+    TEST("the VM keeps working for a fresh run after an errored fiber");
+    const bool ran_after = run_source(vm, "post_check = 123\n");
+    Value pc = vm.get_global("post_check");
+    CHECK(ran_after && !vm.had_error() && pc.type == VAL_INT && pc.as.integer == 123,
+          "expected the VM to run cleanly after an errored fiber");
+}
+
+/* =========================================================
 ** MAIN
 ** ========================================================= */
 int main()
@@ -873,6 +926,7 @@ int main()
     test_native_struct_builder();
     test_class_builder_native_data();
     test_run_from_inside_script();
+    test_resume_fiber_error_handling();
 
     printf("\n========================================\n");
     printf("Results: %d passed, %d failed\n", g_tests_passed, g_tests_failed);

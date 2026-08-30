@@ -1597,7 +1597,7 @@ namespace zen
                     state_->emitter.emit_asbx(OP_LOADI, idx_reg, 0, line);
 
                     int len_reg = alloc_reg();
-                    state_->emitter.emit_abc(OP_LEN, len_reg, iter_reg, 0, line);
+                    state_->emitter.emit_abc(OP_LEN, len_reg, iter_reg, 1, line);
 
                     int var_reg = add_local(var_name);
 
@@ -1752,7 +1752,7 @@ namespace zen
                 int idx_reg = alloc_reg();
                 state_->emitter.emit_asbx(OP_LOADI, idx_reg, 0, line);
                 int len_reg = alloc_reg();
-                state_->emitter.emit_abc(OP_LEN, len_reg, iter_reg, 0, line);
+                state_->emitter.emit_abc(OP_LEN, len_reg, iter_reg, 1, line);
                 int var_reg = add_local(var_name);
 
                 int loop_start = state_->emitter.current_offset();
@@ -1867,7 +1867,7 @@ namespace zen
             int idx_reg = alloc_reg();
             state_->emitter.emit_asbx(OP_LOADI, idx_reg, 0, line);
             int len_reg = alloc_reg();
-            state_->emitter.emit_abc(OP_LEN, len_reg, iter_reg, 0, line);
+            state_->emitter.emit_abc(OP_LEN, len_reg, iter_reg, 1, line);
             int var_reg = add_local(var_name);
 
             int loop_start = state_->emitter.current_offset();

@@ -127,7 +127,7 @@ namespace zen
         OP_STRADD,   /* R[A] = R[A] + R[B]  (in-place append)  */
         OP_TOSTRING, /* R[A] = tostring(R[B])                   */
         OP_TOSTRING_OBJ, /* R[A] = R[B].__str__()                */
-        OP_LEN,      /* R[A] = #R[B]                            */
+        OP_LEN,      /* R[A] = #R[B]; C=1: tolerant (comprehension bound: nil/no length -> 0 instead of erroring) */
         OP_PRINT,    /* print R[A]; B=1 → newline               */
 
         /* --- Fused comparison + jump (2-word) --- */

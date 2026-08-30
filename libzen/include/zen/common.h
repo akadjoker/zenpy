@@ -32,6 +32,10 @@ namespace zen
     constexpr int kMaxFiberDepth = 64;              /* max nested fiber resumes (C stack) */
     constexpr int kMaxConstants = 65536;            /* constant pool per function */
     constexpr int kOperatorSlotCount = 16;          /* fixed object operator slots */
+    /* Width of the table when bytecode minor was 1-2 (before __len__ became
+    ** a slot). Frozen forever — it describes what those files already have
+    ** on disk, not what the VM supports today. See bytecode.cpp read_class. */
+    constexpr int kOperatorSlotCountV1 = 15;
     /* Globals are stored in a dynamic array (grows on demand).
     ** kInitGlobalCapacity = how big the table is allocated up front.
     ** kMaxGlobalsHard   = absolute ceiling (OP_GETGLOBAL/SETGLOBAL encode

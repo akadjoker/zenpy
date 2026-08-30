@@ -3999,6 +3999,13 @@ namespace zen
                 if (!try_unary_operator(this, v, SLOT_LEN, &result))
                 {
                     LOAD_STATE();
+                    /* C=1: the compiler's own comprehension lowering, not a
+                    ** script-level len(x) call (C=0) — see below. */
+                    if (ZEN_C(i))
+                    {
+                        R[ZEN_A(i)] = val_int(0);
+                        NEXT();
+                    }
                     RT_ERROR("object of type '%s' has no len()",
                              as_instance(v)->klass->name->chars);
                 }
@@ -4010,6 +4017,17 @@ namespace zen
                     RT_ERROR("__len__ must return an int");
                 }
                 R[ZEN_A(i)] = result;
+            }
+            else if (ZEN_C(i))
+            {
+                /* Tolerant mode: `[x for x in it]` computes its loop bound
+                ** with this same opcode, on a source expression the user
+                ** wrote, not a literal len(...) call. Erroring here would
+                ** turn "it turned out to be nil/not a container" into a
+                ** crash instead of the empty result comprehensions have
+                ** always produced for that case — keep that behavior; a
+                ** genuine len(x) call (C=0) still raises below. */
+                R[ZEN_A(i)] = val_int(0);
             }
             else
                 RT_ERROR("object of type '%s' has no len()", val_type_str(v));

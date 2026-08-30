@@ -1094,9 +1094,21 @@ namespace
             }
         }
 
-        if (minor >= 1)
+        if (minor >= 3)
         {
             for (int32_t i = 0; i < kOperatorSlotCount; i++)
+            {
+                if (!read_value(vm, r, minor, &klass->operator_slots[i], err, err_len))
+                    return nullptr;
+            }
+        }
+        else if (minor >= 1)
+        {
+            /* minor 1-2 wrote a narrower table (before __len__ existed as an
+            ** operator slot) — read exactly that many Values so the rest of
+            ** the file stays aligned. The slots this file never had (SLOT_LEN
+            ** and any added later) keep their val_nil() default from above. */
+            for (int32_t i = 0; i < kOperatorSlotCountV1; i++)
             {
                 if (!read_value(vm, r, minor, &klass->operator_slots[i], err, err_len))
                     return nullptr;

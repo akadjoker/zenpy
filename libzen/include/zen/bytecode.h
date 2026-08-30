@@ -10,8 +10,10 @@ namespace zen
 
     static constexpr uint8_t ZEN_BYTECODE_MAGIC[5] = {'Z', 'E', 'N', 'B', 'C'};
     static constexpr uint16_t ZEN_BYTECODE_VERSION_MAJOR = 2;
-    /* minor 2: class field defaults (a class body's "name = literal"). */
-    static constexpr uint16_t ZEN_BYTECODE_VERSION_MINOR = 2;
+    /* minor 2: class field defaults (a class body's "name = literal").
+    ** minor 3: operator slot table grew 15->16 (added __len__/SLOT_LEN) —
+    **          see kOperatorSlotCountV1 and read_class() in bytecode.cpp. */
+    static constexpr uint16_t ZEN_BYTECODE_VERSION_MINOR = 3;
 
     struct BytecodeStats
     {

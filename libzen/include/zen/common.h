@@ -31,7 +31,7 @@ namespace zen
     constexpr int kMaxFrames = 2000;                /* max call depth */
     constexpr int kMaxFiberDepth = 64;              /* max nested fiber resumes (C stack) */
     constexpr int kMaxConstants = 65536;            /* constant pool per function */
-    constexpr int kOperatorSlotCount = 15;          /* fixed object operator slots */
+    constexpr int kOperatorSlotCount = 16;          /* fixed object operator slots */
     /* Globals are stored in a dynamic array (grows on demand).
     ** kInitGlobalCapacity = how big the table is allocated up front.
     ** kMaxGlobalsHard   = absolute ceiling (OP_GETGLOBAL/SETGLOBAL encode

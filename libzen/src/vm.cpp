@@ -1087,13 +1087,35 @@ namespace zen
             return val_nil();
         }
 
-        fiber->caller = current_fiber_;
+        ObjFiber *caller = current_fiber_;
+        fiber->caller = caller;
         fiber->transfer_value = val;
         fiber->state = FIBER_RUNNING;
-        current_fiber_->state = FIBER_SUSPENDED;
+        if (caller)
+            caller->state = FIBER_SUSPENDED;
         current_fiber_ = fiber;
 
         execute(fiber);
+
+        /* Restore whichever fiber was running before this call — the same
+        ** hand-back OP_RESUME/OP_AWAIT do for the in-script equivalent.
+        ** Without it current_fiber_ is left pointing at a finished/errored
+        ** fiber, so the next runtime_error() from the host's own fiber
+        ** would attach its message and stack trace to the wrong one. */
+        current_fiber_ = caller;
+        if (caller)
+            caller->state = FIBER_RUNNING;
+
+        if (had_error_ || fiber->state == FIBER_ERROR)
+        {
+            /* The error was already reported — via runtime_error(), from
+            ** inside execute() — at the point it happened. transfer_value
+            ** was never produced by a normal return/yield, so handing it
+            ** back would let the host read stale or garbage data instead
+            ** of seeing the failure. */
+            had_error_ = true;
+            return val_nil();
+        }
 
         return fiber->transfer_value;
     }

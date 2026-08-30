@@ -3992,8 +3992,27 @@ namespace zen
                     len = (r->start > r->stop) ? (r->start - r->stop + (-r->step) - 1) / (-r->step) : 0;
                 R[ZEN_A(i)] = val_int(len);
             }
+            else if (is_instance(v))
+            {
+                Value result;
+                SAVE_IP();
+                if (!try_unary_operator(this, v, SLOT_LEN, &result))
+                {
+                    LOAD_STATE();
+                    RT_ERROR("object of type '%s' has no len()",
+                             as_instance(v)->klass->name->chars);
+                }
+                if (had_error_)
+                    return;
+                LOAD_STATE();
+                if (!is_int(result))
+                {
+                    RT_ERROR("__len__ must return an int");
+                }
+                R[ZEN_A(i)] = result;
+            }
             else
-                R[ZEN_A(i)] = val_int(0);
+                RT_ERROR("object of type '%s' has no len()", val_type_str(v));
             NEXT();
         }
 

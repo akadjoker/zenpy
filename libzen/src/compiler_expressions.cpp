@@ -62,6 +62,10 @@ namespace zen
         if (had_error_)
             return reg;
 
+        /* `name(` is the only shape whose callee still has a name at the
+        ** point call_expr() runs — remember it for keyword resolution. */
+        bool bare_name = token.type == TOK_IDENTIFIER;
+
         /* Infix — keep parsing while the next operator binds tighter */
         for (;;)
         {
@@ -70,7 +74,11 @@ namespace zen
             ** keeps ordinary comparisons such as `a < b` unchanged. */
             if (current_.type == TOK_LT && generic_call_ahead())
             {
+                pending_callee_valid_ = bare_name;
+                pending_callee_ = token;
+                bare_name = false;
                 reg = generic_call_expr(reg, dest);
+                pending_callee_valid_ = false;
                 if (had_error_)
                     return reg;
                 continue;
@@ -109,7 +117,11 @@ namespace zen
                 break;
             advance();
             Token op = previous_;
+            pending_callee_valid_ = bare_name && op.type == TOK_LPAREN;
+            pending_callee_ = token;
+            bare_name = false;
             reg = infix_rule(op, reg, dest);
+            pending_callee_valid_ = false;
             if (had_error_)
                 return reg;
         }
@@ -881,6 +893,10 @@ namespace zen
 
     int Compiler::call_expr(int callee, int dest)
     {
+        /* Resolve the signature before parsing arguments: nested calls in the
+        ** argument list overwrite pending_callee_. */
+        const FuncSig *sig = callee_signature();
+
         /* Move callee to a fresh register if it's a local — OP_CALL overwrites R[base] with result */
         int base = callee;
         int saved_next = state_->next_reg;
@@ -891,7 +907,7 @@ namespace zen
         }
 
         /* Parse arguments into consecutive registers after callee */
-        int nargs = argument_list(base);
+        int nargs = argument_list(base, 0, sig);
 
         consume(TOK_RPAREN, "Expected ')' after arguments.");
 
@@ -915,6 +931,8 @@ namespace zen
 
     int Compiler::generic_call_expr(int callee, int dest)
     {
+        const FuncSig *sig = callee_signature();
+
         /* OP_CALL overwrites R[base] with the return value, just like a
         ** normal call. */
         int base = callee;
@@ -925,7 +943,7 @@ namespace zen
             emit_move(base, callee);
         }
 
-        int nargs = generic_argument_list(base);
+        int nargs = generic_argument_list(base, sig);
         state_->emitter.emit_abc(OP_CALL, base, nargs, 1, previous_.line);
 
         state_->next_reg = base + 1;
@@ -941,14 +959,98 @@ namespace zen
         return base;
     }
 
-    int Compiler::argument_list(int base, int initial_nargs)
+    /* True when the next two tokens are `name =` — a keyword argument.
+    ** `==` is a different token, so a comparison never looks like one. */
+    bool Compiler::next_is_keyword_arg()
+    {
+        if (current_.type != TOK_IDENTIFIER)
+            return false;
+        LexerState saved = lexer_.save_state();
+        bool eq = lexer_.next_token().type == TOK_EQ;
+        lexer_.restore_state(saved);
+        return eq;
+    }
+
+    int Compiler::argument_list(int base, int initial_nargs, const FuncSig *sig)
     {
         int nargs = initial_nargs;
         bool has_spread = false;
+
+        /* Keyword arguments are resolved here and vanish: each one is
+        ** compiled straight into the register its parameter occupies, and
+        ** any parameter skipped along the way gets its declared default
+        ** emitted in place.  What OP_CALL sees is an ordinary positional
+        ** call. */
+        uint64_t filled = 0;
+        int highest = -1;
+        bool saw_keyword = false;
+
         if (!check(TOK_RPAREN))
         {
             do
             {
+                if (next_is_keyword_arg())
+                {
+                    /* `name = value` inside a call is a keyword argument, never
+                    ** an assignment expression.  Saying so out loud beats
+                    ** compiling it as one and passing the wrong positional. */
+                    if (!sig)
+                    {
+                        error("Keyword argument needs a signature the compiler "
+                              "can see (a def or method in this file).");
+                        return nargs;
+                    }
+                    if (has_spread)
+                    {
+                        error("Keyword argument cannot follow '*' spread.");
+                        return nargs;
+                    }
+                    if (!sig->takes_keywords)
+                    {
+                        error("This function does not accept keyword arguments.");
+                        return nargs;
+                    }
+                    advance(); /* the parameter name */
+                    Token key = previous_;
+                    advance(); /* '=' */
+
+                    int idx = sig_param_index(sig, key);
+                    if (idx < 0)
+                    {
+                        error("Unknown parameter name in keyword argument.");
+                        return nargs;
+                    }
+                    if (idx < nargs || (filled & (1ull << idx)))
+                    {
+                        error("Parameter already given a value.");
+                        return nargs;
+                    }
+
+                    int arg_reg = base + 1 + idx;
+                    if (arg_reg >= kMaxRegisters)
+                    {
+                        error("Too many arguments.");
+                        return nargs;
+                    }
+                    while (state_->next_reg <= arg_reg)
+                        alloc_reg();
+
+                    int r = expression(arg_reg);
+                    if (r != arg_reg)
+                        emit_move(arg_reg, r);
+                    filled |= 1ull << idx;
+                    if (idx > highest)
+                        highest = idx;
+                    saw_keyword = true;
+                    continue;
+                }
+
+                if (saw_keyword)
+                {
+                    error("Positional argument cannot follow a keyword argument.");
+                    return nargs;
+                }
+
                 int arg_reg = base + 1 + nargs;
                 if (arg_reg >= kMaxRegisters)
                 {
@@ -972,6 +1074,30 @@ namespace zen
                 nargs++;
             } while (match(TOK_COMMA));
         }
+
+        if (saw_keyword)
+        {
+            /* Fill the gaps the keywords jumped over.  Parameters past the
+            ** last one named are left to the VM, which already tops a call
+            ** up from ObjFunc::defaults. */
+            for (int i = nargs; i <= highest; i++)
+            {
+                if (filled & (1ull << i))
+                    continue;
+                const SigParam &p = sig_params_[sig->param_start + i];
+                if (!p.has_default)
+                {
+                    error("Skipped parameter has no default value.");
+                    return nargs;
+                }
+                int arg_reg = base + 1 + i;
+                while (state_->next_reg <= arg_reg)
+                    alloc_reg();
+                emit_sig_default(p, arg_reg);
+            }
+            nargs = highest + 1;
+        }
+
         /* Encode spread flag in bit 7 of nargs */
         if (has_spread)
             nargs |= 0x80;
@@ -980,7 +1106,7 @@ namespace zen
 
     /* Parse <T, U>(args) after a callee.  Generic values are normal runtime
     ** values (usually classes), placed before the explicit arguments. */
-    int Compiler::generic_argument_list(int base)
+    int Compiler::generic_argument_list(int base, const FuncSig *sig)
     {
         consume(TOK_LT, "Expected '<' before generic arguments.");
 
@@ -1008,7 +1134,7 @@ namespace zen
         consume(TOK_GT, "Expected '>' after generic arguments.");
         consume(TOK_LPAREN, "Expected '(' after generic arguments.");
 
-        int total_nargs = argument_list(base, nargs);
+        int total_nargs = argument_list(base, nargs, sig);
         consume(TOK_RPAREN, "Expected ')' after arguments.");
         return total_nargs;
     }
@@ -1144,15 +1270,16 @@ namespace zen
             if (base != obj)
                 emit_move(base, obj);
             int nargs;
+            const FuncSig *sig = method_signature(obj, field);
             if (check(TOK_LPAREN))
             {
                 advance(); /* consume '(' */
-                nargs = argument_list(base);
+                nargs = argument_list(base, 0, sig);
                 consume(TOK_RPAREN, "Expected ')' after arguments.");
             }
             else
             {
-                nargs = generic_argument_list(base);
+                nargs = generic_argument_list(base, sig);
             }
 
             /* 2-word instruction: OP_INVOKE + name constant */
@@ -1954,7 +2081,7 @@ namespace zen
         emit_move(base, 0); /* reg 0 = self */
 
         /* Arguments */
-        int nargs = argument_list(base);
+        int nargs = argument_list(base, 0, super_signature(method_name));
         consume(TOK_RPAREN, "Expected ')' after arguments.");
 
         /* Resolve parent class as a global → store as constant */

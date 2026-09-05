@@ -24,7 +24,7 @@ bin/zengame
 bin/zen_editor
 bin/zen_gl
 bin/zen
-bin/test_embedding
+bin/test_*
 bin/zen_*
 
 # Ignorar tudo dentro de bin/

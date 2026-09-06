@@ -200,3 +200,11 @@ Bunnymark (tests/manual/bunnymark_raylib, 60 fps, 25 s, same window):
 Zen 70 800, Lua 60 600, Wren 58 800, Python 34 800 sprites — at these
 counts the draw call dominates, so the VM changes barely move it; the
 run-to-run noise is about ±5%.
+
+Addendum (commit 15a3d81): annotated parameters now carry their static
+type, and any statically typed receiver other than `self` reads/writes
+fields through a checked direct index (OP_GETFIELD_IDXC/SETFIELD_IDXC:
+index taken only when the class's field name at that index matches, else
+the by-name access in the second word runs). A five-field read through a
+`p: P` parameter went from 0.092s to 0.075s per million calls; the four
+benchmarks above are unchanged (they use `self` or dynamic receivers).

@@ -380,3 +380,14 @@ receptores de classe estática que não a actual (parâmetros anotados
 `e: Enemy`, locais inferidos de outra classe, elementos `Array[T]`) — hoje
 só `self`/classe actual usam GETFIELD_IDX; o resto faz varrimento linear
 por nome. E o custo restante por chamada (frame push + LOAD_STATE).
+
+- Acesso a campos verificado (commit 15a3d81): `OP_GETFIELD_IDXC`/`OP_SETFIELD_IDXC`
+  (palavra 1 = índice directo aceite só se `klass->field_names[idx]` for o
+  nome pedido; palavra 2 = o GETFIELD/SETFIELD por nome original, executado
+  caso contrário). Emitidos para qualquer receptor de classe estática que
+  não `self`: parâmetros anotados, locais inferidos, elementos `Array[T]`,
+  cadeias que devolvem self, globais de módulo. As anotações de parâmetros
+  (`p: P`, `xs: Array[T]`) passam a ser registadas como tipo do local, logo
+  `p.x` usa o índice verificado e `p.m()` a vtable. Só `self` mantém o
+  GETFIELD_IDX sem verificação. Microbench `sum5(p: P)` com 5 campos:
+  0,092→0,075s (−19%). Suite 63/63.

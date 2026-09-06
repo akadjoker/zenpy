@@ -76,6 +76,11 @@ namespace zen
         /* Type hint: `param: TypeName` — used for OP_GETFIELD_IDX */
         bool has_type_hint;
         Token type_hint; /* type name token (if has_type_hint) */
+        /* The hint came from `name = ClassName(...)` rather than from an
+        ** annotation: any other assignment drops it again, and the value
+        ** is an instance of exactly ClassName, never of a subclass. */
+        bool type_inferred;
+        bool type_exact;
         /* `Array[Type]`: the array itself remains dynamic, but an indexed
         ** element has this statically declared class. */
         bool has_array_element_type;
@@ -141,6 +146,11 @@ namespace zen
         int32_t param_count;   /* VALUE params only — does NOT include generic_count */
         int32_t generic_count; /* type params declared as def f<T,U>(...): 2. 0 = not generic. */
         bool takes_keywords; /* false for *args, overloads, oversized lists */
+        /* The method hands back its receiver: declared `-> Self` (or
+        ** `-> OwnClass`), or every `return` in its body is `return self`
+        ** and so is the body's final statement. Lets `a.m().n()` keep the
+        ** receiver's static class across the chain. */
+        bool returns_self;
     };
 
     /* Class → parent, so `self.method()` can find a method the class
@@ -329,7 +339,7 @@ namespace zen
         const FuncSig *method_signature(int recv_reg, const Token &method) const;
         const FuncSig *unique_method_signature(const Token &method) const;
         const FuncSig *super_signature(const Token &method) const;
-        bool receiver_class(int reg, const char *&name, int32_t &len) const;
+        bool receiver_class(int reg, const char *&name, int32_t &len, bool *exact = nullptr) const;
         /* Record a class annotation (`name: ClassName [= expr]`) so a later
         ** obj.method<T>(...) on that variable can be recognised as a generic
         ** call. Locals reuse Local::type_hint; globals get their own small
@@ -342,13 +352,27 @@ namespace zen
         void set_global_type_hint(int gidx, const Token &type_tok);
         void set_local_array_element_type(int reg, const Token &type_tok);
         void set_global_array_element_type(int gidx, const Token &type_tok);
-        bool global_type_hint(int gidx, const char *&name, int32_t &len) const;
+        bool global_type_hint(int gidx, const char *&name, int32_t &len, bool *exact = nullptr) const;
         bool array_element_class(int reg, const char *&name, int32_t &len) const;
         /* receiver_class() plus the global-annotation table, via
         ** pending_receiver_ — the one extra source of "the receiver's
         ** static class name" a plain `obj.method(...)` dot_expr call has
         ** available that receiver_class() alone (locals/self only) doesn't. */
-        bool receiver_static_class(int reg, const char *&name, int32_t &len) const;
+        bool receiver_static_class(int reg, const char *&name, int32_t &len, bool *exact = nullptr) const;
+        /* --- Class inference from constructor calls ---
+        ** `x = ClassName(...)` proves x's class as surely as an annotation
+        ** would, for as long as x is not assigned anything else. call_expr()
+        ** leaves the class of a bare, unshadowed constructor call in
+        ** last_expr_ctor_*; the assignment paths consume it through these. */
+        bool known_script_class(const Token &name) const;
+        void infer_assigned_class_local(int reg);
+        void infer_assigned_class_global(int gidx);
+        /* A global assigned from inside any function can change behind the
+        ** module code's back, so it is never inferred (and loses an
+        ** inferred class it already had). */
+        void note_global_written_in_function(int gidx);
+        const FuncSig *find_method_in_chain(const char *cls, int32_t cls_len, const Token &method) const;
+        bool method_overridden_below(const char *cls, int32_t cls_len, const Token &method) const;
         /* True if `cls_name.method` is a NATIVE class method registered via
         ** ClassBuilder::generic_method() (never a script def — those go
         ** through FuncSig/method_signature instead). On true, out_arity
@@ -473,6 +497,8 @@ namespace zen
             bool has_class_type;
             bool has_array_element_type;
             Token array_element_type;
+            bool inferred; /* from `name = ClassName(...)`, see Local */
+            bool exact;
         };
         GlobalTypeHint global_type_hints_[kMaxGlobalTypeHints];
         int global_type_hint_count_;
@@ -507,6 +533,18 @@ namespace zen
         ** type metadata to arbitrary reusable temporaries. */
         int typed_subscript_reg_;
         Token typed_subscript_class_;
+        /* Result register of a self-returning method call whose receiver
+        ** class was known — valid only for the dot that follows at once. */
+        int typed_call_reg_;
+        Token typed_call_class_;
+        bool typed_call_exact_;
+        /* Set by call_expr() when the expression just parsed was exactly a
+        ** `ClassName(...)` constructor call; cleared by every other rule. */
+        bool last_expr_ctor_valid_;
+        Token last_expr_ctor_class_;
+        static const int kMaxFnWrittenGlobals = 64;
+        int fn_written_globals_[kMaxFnWrittenGlobals];
+        int fn_written_global_count_;
 
         int lookup_class_field(ObjString *name) const;
         int add_class_field(ObjString *name);

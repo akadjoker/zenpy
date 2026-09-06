@@ -654,6 +654,34 @@ namespace zen
                 consume(TOK_RPAREN, "Expected ')' after parameters.");
                 int default_count = (default_start_idx >= 0) ? (arity - default_start_idx) : 0;
 
+                /* Return type annotation: accepted and skipped, exactly as
+                ** on a free def. (`-> Self` is read by the signature
+                ** pre-scan, not here.) */
+                if (match(TOK_ARROW))
+                {
+                    if (check(TOK_STRING) || check(TOK_FSTRING))
+                    {
+                        advance();
+                    }
+                    else
+                    {
+                        consume(TOK_IDENTIFIER, "Expected return type name.");
+                        while (match(TOK_DOT)) consume(TOK_IDENTIFIER, "Expected type name.");
+                        if (match(TOK_LBRACKET))
+                        {
+                            int depth = 1;
+                            while (depth > 0 && !check(TOK_EOF))
+                            {
+                                if (match(TOK_LBRACKET)) depth++;
+                                else if (match(TOK_RBRACKET)) depth--;
+                                else advance();
+                            }
+                        }
+                        if (match(TOK_PIPE))
+                            consume(TOK_IDENTIFIER, "Expected type name.");
+                    }
+                }
+
                 /* Body */
                 colon_block();
 
@@ -1270,6 +1298,7 @@ namespace zen
                         else
                         {
                             int gidx = find_or_add_global(name_tok.start, name_tok.length);
+                            note_global_written_in_function(gidx);
                             if (has_simple_type)
                                 set_global_type_hint(gidx, type_tok);
                             else if (has_array_element_type)
@@ -1348,6 +1377,7 @@ namespace zen
                         int val = expression(-1);
                         if (val != local) emit_move(local, val);
                         free_reg(val);
+                        infer_assigned_class_local(local);
                     }
                     else
                     {
@@ -1359,6 +1389,7 @@ namespace zen
                         state_->locals[state_->local_count - 1].depth = 1;
                         int val = expression(local_reg);
                         if (val != local_reg) emit_move(local_reg, val);
+                        infer_assigned_class_local(local_reg);
                     }
                     return;
                 }
@@ -2075,10 +2106,14 @@ namespace zen
 
     void Compiler::store_to_lhs(const Token &name, int src_reg)
     {
+        /* Unpacked values have no single constructor expression behind
+        ** them: an inferred class on the target is dropped. */
+        last_expr_ctor_valid_ = false;
         int local = resolve_local(state_, name);
         if (local != -1)
         {
             if (local != src_reg) emit_move(local, src_reg);
+            infer_assigned_class_local(local);
             return;
         }
         int upval = resolve_upvalue(state_, name);
@@ -2090,6 +2125,8 @@ namespace zen
         /* Global */
         int gidx = find_or_add_global(name.start, name.length);
         state_->emitter.emit_abx(OP_SETGLOBAL, src_reg, gidx, name.line);
+        note_global_written_in_function(gidx);
+        infer_assigned_class_global(gidx);
     }
 
     void Compiler::expression_statement()

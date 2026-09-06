@@ -61,6 +61,7 @@ namespace zen
         int reg = prefix_rule(token, dest);
         if (had_error_)
             return reg;
+        last_expr_ctor_valid_ = false;
 
         /* `name(` is the only shape whose callee still has a name at the
         ** point call_expr() runs — remember it for keyword resolution. */
@@ -90,6 +91,7 @@ namespace zen
                     bare_name = false;
                     reg = generic_call_expr(reg, dest);
                     pending_callee_valid_ = false;
+                    last_expr_ctor_valid_ = false;
                     if (had_error_)
                         return reg;
                     continue;
@@ -116,6 +118,7 @@ namespace zen
                     /* 'not in' is the operator — hand to infix_rule with op=TOK_NOT */
                     Token op = previous_; /* the 'not' token */
                     reg = infix_rule(op, reg, dest);
+                    last_expr_ctor_valid_ = false;
                     if (had_error_)
                         return reg;
                     continue;
@@ -141,6 +144,9 @@ namespace zen
             pending_subscript_receiver_ = token;
             bare_name = false;
             reg = infix_rule(op, reg, dest);
+            /* Only a call can leave "this was ClassName(...)" standing. */
+            if (op.type != TOK_LPAREN)
+                last_expr_ctor_valid_ = false;
             pending_callee_valid_ = false;
             pending_receiver_valid_ = false;
             pending_subscript_receiver_valid_ = false;
@@ -1003,6 +1009,13 @@ namespace zen
         ** argument list overwrite pending_callee_. */
         const FuncSig *sig = callee_signature();
 
+        /* `ClassName(...)` through a bare, unshadowed name: the result is
+        ** an instance of exactly that class. Left in last_expr_ctor_* for
+        ** an assignment to pick up — decided now, before the argument list
+        ** (whose nested calls overwrite pending_callee_). */
+        const bool constructs_known_class = pending_callee_valid_ && known_script_class(pending_callee_);
+        const Token constructed_class = pending_callee_;
+
         /* OP_CALL overwrites R[base] with the result, so a LOCAL's own
         ** register can't serve as base. But the callee is usually not a
         ** local: it's the temporary a GETGLOBAL/GETFIELD/previous call just
@@ -1051,6 +1064,8 @@ namespace zen
             state_->emitter.emit_callglobal(base, nargs, 1, fused_global_idx, previous_.line);
         else
             state_->emitter.emit_abc(OP_CALL, base, nargs, 1, previous_.line);
+        last_expr_ctor_valid_ = constructs_known_class;
+        last_expr_ctor_class_ = constructed_class;
 
         /* Restore registers: call result is in base */
         state_->next_reg = base + 1;
@@ -1439,11 +1454,18 @@ namespace zen
         bool is_native_generic = false;
         const char *receiver_class_name = nullptr;
         int32_t receiver_class_len = 0;
+        bool receiver_exact = false;
         const bool receiver_has_static_class =
-            receiver_static_class(obj, receiver_class_name, receiver_class_len);
+            receiver_static_class(obj, receiver_class_name, receiver_class_len, &receiver_exact);
         const bool receiver_is_typed_subscript = (obj == typed_subscript_reg_);
         if (receiver_is_typed_subscript)
             typed_subscript_reg_ = -1; /* type belongs to this one dot only */
+        typed_call_reg_ = -1;          /* likewise: consumed by this dot or gone */
+        /* The declaration the receiver's static class resolves `field` to
+        ** (method_signature() only knows locals and self). */
+        const FuncSig *static_sig = receiver_has_static_class
+                                        ? find_method_in_chain(receiver_class_name, receiver_class_len, field)
+                                        : nullptr;
         if (!method_sig)
         {
             if (receiver_has_static_class)
@@ -1605,9 +1627,11 @@ namespace zen
             const FuncSig *sig = method_sig;
             int sel = vm_->intern_selector(field.start, field.length);
             int name_ki = state_->emitter.add_string_constant(field.start, field.length);
+            bool plain_call = false;
 
             if (check(TOK_LPAREN))
             {
+                plain_call = true;
                 advance(); /* consume '(' */
                 int nargs = argument_list(base, 0, sig);
                 consume(TOK_RPAREN, "Expected ')' after arguments.");
@@ -1634,9 +1658,12 @@ namespace zen
                 {
                     state_->emitter.emit_abc(OP_INVOKE_VT_FAST, base, nargs, sel, field.line);
                 }
-                else if (receiver_has_static_class && !method_has_type_params && sel <= 255)
+                else if (receiver_has_static_class && !method_has_type_params)
                 {
-                    state_->emitter.emit_abc(OP_INVOKE_VT, base, nargs, sel, field.line);
+                    /* Same two words as OP_INVOKE; the VM tries the vtable
+                    ** slot first and re-enters OP_INVOKE for anything else. */
+                    state_->emitter.emit_abc(OP_INVOKE_VT, base, nargs, 1, field.line);
+                    state_->emitter.emit((uint32_t)((sel << 16) | (name_ki & 0xFFFF)), field.line);
                 }
                 else
                 {
@@ -1669,6 +1696,24 @@ namespace zen
             }
 
             state_->next_reg = base + 1;
+            /* A self-returning method on a receiver of known class leaves a
+            ** value of that same class in `base`: the next link of the
+            ** chain (`a.b().c()`) can dispatch statically as well. Recorded
+            ** only when a dot follows at once — the fact never outlives
+            ** this chain. A receiver known only by annotation may be a
+            ** subclass instance, so its override must not change the
+            ** promise. */
+            if (plain_call && receiver_has_static_class && current_.type == TOK_DOT &&
+                static_sig && static_sig->returns_self &&
+                (receiver_exact || !method_overridden_below(receiver_class_name, receiver_class_len, field)))
+            {
+                typed_call_reg_ = base;
+                typed_call_class_.type = TOK_IDENTIFIER;
+                typed_call_class_.start = receiver_class_name;
+                typed_call_class_.length = receiver_class_len;
+                typed_call_class_.line = field.line;
+                typed_call_exact_ = receiver_exact;
+            }
             /* Defer the move into dest when another link continues the
             ** chain right after (`a.b().c()`, `a.b()[0]`, `a.b()(x)`) —
             ** see call_expr()'s identical comment and chain_continues(). */

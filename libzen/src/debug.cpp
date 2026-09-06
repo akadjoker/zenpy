@@ -588,12 +588,16 @@ namespace zen
         }
         case OP_INVOKE_VT:
         {
-            const char *sname = selector_name_safe(vm, c);
-            if (sname)
-                printf("R[%d] = R[%d].vt[%d](%d args)  \t; .%s()", a, a, c, b, sname);
-            else
-                printf("R[%d] = R[%d].vt[%d](%d args)", a, a, c, b);
-            break;
+            /* 2-word, same layout as OP_INVOKE: word2 = (sel_slot << 16) | name_ki */
+            uint32_t word2 = func->code[offset + 1];
+            int sel_slot = (int)(word2 >> 16);
+            int name_ki = (int)(word2 & 0xFFFF);
+            const char *mname = const_str(func, name_ki);
+            printf("R[%d] = R[%d].vt[%d]:%s(%d args)", a, a, sel_slot, mname ? mname : "?", b);
+            printf("\n");
+            printf("   |  %04d  %-16s", offset + 1, "(invoke-data)");
+            printf("sel=%d name_ki=%d", sel_slot, name_ki);
+            return offset + 2;
         }
         case OP_SUPER_INVOKE:
         {

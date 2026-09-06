@@ -3476,6 +3476,7 @@ namespace zen
         /* 2-word instruction: word1=[OP_INVOKE|A|B|C], word2=name_ki */
         /* A=base (receiver at R[A], args at R[A+1]..R[A+B]), result → R[A] */
         CASE(OP_INVOKE)
+        op_invoke_entry: /* OP_INVOKE_VT re-enters here on its slow path */
         {
             uint32_t i = *ip;
             uint8_t base = ZEN_A(i);
@@ -3588,17 +3589,30 @@ namespace zen
                     new_frame->ret_count = nresults;
                     fiber->stack_top = new_frame->base + fn->num_regs;
 
+                    /* Vararg method: pack the extras into the *args array,
+                    ** same as OP_CALL does for a free function. */
+                    if (fn->arity < 0)
+                    {
+                        int min_args = (-fn->arity) - 1;
+                        int extra = arg_count - min_args;
+                        gc_pause(&gc_);
+                        ObjArray *arr = new_array(&gc_);
+                        if (extra > 0)
+                            array_push_n(&gc_, arr, new_frame->base + 1 + min_args, extra);
+                        new_frame->base[1 + min_args] = val_obj((Obj *)arr);
+                        gc_resume(&gc_);
+                    }
                     /* Fill in default values for missing args */
-                    if (fn->arity >= 0 && fn->default_count > 0 && arg_count < fn->arity)
+                    else if (fn->default_count > 0 && arg_count < fn->arity)
                     {
                         int required = fn->arity - fn->default_count;
                         for (int di = arg_count; di < fn->arity; di++)
                             new_frame->base[1 + di] = fn->defaults[di - required];
                     }
 
-                    /* Clear unused regs: self(1) + arity args */
+                    /* Clear unused regs: self(1) + params (the *args slot included) */
                     {
-                        int used = 1 + (fn->arity >= 0 ? fn->arity : arg_count);
+                        int used = 1 + (fn->arity >= 0 ? fn->arity : (-fn->arity));
                         clear_new_regs(new_frame->base, used, fn->num_regs);
                     }
 
@@ -3844,108 +3858,59 @@ namespace zen
 
         CASE(OP_INVOKE_VT)
         {
-            /* Single-word vtable dispatch: A=base, B=arg_count, C=slot_idx */
+            /* Two words laid out exactly like OP_INVOKE: (base, nargs,
+            ** nresults) + (selector << 16 | name constant). Fast path when
+            ** the receiver is a script instance whose class holds a plain
+            ** closure of matching arity in the selector's vtable slot. Any
+            ** other shape — a value of another type, a slot the class never
+            ** filled, a native method, defaults, varargs, a generator —
+            ** re-enters OP_INVOKE on these same words, so a statically
+            ** typed receiver is only ever a hint about speed, never a
+            ** promise about behaviour. */
             uint32_t i = *ip;
             uint8_t base = ZEN_A(i);
             uint8_t arg_count = ZEN_B(i);
-            uint8_t slot = ZEN_C(i);
-
+            uint8_t nresults = ZEN_C(i);
+            if (nresults == 0) nresults = 1;
+            uint16_t slot = (uint16_t)(ip[1] >> 16);
             Value receiver = R[base];
-            if (!is_instance(receiver))
-                RT_ERROR("cannot invoke statically-resolved method on %s", val_type_str(receiver));
-            ObjInstance *inst = as_instance(receiver);
-            ObjClass *klass = inst->klass;
-            Value mval = slot < klass->vtable_size ? klass->vtable[slot] : val_nil();
-            if (is_nil(mval))
-                RT_ERROR("'%s' has no method in vtable slot %d", klass->name->chars, slot);
+            if (__builtin_expect(!is_instance(receiver), 0))
+                goto op_invoke_entry;
+            ObjClass *klass = as_instance(receiver)->klass;
+            if (__builtin_expect(slot >= klass->vtable_size, 0))
+                goto op_invoke_entry;
+            Value mval = klass->vtable[slot];
+            if (__builtin_expect(!is_closure(mval), 0))
+                goto op_invoke_entry;
+            ObjClosure *cl = as_closure(mval);
+            ObjFunc *fn = cl->func;
+            if (__builtin_expect(fn->arity != arg_count || fn->generic_arity > 0 || fn->is_generator, 0))
+                goto op_invoke_entry;
 
             /* Mark string args as shared — matches OP_CALL behaviour */
-            for (int ai = 0; ai < arg_count; ai++) {
+            for (int ai = 0; ai < arg_count; ai++)
+            {
                 Value av = R[base + 1 + ai];
                 if (__builtin_expect(is_string(av), 0))
                     av.as.obj->flags |= OBJ_FLAG_SHARED;
             }
-
-            if (is_closure(mval))
-            {
-                ObjClosure *cl = as_closure(mval);
-                ObjFunc *fn = cl->func;
-                if (fn->generic_arity > 0)
-                    RT_ERROR("'%s' generic method requires type arguments", klass->name->chars);
-                if (fn->arity < 0)
-                {
-                    int min_args = (-fn->arity) - 1;
-                    if (arg_count < min_args)
-                        RT_ERROR("%s method expects at least %d args but got %d", klass->name->chars, min_args, arg_count);
-                }
-                else if (fn->default_count > 0)
-                {
-                    int required = fn->arity - fn->default_count;
-                    if (arg_count < required || arg_count > fn->arity)
-                        RT_ERROR("%s method expects %d..%d args but got %d", klass->name->chars, required, fn->arity, arg_count);
-                }
-                else if (arg_count != fn->arity)
-                {
-                    RT_ERROR("%s method expects %d args but got %d", klass->name->chars, fn->arity, arg_count);
-                }
-                if (fiber->frame_count >= kMaxFrames)
-                {
-                    RT_ERROR("stack overflow");
-                }
-                CHECK_STACK_SPACE(fiber, &R[base], fn->num_regs);
-                ++ip;
-                SAVE_IP();
-                CallFrame *new_frame = &fiber->frames[fiber->frame_count++];
-                new_frame->closure = cl;
-                new_frame->func = fn;
-                new_frame->ip = fn->code;
-                new_frame->base = &R[base]; /* base[0]=self, base[1..]=args */
-                new_frame->ret_reg = base;
-                new_frame->ret_count = 1;
-                fiber->stack_top = new_frame->base + fn->num_regs;
-
-                if (fn->arity < 0)
-                {
-                    int min_args = (-fn->arity) - 1;
-                    int extra = arg_count - min_args;
-                    gc_pause(&gc_);
-                    ObjArray *arr = new_array(&gc_);
-                    if (extra > 0)
-                        array_push_n(&gc_, arr, new_frame->base + 1 + min_args, extra);
-                    new_frame->base[1 + min_args] = val_obj((Obj *)arr);
-                    gc_resume(&gc_);
-                    fiber->stack_top = new_frame->base + fn->num_regs;
-                }
-                else if (fn->default_count > 0 && arg_count < fn->arity)
-                {
-                    int required = fn->arity - fn->default_count;
-                    for (int di = arg_count; di < fn->arity; di++)
-                        new_frame->base[1 + di] = fn->defaults[di - required];
-                }
-
-                int used = 1 + (fn->arity < 0 ? -fn->arity : fn->arity);
-                clear_new_regs(new_frame->base, used, fn->num_regs);
-                LOAD_STATE();
-                DISPATCH();
-            }
-            else if (is_native(mval))
-            {
-                ObjNative *nat = as_native(mval);
-                if (nat->generic_arity > 0)
-                    RT_ERROR("'%s' generic method requires type arguments", klass->name->chars);
-                /* ClassBuilder convention: args[-1]=self, args[0..n-1]=arguments */
-                int nret = call_native(this, nat, &R[base + 1], arg_count);
-                if (nret < 0)
-                    RT_ERROR("native method returned error");
-                copy_native_results(&R[base], &R[base + 1], nret, 1);
-            }
-            else
-            {
-                RT_ERROR("vtable slot %d is nil (method not found)", slot);
-            }
-            NEXT();
+            if (fiber->frame_count >= kMaxFrames)
+                RT_ERROR("stack overflow");
+            CHECK_STACK_SPACE(fiber, &R[base], fn->num_regs);
+            ip += 2;
+            SAVE_IP();
+            CallFrame *new_frame = &fiber->frames[fiber->frame_count++];
+            new_frame->closure = cl;
+            new_frame->func = fn;
+            new_frame->ip = fn->code;
+            new_frame->base = &R[base]; /* base[0]=self, base[1..]=args */
+            new_frame->ret_reg = base;
+            new_frame->ret_count = nresults;
+            fiber->stack_top = new_frame->base + fn->num_regs;
+            clear_new_regs(new_frame->base, 1 + arg_count, fn->num_regs);
+            LOAD_STATE();
+            DISPATCH();
         }
-
         CASE(OP_SUPER_INVOKE)
         {
             /* 3-word: word1=[OP|base|argc|0], word2=(sel<<16|name_ki), word3=parent_gidx */

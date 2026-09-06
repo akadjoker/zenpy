@@ -48,6 +48,9 @@ namespace zen
         pending_receiver_valid_ = false;
         pending_subscript_receiver_valid_ = false;
         typed_subscript_reg_ = -1;
+        typed_call_reg_ = -1;
+        last_expr_ctor_valid_ = false;
+        fn_written_global_count_ = 0;
 
         sigs_ = nullptr; sig_count_ = 0; sig_cap_ = 0;
         sig_params_ = nullptr; sig_param_count_ = 0; sig_param_cap_ = 0;
@@ -123,6 +126,9 @@ namespace zen
         pending_receiver_valid_ = false;
         pending_subscript_receiver_valid_ = false;
         typed_subscript_reg_ = -1;
+        typed_call_reg_ = -1;
+        last_expr_ctor_valid_ = false;
+        fn_written_global_count_ = 0;
         global_type_hint_count_ = 0;
 
         sigs_ = nullptr; sig_count_ = 0; sig_cap_ = 0;
@@ -294,6 +300,8 @@ namespace zen
         int reg = state_->next_reg++;
         if (reg == typed_subscript_reg_)
             typed_subscript_reg_ = -1;
+        if (reg == typed_call_reg_)
+            typed_call_reg_ = -1;
         if (state_->next_reg > state_->max_reg)
             state_->max_reg = state_->next_reg;
         if (reg >= kMaxRegisters)
@@ -406,6 +414,8 @@ namespace zen
         local.is_const = false;
         local.has_type_hint = false;
         local.has_array_element_type = false;
+        local.type_inferred = false;
+        local.type_exact = false;
         return reg;
     }
 
@@ -581,7 +591,24 @@ namespace zen
         int local = resolve_local(state->parent, name);
         if (local != -1)
         {
-            state->parent->locals[local].captured = true;
+            /* resolve_local() returns the REGISTER; find the local that
+            ** owns it (indices and registers diverge once temporaries sit
+            ** between locals). A closure may rebind it at any time, so a
+            ** class inferred from an assignment is no longer a fact. */
+            for (int i = state->parent->local_count - 1; i >= 0; i--)
+            {
+                Local &cap = state->parent->locals[i];
+                if (cap.reg != local)
+                    continue;
+                cap.captured = true;
+                if (cap.type_inferred)
+                {
+                    cap.has_type_hint = false;
+                    cap.type_inferred = false;
+                    cap.type_exact = false;
+                }
+                break;
+            }
             return add_upvalue(state, local, true);
         }
 
@@ -633,6 +660,7 @@ namespace zen
                 int val = expression(reg);
                 if (val != reg)
                     emit_move(reg, val);
+                infer_assigned_class_local(reg);
                 return reg;
             }
             /* Augmented assignment */
@@ -653,6 +681,8 @@ namespace zen
                 }
                 Token op = current_;
                 advance();
+                last_expr_ctor_valid_ = false;
+                infer_assigned_class_local(reg); /* drops an inferred class */
                 int rhs_start = state_->emitter.current_offset();
                 int rhs = expression(-1);
 
@@ -741,6 +771,8 @@ namespace zen
             int val = expression(r);
             if (val != r) emit_move(r, val);
             state_->emitter.emit_abx(OP_SETGLOBAL, r, gidx, previous_.line);
+            note_global_written_in_function(gidx);
+            infer_assigned_class_global(gidx);
             return r;
         }
         /* Augmented assignment on global */
@@ -751,6 +783,9 @@ namespace zen
         {
             Token op = current_;
             advance();
+            note_global_written_in_function(gidx);
+            last_expr_ctor_valid_ = false;
+            infer_assigned_class_global(gidx); /* drops an inferred class */
             /* Non-marking pair: keeps a global string accumulator unshared
             ** so ADD can append in place — see OP_GETGLOBAL_AUG. */
             state_->emitter.emit_abx(OP_GETGLOBAL_AUG, r, gidx, previous_.line);
@@ -1109,6 +1144,17 @@ namespace zen
         if (t.type == TOK_RPAREN)
             t = scan.next_token();
 
+        /* `-> Self` / `-> OwnClass` on a method: it returns its receiver. */
+        bool returns_self = false;
+        if (t.type == TOK_ARROW)
+        {
+            t = scan.next_token();
+            if (owner && t.type == TOK_IDENTIFIER &&
+                ((t.length == 4 && memcmp(t.start, "Self", 4) == 0) ||
+                 name_eq(t.start, t.length, owner, owner_len)))
+                returns_self = true;
+        }
+
         if (n > kMaxSigParams)
             usable = false;
 
@@ -1124,6 +1170,7 @@ namespace zen
             if (owner && !name_eq(e.owner, e.owner_len, owner, owner_len))
                 continue;
             e.takes_keywords = false;
+            e.returns_self = false;
             return t;
         }
 
@@ -1140,6 +1187,7 @@ namespace zen
         sig.param_count = keep;
         sig.generic_count = generic_count;
         sig.takes_keywords = usable;
+        sig.returns_self = returns_self;
         for (int i = 0; i < keep; i++)
             sig_params_[sig_param_count_++] = tmp[i];
         sigs_[sig_count_++] = sig;
@@ -1157,12 +1205,26 @@ namespace zen
         int nest = 0;
         int depth = 0;
 
+        /* "Returns self" analysis of the method body being scanned: every
+        ** `return` in it must be literally `return self`, and the body's
+        ** last statement at its own depth must be one too — then every
+        ** path hands the receiver back. `yield`/`await` (the call does not
+        ** produce the value) or a rebinding of `self` disqualify. Nested
+        ** defs only ever make the answer more conservative. */
+        int body_sig = -1;
+        int body_depth = 0;
+        bool body_all_self = true;
+        bool body_last_self = false;
+        bool body_any_return = false;
+        TokenType prev_type = TOK_NEWLINE;
+
         Token t = scan.next_token();
         while (t.type != TOK_EOF && t.type != TOK_ERROR)
         {
             if (t.type == TOK_INDENT)
             {
                 depth++;
+                prev_type = TOK_INDENT;
                 t = scan.next_token();
                 continue;
             }
@@ -1172,8 +1234,58 @@ namespace zen
                     depth--;
                 while (nest > 0 && depth < stack[nest - 1].body_depth)
                     nest--;
+                if (body_sig >= 0 && depth < body_depth)
+                {
+                    if (body_any_return && body_all_self && body_last_self)
+                        sigs_[body_sig].returns_self = true;
+                    body_sig = -1;
+                }
+                prev_type = TOK_DEDENT;
                 t = scan.next_token();
                 continue;
+            }
+            if (body_sig >= 0 && depth >= body_depth)
+            {
+                bool stmt_start = prev_type == TOK_NEWLINE || prev_type == TOK_INDENT ||
+                                  prev_type == TOK_DEDENT || prev_type == TOK_SEMICOLON;
+                bool at_body_level = stmt_start && depth == body_depth;
+                if (t.type == TOK_RETURN)
+                {
+                    body_any_return = true;
+                    Token n1 = scan.next_token();
+                    if (n1.type == TOK_SELF)
+                    {
+                        Token n2 = scan.next_token();
+                        bool is_self = n2.type == TOK_NEWLINE || n2.type == TOK_EOF ||
+                                       n2.type == TOK_DEDENT || n2.type == TOK_SEMICOLON;
+                        if (!is_self)
+                            body_all_self = false;
+                        if (at_body_level)
+                            body_last_self = is_self;
+                        prev_type = TOK_SELF;
+                        t = n2;
+                        continue;
+                    }
+                    body_all_self = false;
+                    if (at_body_level)
+                        body_last_self = false;
+                    prev_type = TOK_RETURN;
+                    t = n1;
+                    continue;
+                }
+                if (t.type == TOK_YIELD || t.type == TOK_AWAIT)
+                    body_all_self = false;
+                if (at_body_level)
+                    body_last_self = false;
+                if (stmt_start && t.type == TOK_SELF)
+                {
+                    Token n1 = scan.next_token();
+                    if (n1.type == TOK_EQ)
+                        body_all_self = false;
+                    prev_type = TOK_SELF;
+                    t = n1;
+                    continue;
+                }
             }
             if (t.type == TOK_CLASS)
             {
@@ -1227,39 +1339,56 @@ namespace zen
                     c.parent = parent;
                     c.parent_len = parent_len;
                 }
+                prev_type = TOK_IDENTIFIER;
                 continue;
             }
             if (t.type == TOK_DEF)
             {
+                bool is_async = prev_type == TOK_ASYNC;
                 Token fname = scan.next_token();
                 if (fname.type != TOK_IDENTIFIER)
                 {
+                    prev_type = TOK_DEF;
                     t = fname;
                     continue;
                 }
                 bool is_method = nest > 0 && depth == stack[nest - 1].body_depth;
                 bool is_free = depth == 0;
                 if (is_method)
+                {
+                    int before = sig_count_;
                     t = scan_signature(scan, stack[nest - 1].name, stack[nest - 1].len, fname);
+                    /* A duplicate def (nothing appended) or a coroutine is
+                    ** left unknown. */
+                    body_sig = (sig_count_ > before && !is_async) ? sig_count_ - 1 : -1;
+                    body_depth = depth + 1;
+                    body_all_self = true;
+                    body_last_self = false;
+                    body_any_return = false;
+                }
                 else if (is_free)
                     t = scan_signature(scan, nullptr, 0, fname);
                 else
                     t = scan.next_token(); /* nested def: not addressable by name */
+                prev_type = TOK_IDENTIFIER;
                 continue;
             }
+            prev_type = t.type;
             t = scan.next_token();
         }
     }
 
     /* --- Resolving a call site to a signature --- */
 
-    bool Compiler::receiver_class(int reg, const char *&name, int32_t &len) const
+    bool Compiler::receiver_class(int reg, const char *&name, int32_t &len, bool *exact) const
     {
+        if (exact)
+            *exact = false;
         if (state_->is_method && in_class_ && reg == 0)
         {
             name = current_class_.start;
             len = current_class_.length;
-            return true;
+            return true; /* self may be a subclass instance: not exact */
         }
         for (int i = 0; i < state_->local_count; i++)
         {
@@ -1267,6 +1396,8 @@ namespace zen
             {
                 name = state_->locals[i].type_hint.start;
                 len = state_->locals[i].type_hint.length;
+                if (exact)
+                    *exact = state_->locals[i].type_exact;
                 return true;
             }
         }
@@ -1281,6 +1412,8 @@ namespace zen
             {
                 state_->locals[i].has_type_hint = true;
                 state_->locals[i].type_hint = type_tok;
+                state_->locals[i].type_inferred = false;
+                state_->locals[i].type_exact = false;
                 return;
             }
         }
@@ -1298,6 +1431,8 @@ namespace zen
             {
                 global_type_hints_[i].type_tok = type_tok;
                 global_type_hints_[i].has_class_type = true;
+                global_type_hints_[i].inferred = false;
+                global_type_hints_[i].exact = false;
                 return;
             }
         }
@@ -1307,6 +1442,8 @@ namespace zen
             global_type_hints_[global_type_hint_count_].type_tok = type_tok;
             global_type_hints_[global_type_hint_count_].has_class_type = true;
             global_type_hints_[global_type_hint_count_].has_array_element_type = false;
+            global_type_hints_[global_type_hint_count_].inferred = false;
+            global_type_hints_[global_type_hint_count_].exact = false;
             global_type_hint_count_++;
         }
         /* Table full: silently not tracked — worst case obj.method<T>(...)
@@ -1314,14 +1451,18 @@ namespace zen
         ** comparison, same as any other receiver with no known type. */
     }
 
-    bool Compiler::global_type_hint(int gidx, const char *&name, int32_t &len) const
+    bool Compiler::global_type_hint(int gidx, const char *&name, int32_t &len, bool *exact) const
     {
+        if (exact)
+            *exact = false;
         for (int i = 0; i < global_type_hint_count_; i++)
         {
             if (global_type_hints_[i].gidx == gidx && global_type_hints_[i].has_class_type)
             {
                 name = global_type_hints_[i].type_tok.start;
                 len = global_type_hints_[i].type_tok.length;
+                if (exact)
+                    *exact = global_type_hints_[i].exact;
                 return true;
             }
         }
@@ -1413,15 +1554,25 @@ namespace zen
         return false;
     }
 
-    bool Compiler::receiver_static_class(int reg, const char *&name, int32_t &len) const
+    bool Compiler::receiver_static_class(int reg, const char *&name, int32_t &len, bool *exact) const
     {
+        if (exact)
+            *exact = false;
         if (reg == typed_subscript_reg_)
         {
             name = typed_subscript_class_.start;
             len = typed_subscript_class_.length;
             return true;
         }
-        if (receiver_class(reg, name, len))
+        if (reg == typed_call_reg_)
+        {
+            name = typed_call_class_.start;
+            len = typed_call_class_.length;
+            if (exact)
+                *exact = typed_call_exact_;
+            return true;
+        }
+        if (receiver_class(reg, name, len, exact))
             return true;
         /* Fall back to a global's class-type annotation, ONLY when this
         ** dot_expr's receiver is literally the bare name the Pratt loop
@@ -1444,6 +1595,8 @@ namespace zen
                         return false;
                     name = s->locals[i].type_hint.start;
                     len = s->locals[i].type_hint.length;
+                    if (exact)
+                        *exact = s->locals[i].type_exact;
                     return true;
                 }
             }
@@ -1455,7 +1608,7 @@ namespace zen
         int gidx = vm_->find_global(buf);
         if (gidx < 0)
             return false;
-        return global_type_hint(gidx, name, len);
+        return global_type_hint(gidx, name, len, exact);
     }
 
     bool Compiler::native_generic_method_arity(const char *cls_name, int32_t cls_len,
@@ -1594,6 +1747,151 @@ namespace zen
             }
         }
         return nullptr;
+    }
+
+    const FuncSig *Compiler::find_method_in_chain(const char *cls, int32_t cls_len,
+                                                  const Token &method) const
+    {
+        for (int hop = 0; hop < kMaxSigInherit && cls; hop++)
+        {
+            const FuncSig *s = find_signature(cls, cls_len, method.start, method.length);
+            if (s)
+                return s;
+            const SigClass *c = find_sig_class(cls, cls_len);
+            if (!c || !c->parent)
+                return nullptr;
+            cls = c->parent;
+            cls_len = c->parent_len;
+        }
+        return nullptr;
+    }
+
+    /* Does any class in this file that descends from `cls` declare `method`
+    ** itself? If so, a receiver that is only known to be *some* `cls` may
+    ** run the override, and nothing the base declaration promises (such as
+    ** returning self) can be assumed of it. */
+    bool Compiler::method_overridden_below(const char *cls, int32_t cls_len,
+                                           const Token &method) const
+    {
+        for (int i = 0; i < sig_class_count_; i++)
+        {
+            const SigClass &c = sig_classes_[i];
+            if (name_eq(c.name, c.name_len, cls, cls_len))
+                continue;
+            const char *p = c.parent;
+            int32_t plen = c.parent_len;
+            bool descends = false;
+            for (int hop = 0; hop < kMaxSigInherit && p; hop++)
+            {
+                if (name_eq(p, plen, cls, cls_len))
+                {
+                    descends = true;
+                    break;
+                }
+                const SigClass *pc = find_sig_class(p, plen);
+                if (!pc)
+                    break;
+                p = pc->parent;
+                plen = pc->parent_len;
+            }
+            if (descends && find_signature(c.name, c.name_len, method.start, method.length))
+                return true;
+        }
+        return false;
+    }
+
+    /* A bare name that is a class declared in this file, shadowed by no
+    ** local or enclosing local, and not also the name of a free def. */
+    bool Compiler::known_script_class(const Token &name) const
+    {
+        for (CompilerState *s = state_; s != nullptr; s = s->parent)
+        {
+            for (int i = s->local_count - 1; i >= 0; i--)
+                if (identifiers_equal(s->locals[i].name, name))
+                    return false;
+        }
+        if (find_signature(nullptr, 0, name.start, name.length))
+            return false;
+        return find_sig_class(name.start, name.length) != nullptr;
+    }
+
+    void Compiler::infer_assigned_class_local(int reg)
+    {
+        for (int i = state_->local_count - 1; i >= 0; i--)
+        {
+            Local &l = state_->locals[i];
+            if (l.reg != reg)
+                continue;
+            if (l.has_type_hint && !l.type_inferred)
+                return; /* an annotation is the user's promise; keep it */
+            if (last_expr_ctor_valid_ && !l.captured)
+            {
+                l.has_type_hint = true;
+                l.type_hint = last_expr_ctor_class_;
+                l.type_inferred = true;
+                l.type_exact = true;
+            }
+            else
+            {
+                l.has_type_hint = false;
+                l.type_inferred = false;
+                l.type_exact = false;
+            }
+            return;
+        }
+    }
+
+    void Compiler::infer_assigned_class_global(int gidx)
+    {
+        bool written_in_fn = false;
+        for (int i = 0; i < fn_written_global_count_; i++)
+            if (fn_written_globals_[i] == gidx)
+                written_in_fn = true;
+        bool infer = last_expr_ctor_valid_ && !written_in_fn;
+        for (int i = 0; i < global_type_hint_count_; i++)
+        {
+            GlobalTypeHint &h = global_type_hints_[i];
+            if (h.gidx != gidx)
+                continue;
+            if (h.has_class_type && !h.inferred)
+                return;
+            h.has_class_type = infer;
+            h.inferred = infer;
+            h.exact = infer;
+            if (infer)
+                h.type_tok = last_expr_ctor_class_;
+            return;
+        }
+        if (!infer || global_type_hint_count_ >= kMaxGlobalTypeHints)
+            return;
+        GlobalTypeHint &h = global_type_hints_[global_type_hint_count_++];
+        h.gidx = gidx;
+        h.type_tok = last_expr_ctor_class_;
+        h.has_class_type = true;
+        h.has_array_element_type = false;
+        h.inferred = true;
+        h.exact = true;
+    }
+
+    void Compiler::note_global_written_in_function(int gidx)
+    {
+        if (state_->parent == nullptr)
+            return;
+        for (int i = 0; i < fn_written_global_count_; i++)
+            if (fn_written_globals_[i] == gidx)
+                return;
+        if (fn_written_global_count_ < kMaxFnWrittenGlobals)
+            fn_written_globals_[fn_written_global_count_++] = gidx;
+        for (int i = 0; i < global_type_hint_count_; i++)
+        {
+            GlobalTypeHint &h = global_type_hints_[i];
+            if (h.gidx == gidx && h.inferred)
+            {
+                h.has_class_type = false;
+                h.inferred = false;
+                h.exact = false;
+            }
+        }
     }
 
     int Compiler::sig_param_index(const FuncSig *sig, const Token &name) const

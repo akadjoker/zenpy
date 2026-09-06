@@ -83,4 +83,22 @@ class ObjectMotion:
 assert Motion(1.5).distance(2.0) == 3.0
 assert ObjectMotion().distance(3) == 21
 
+# The complete movement assignment has its own fusion. A non-numeric x must
+# deopt through the untouched four trailing instructions and call __add__.
+class StepMotion:
+    def __init__(self, x, velocity):
+        self.x = x
+        self.velocity = velocity
+
+    def step(self, dt):
+        self.x = self.x + self.velocity * dt
+        return self.x
+
+class AddByFive:
+    def __add__(self, value):
+        return 5
+
+assert StepMotion(1, 3).step(2) == 7
+assert StepMotion(AddByFive(), 3).step(2) == 5
+
 print("static method dispatch OK")

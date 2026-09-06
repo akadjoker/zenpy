@@ -658,6 +658,7 @@ namespace zen
             &&lbl_OP_CLASSFLATTEN,
             &&lbl_OP_CLASSSEAL,
             &&lbl_OP_INVOKE_VT_FAST,
+            &&lbl_OP_FIELD_MULADD,
         };
 
 #define DISPATCH() goto *dispatch_table[ZEN_OP(*ip)]
@@ -4767,6 +4768,45 @@ namespace zen
             else
                 R[ZEN_A(i2)] = val_float(to_number(vb) - to_number(vc));
             NEXT();
+        }
+
+        CASE(OP_FIELD_MULADD)
+        {
+            /* Five words, emitted only for self.x = self.x + self.vx * dt:
+            **   [0] original GETFIELD_IDX x, rewritten to this opcode
+            **   [1] GETFIELD_MUL velocity, [2] MUL, [3] ADD, [4] SETFIELD
+            ** All source operations remain immediately after us. For an
+            ** object/string value, execute the original sequence from [1]
+            ** after performing its original first load. */
+            uint32_t load_x = ip[0];
+            uint32_t load_v = ip[1];
+            uint32_t mul = ip[2];
+            ObjInstance *inst = as_instance(R[ZEN_B(load_x)]);
+            Value x = inst->fields[ZEN_C(load_x)];
+            Value v = inst->fields[ZEN_C(load_v)];
+            Value dt = R[ZEN_C(mul)];
+            if (__builtin_expect(!is_obj(x) && !is_obj(v) && !is_obj(dt), 1))
+            {
+                Value product;
+                if (v.type == VAL_INT && dt.type == VAL_INT)
+                    product = val_int((int64_t)((uint64_t)v.as.integer * (uint64_t)dt.as.integer));
+                else
+                    product = val_float(to_number(v) * to_number(dt));
+
+                if (x.type == VAL_INT && product.type == VAL_INT)
+                    inst->fields[ZEN_C(load_x)] = val_int((int64_t)((uint64_t)x.as.integer +
+                                                                     (uint64_t)product.as.integer));
+                else
+                    inst->fields[ZEN_C(load_x)] = val_float(to_number(x) + to_number(product));
+                ip += 4;
+                NEXT();
+            }
+
+            /* Deopt: first instruction behaved as GETFIELD_IDX; the next
+            ** four words are still the original dynamic bytecode. */
+            R[ZEN_A(load_x)] = x;
+            ++ip;
+            DISPATCH();
         }
 
         CASE(OP_EVAL)

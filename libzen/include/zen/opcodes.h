@@ -201,6 +201,11 @@ namespace zen
         /* Fully static script-method call. The compiler emits it only for
         ** an explicitly typed receiver with an exact, non-generic arity. */
         OP_INVOKE_VT_FAST,
+
+        /* Five-word movement update fusion. The following four words retain
+        ** the original GETFIELD_MUL/MUL/ADD/SETFIELD_IDX sequence so the VM
+        ** can deopt without changing language semantics. */
+        OP_FIELD_MULADD,
     };
 
 /* Encode/Decode — ABC format */

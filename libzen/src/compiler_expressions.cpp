@@ -1442,8 +1442,42 @@ namespace zen
                 /* Assignment: self.field = expr */
                 if (can_assign && match(TOK_EQ))
                 {
+                    int rhs_start = state_->emitter.current_offset();
                     int val = expression(-1);
                     state_->emitter.emit_abc(OP_SETFIELD_IDX, obj, fidx, val, field.line);
+
+                    /* Fuse the exact bytecode shape produced by
+                    **   self.x = self.x + self.vx * dt
+                    ** into one numeric hot path. Its four following words
+                    ** are deliberately retained: if a field becomes a
+                    ** string or an overloaded object, the VM runs those
+                    ** ordinary instructions unchanged. */
+                    int rhs_end = state_->emitter.current_offset();
+                    if (rhs_end == rhs_start + 5)
+                    {
+                        Instruction load_x = state_->emitter.instruction_at(rhs_start);
+                        Instruction load_v = state_->emitter.instruction_at(rhs_start + 1);
+                        Instruction mul = state_->emitter.instruction_at(rhs_start + 2);
+                        Instruction add = state_->emitter.instruction_at(rhs_start + 3);
+                        Instruction store_x = state_->emitter.instruction_at(rhs_start + 4);
+                        if (ZEN_OP(load_x) == OP_GETFIELD_IDX &&
+                            ZEN_OP(load_v) == OP_GETFIELD_MUL &&
+                            ZEN_OP(mul) == OP_MUL &&
+                            ZEN_OP(add) == OP_ADD &&
+                            ZEN_OP(store_x) == OP_SETFIELD_IDX &&
+                            ZEN_B(load_x) == obj &&
+                            ZEN_B(load_v) == obj &&
+                            ZEN_A(load_x) == ZEN_B(add) &&
+                            ZEN_A(load_v) == ZEN_B(mul) &&
+                            ZEN_A(mul) == ZEN_C(add) &&
+                            ZEN_A(add) == ZEN_C(store_x) &&
+                            ZEN_A(store_x) == obj &&
+                            ZEN_C(load_x) == fidx &&
+                            ZEN_B(store_x) == fidx)
+                        {
+                            state_->emitter.rewrite_opcode_at(rhs_start, OP_FIELD_MULADD);
+                        }
+                    }
                     if (val != reg)
                         free_reg(val);
                     if (obj != reg)

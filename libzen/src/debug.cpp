@@ -115,6 +115,7 @@ namespace zen
         "CLASSFLATTEN",
         "CLASSSEAL",
         "INVOKE_VT_FAST",
+        "FIELD_MULADD",
     };
 
     const char *opcode_name(OpCode op)
@@ -707,6 +708,21 @@ namespace zen
         {
             printf("R[%d] = R[%d].vt_fast[%d](%d args)", a, a, c, b);
             break;
+        }
+        case OP_FIELD_MULADD:
+        {
+            uint32_t load_v = func->code[offset + 1];
+            uint32_t mul = func->code[offset + 2];
+            uint32_t add = func->code[offset + 3];
+            uint32_t store = func->code[offset + 4];
+            printf("R[%d].fields[%d] = R[%d].fields[%d] + R[%d].fields[%d] * R[%d]",
+                   ZEN_A(store), ZEN_B(store), ZEN_B(instr), ZEN_C(instr),
+                   ZEN_B(load_v), ZEN_C(load_v), ZEN_C(mul));
+            printf("\n");
+            printf("   |  %04d  %-16s", offset + 1, "(fallback-bytecode)");
+            printf("GETFIELD_MUL / MUL / ADD / SETFIELD_IDX");
+            (void)add;
+            return offset + 5;
         }
 
         /* === String/Misc === */

@@ -813,9 +813,23 @@ namespace zen
         if (state_->next_reg <= reg)
             state_->next_reg = reg + 1;
 
-        int right = parse_precedence(PREC_AND + 1, reg);
+        /* dest=-1, not reg: passing reg here forces named_variable() to
+        ** MOVE any bare name read on the RHS (most importantly `self`)
+        ** into reg immediately, before a following `.field` gets a chance
+        ** to see it — is_current_class_instance() only recognizes literal
+        ** register 0 as "this is self", so a copy silently downgrades
+        ** `self.field` from OP_GETFIELD_IDX (O(1)) to OP_GETFIELD's
+        ** by-name lookup for the rest of the RHS. With dest=-1, a bare
+        ** `self`/local on the RHS is returned in its own original
+        ** register untouched, and the single MOVE this function already
+        ** performs below still happens — just after the RHS finishes
+        ** instead of before dot_expr() gets to look at it. */
+        int right = parse_precedence(PREC_AND + 1, -1);
         if (right != reg)
+        {
             emit_move(reg, right);
+            free_reg(right);
+        }
 
         state_->next_reg = saved_next > state_->next_reg ? saved_next : state_->next_reg;
         state_->emitter.patch_jump(jump);
@@ -850,7 +864,10 @@ namespace zen
 
         consume(TOK_ELSE, "Expected 'else' in ternary expression.");
 
-        int false_val = parse_precedence(PREC_TERNARY + 1, reg);
+        /* dest=-1, not reg — same reasoning as logical_and()/logical_or():
+        ** avoids forcing a premature MOVE of a bare self/local before a
+        ** following `.field` can use OP_GETFIELD_IDX's O(1) path. */
+        int false_val = parse_precedence(PREC_TERNARY + 1, -1);
         if (false_val != reg)
             emit_move(reg, false_val);
 
@@ -897,9 +914,13 @@ namespace zen
         if (state_->next_reg <= reg)
             state_->next_reg = reg + 1;
 
-        int right = parse_precedence(PREC_OR + 1, reg);
+        /* dest=-1, not reg — same reasoning as logical_and() above. */
+        int right = parse_precedence(PREC_OR + 1, -1);
         if (right != reg)
+        {
             emit_move(reg, right);
+            free_reg(right);
+        }
 
         state_->next_reg = saved_next > state_->next_reg ? saved_next : state_->next_reg;
         state_->emitter.patch_jump(jump);
@@ -1526,8 +1547,11 @@ namespace zen
         /* If reg is truthy (not nil/false), skip right side */
         int jump = state_->emitter.emit_jump(OP_JMPIF, reg, line);
 
-        /* Parse right operand */
-        int right = parse_precedence(PREC_OR + 1, reg);
+        /* Parse right operand. dest=-1, not reg — same reasoning as
+        ** logical_and()/logical_or(): avoids forcing a premature MOVE of a
+        ** bare self/local before a following `.field` can use
+        ** OP_GETFIELD_IDX's O(1) path. */
+        int right = parse_precedence(PREC_OR + 1, -1);
         if (right != reg)
         {
             emit_move(reg, right);

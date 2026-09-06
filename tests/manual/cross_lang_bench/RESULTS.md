@@ -28,15 +28,15 @@ exact equivalent). Best-of-3 runs each.
 
 (multiplier = slowdown vs. the fastest interpreter for that benchmark)
 
-`method_call` improved ~8.4% (0.228s → 0.208s) from the two vtable/MOVE fixes —
-the only benchmark of the four that exercises inheritance and chained method
-calls, which is exactly what those two fixes target. `fib`/`for_loop`/
-`binary_trees` are unchanged within measurement noise, as expected: they don't
-hit either code path. Several more diagnosed causes (dead OP_INVOKE_VT opcode
-never emitted by the compiler, `ObjInstance`'s two-allocation construction,
-`super()` resolving its parent class via a global-array indirection every
-call) remain as follow-up — see the project memory for the full list and
-why each one is safe to defer.
+The ZenPy column above is from the first perf commit only (vtable flatten +
+chained-call MOVE elision); the later commits on the branch improved every
+one of the four — see "Effect of the perf branch" at the end for the
+interleaved base-vs-new measurement. Several more diagnosed causes (dead
+OP_INVOKE_VT opcode never emitted by the compiler, `ObjInstance`'s
+two-allocation construction, `super()` resolving its parent class via a
+global-array indirection every call, ADDI/SUBI not yet used for `+=`)
+remain as follow-up — see the project memory for the full list and why each
+one is safe to defer.
 
 ## Takeaways
 
@@ -73,3 +73,40 @@ for f in fib for_loop method_call binary_trees; do
   wren_cli tests/manual/cross_lang_bench/wren/$f.wren
 done
 ```
+
+## Effect of the perf branch on ZenPy itself (the measurement that matters)
+
+Absolute numbers drift 8-40% between sessions on this machine — for every
+language at once — so the table above must not be compared across runs.
+The reliable measurement is the same script on two ZenPy builds, alternated
+in the same time window. Base = `165fca8` (where `perf/vtable-dispatch-and-
+move-elision` branched off), new = `826d3e4` (vtable flatten, receiver/
+callee/argument register reuse, deferred moves across postfix chains,
+GETFIELD_IDX kept through and/or/ternary, ADDI/SUBI folding). Best of 6,
+Release -O3:
+
+| Benchmark      | base   | new    | ZenPy speedup |
+|----------------|-------:|-------:|--------------:|
+| fib(28) x5     | 0.331s | 0.277s | **+16%**      |
+| for_loop (5M)  | 0.285s | 0.210s | **+27%**      |
+| method_call    | 0.260s | 0.240s | **+8%**       |
+| binary_trees   | ~0.63s | ~0.58s | ~+8% (mean of 10 interleaved; single best-of-6 pairs land within noise either way) |
+
+Where the gains come from is visible in the compiler's own output
+(`zen --dis-only`): binary_trees' `Tree.__init__` went from 30 to 25
+instructions (11 to 9 registers), `Tree.check` from 24 to 22 (13 to 9),
+with no instruction added anywhere — `depth - 1` is one SUBI instead of
+LOADI+SUB, a call no longer copies its callee into a fresh base, a
+receiver produced by the previous expression is used in place. fib gets
+SUBI for `n - 1`/`n - 2` plus the callee reuse on every recursive call;
+for_loop gets ADDI for `i + 1`. None of this is specific to these four
+scripts: it applies to every call, every chained method access and every
+`x + <small literal>` in any program.
+
+The embedding bunnymark (`tests/manual/bunnymark/`, 60k objects, one
+native call per object per frame) moved from ~70 to ~80 fps across the same
+commits, measured the same interleaved way. Lua's equivalent sits around
+85-99 fps on this machine; the remaining gap there is now general
+dispatch overhead spread thin across MOVE/LOADI/GETFIELD_IDX/LT and
+OP_INVOKE's per-call arity checks (per `perf annotate`), not a single
+pathological path.

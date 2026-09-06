@@ -46,6 +46,8 @@ namespace zen
         global_type_hint_count_ = 0;
         pending_callee_valid_ = false;
         pending_receiver_valid_ = false;
+        pending_subscript_receiver_valid_ = false;
+        typed_subscript_reg_ = -1;
 
         sigs_ = nullptr; sig_count_ = 0; sig_cap_ = 0;
         sig_params_ = nullptr; sig_param_count_ = 0; sig_param_cap_ = 0;
@@ -119,6 +121,8 @@ namespace zen
         pending_decorator_count_ = 0;
         pending_callee_valid_ = false;
         pending_receiver_valid_ = false;
+        pending_subscript_receiver_valid_ = false;
+        typed_subscript_reg_ = -1;
         global_type_hint_count_ = 0;
 
         sigs_ = nullptr; sig_count_ = 0; sig_cap_ = 0;
@@ -288,6 +292,8 @@ namespace zen
     int Compiler::alloc_reg()
     {
         int reg = state_->next_reg++;
+        if (reg == typed_subscript_reg_)
+            typed_subscript_reg_ = -1;
         if (state_->next_reg > state_->max_reg)
             state_->max_reg = state_->next_reg;
         if (reg >= kMaxRegisters)
@@ -310,6 +316,8 @@ namespace zen
                     return; /* don't free locals */
             }
             state_->next_reg--;
+            if (reg == typed_subscript_reg_)
+                typed_subscript_reg_ = -1;
         }
     }
 
@@ -397,6 +405,7 @@ namespace zen
         local.captured = false;
         local.is_const = false;
         local.has_type_hint = false;
+        local.has_array_element_type = false;
         return reg;
     }
 
@@ -1247,6 +1256,7 @@ namespace zen
             if (global_type_hints_[i].gidx == gidx)
             {
                 global_type_hints_[i].type_tok = type_tok;
+                global_type_hints_[i].has_class_type = true;
                 return;
             }
         }
@@ -1254,6 +1264,8 @@ namespace zen
         {
             global_type_hints_[global_type_hint_count_].gidx = gidx;
             global_type_hints_[global_type_hint_count_].type_tok = type_tok;
+            global_type_hints_[global_type_hint_count_].has_class_type = true;
+            global_type_hints_[global_type_hint_count_].has_array_element_type = false;
             global_type_hint_count_++;
         }
         /* Table full: silently not tracked — worst case obj.method<T>(...)
@@ -1265,7 +1277,7 @@ namespace zen
     {
         for (int i = 0; i < global_type_hint_count_; i++)
         {
-            if (global_type_hints_[i].gidx == gidx)
+            if (global_type_hints_[i].gidx == gidx && global_type_hints_[i].has_class_type)
             {
                 name = global_type_hints_[i].type_tok.start;
                 len = global_type_hints_[i].type_tok.length;
@@ -1275,8 +1287,99 @@ namespace zen
         return false;
     }
 
+    void Compiler::set_local_array_element_type(int reg, const Token &type_tok)
+    {
+        for (int i = state_->local_count - 1; i >= 0; i--)
+        {
+            if (state_->locals[i].reg == reg)
+            {
+                state_->locals[i].has_array_element_type = true;
+                state_->locals[i].array_element_type = type_tok;
+                return;
+            }
+        }
+    }
+
+    void Compiler::set_global_array_element_type(int gidx, const Token &type_tok)
+    {
+        for (int i = 0; i < global_type_hint_count_; i++)
+        {
+            if (global_type_hints_[i].gidx == gidx)
+            {
+                global_type_hints_[i].has_array_element_type = true;
+                global_type_hints_[i].array_element_type = type_tok;
+                return;
+            }
+        }
+        if (global_type_hint_count_ < kMaxGlobalTypeHints)
+        {
+            GlobalTypeHint &hint = global_type_hints_[global_type_hint_count_++];
+            hint.gidx = gidx;
+            hint.has_class_type = false;
+            hint.has_array_element_type = true;
+            hint.array_element_type = type_tok;
+        }
+    }
+
+    bool Compiler::array_element_class(int reg, const char *&name, int32_t &len) const
+    {
+        for (int i = 0; i < state_->local_count; i++)
+        {
+            const Local &local = state_->locals[i];
+            if (local.reg == reg && local.has_array_element_type)
+            {
+                name = local.array_element_type.start;
+                len = local.array_element_type.length;
+                return true;
+            }
+        }
+        if (!pending_subscript_receiver_valid_)
+            return false;
+
+        /* The bare array may be an upvalue; use its nearest lexical binding. */
+        for (CompilerState *s = state_; s != nullptr; s = s->parent)
+        {
+            for (int i = s->local_count - 1; i >= 0; i--)
+            {
+                const Local &local = s->locals[i];
+                if (identifiers_equal(local.name, pending_subscript_receiver_))
+                {
+                    if (!local.has_array_element_type)
+                        return false;
+                    name = local.array_element_type.start;
+                    len = local.array_element_type.length;
+                    return true;
+                }
+            }
+        }
+        char buf[256];
+        int n = pending_subscript_receiver_.length < 255 ? pending_subscript_receiver_.length : 255;
+        memcpy(buf, pending_subscript_receiver_.start, n);
+        buf[n] = '\0';
+        int gidx = vm_->find_global(buf);
+        if (gidx < 0)
+            return false;
+        for (int i = 0; i < global_type_hint_count_; i++)
+        {
+            const GlobalTypeHint &hint = global_type_hints_[i];
+            if (hint.gidx == gidx && hint.has_array_element_type)
+            {
+                name = hint.array_element_type.start;
+                len = hint.array_element_type.length;
+                return true;
+            }
+        }
+        return false;
+    }
+
     bool Compiler::receiver_static_class(int reg, const char *&name, int32_t &len) const
     {
+        if (reg == typed_subscript_reg_)
+        {
+            name = typed_subscript_class_.start;
+            len = typed_subscript_class_.length;
+            return true;
+        }
         if (receiver_class(reg, name, len))
             return true;
         /* Fall back to a global's class-type annotation, ONLY when this

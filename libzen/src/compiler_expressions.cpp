@@ -137,10 +137,13 @@ namespace zen
             ** Same idea as pending_callee_, one hop earlier. */
             pending_receiver_valid_ = bare_name && op.type == TOK_DOT;
             pending_receiver_ = token;
+            pending_subscript_receiver_valid_ = bare_name && op.type == TOK_LBRACKET;
+            pending_subscript_receiver_ = token;
             bare_name = false;
             reg = infix_rule(op, reg, dest);
             pending_callee_valid_ = false;
             pending_receiver_valid_ = false;
+            pending_subscript_receiver_valid_ = false;
             if (had_error_)
                 return reg;
         }
@@ -1404,6 +1407,9 @@ namespace zen
         int32_t receiver_class_len = 0;
         const bool receiver_has_static_class =
             receiver_static_class(obj, receiver_class_name, receiver_class_len);
+        const bool receiver_is_typed_subscript = (obj == typed_subscript_reg_);
+        if (receiver_is_typed_subscript)
+            typed_subscript_reg_ = -1; /* type belongs to this one dot only */
         if (!method_sig)
         {
             if (receiver_has_static_class)
@@ -1548,7 +1554,19 @@ namespace zen
                 ** the calls OP_INVOKE_VT cannot represent. */
                 const bool method_has_type_params =
                     (method_sig && method_sig->generic_count > 0) || is_native_generic;
-                if (receiver_has_static_class && !method_has_type_params && sel <= 255)
+                /* Array[T][i].method(...) can take the fully static opcode
+                ** when the scanner knows every value argument is present.
+                ** It is intentionally opt-in through Array[T]: a plain
+                ** dynamic receiver keeps the checked call semantics. */
+                const bool exact_typed_array_call = receiver_is_typed_subscript &&
+                    method_sig && method_sig->takes_keywords &&
+                    !method_has_type_params && !(nargs & 0x80) &&
+                    nargs == method_sig->param_count && sel <= 255;
+                if (exact_typed_array_call)
+                {
+                    state_->emitter.emit_abc(OP_INVOKE_VT_FAST, base, nargs, sel, field.line);
+                }
+                else if (receiver_has_static_class && !method_has_type_params && sel <= 255)
                 {
                     state_->emitter.emit_abc(OP_INVOKE_VT, base, nargs, sel, field.line);
                 }
@@ -1685,6 +1703,11 @@ namespace zen
 
         consume(TOK_RBRACKET, "Expected ']' after subscript.");
 
+        const char *element_class_name = nullptr;
+        int32_t element_class_len = 0;
+        const bool has_typed_element =
+            array_element_class(obj, element_class_name, element_class_len);
+
         int reg = (dest >= 0) ? dest : alloc_reg();
 
         /* Assignment: obj[idx] = expr */
@@ -1757,6 +1780,16 @@ namespace zen
 
         /* Read */
         state_->emitter.emit_abc(OP_GETINDEX, reg, obj, index, previous_.line);
+        if (has_typed_element)
+        {
+            typed_subscript_reg_ = reg;
+            typed_subscript_class_.start = element_class_name;
+            typed_subscript_class_.length = element_class_len;
+        }
+        else
+        {
+            typed_subscript_reg_ = -1;
+        }
         free_reg(index);
         if (obj != reg)
             free_reg(obj);

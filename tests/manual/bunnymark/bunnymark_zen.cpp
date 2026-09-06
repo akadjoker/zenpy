@@ -73,12 +73,15 @@ def make_bunnies(n):
     return bunnies
 
 def run_frames(bunnies, frames):
+    # One explicit boundary annotation is enough for every indexed element
+    # in this hot loop to compile as Bunny and dispatch through INVOKE_VT.
+    typed_bunnies: Array[Bunny] = bunnies
     n = len(bunnies)
     f = 0
     while f < frames:
         i = 0
         while i < n:
-            bunnies[i].update(0.016)
+            typed_bunnies[i].update(0.016)
             i = i + 1
         f = f + 1
 )ZEN";

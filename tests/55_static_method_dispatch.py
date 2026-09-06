@@ -52,4 +52,12 @@ v: VarArgs = VarArgs()
 assert v.count(1, 2) == 2
 assert v.via_self() == 3
 
+# Array[T] carries T through an indexed read. This is the game-loop shape:
+# one collection annotation, then direct virtual calls on elements.
+def sum_values(items):
+    typed: Array[Base] = items
+    return typed[0].value() + typed[1].value()
+
+assert sum_values([Base(), Child()]) == 30
+
 print("static method dispatch OK")

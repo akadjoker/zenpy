@@ -1199,11 +1199,13 @@ namespace zen
                     /* Capture a simple (non-dotted, non-subscripted) type name
                     ** so a class annotation — `c: Container = Container()` —
                     ** can feed receiver_class() and let obj.method<T>(...) be
-                    ** recognised on `c` later. Dotted/bracketed/string hints
-                    ** (`list[int]`, 'quoted') are still just skipped: only a
-                    ** bare identifier can name a class. */
+                    ** recognised on `c` later. Also preserve the element
+                    ** class in an explicit `Array[Enemy]` annotation so
+                    ** `enemies[i].update()` has a known receiver. */
                     bool has_simple_type = false;
+                    bool has_array_element_type = false;
                     Token type_tok;
+                    Token array_element_tok;
                     if (check(TOK_STRING) || check(TOK_FSTRING))
                     {
                         advance(); /* quoted type hint like 'list[int]' */
@@ -1216,6 +1218,17 @@ namespace zen
                         while (match(TOK_DOT)) consume(TOK_IDENTIFIER, "Expected type name.");
                         if (match(TOK_LBRACKET))
                         {
+                            /* Only Array[Class] is a VM performance hint.
+                            ** Other parameterized hints remain syntax we
+                            ** accept and skip, as before. */
+                            const bool is_array = type_tok.length == 5 &&
+                                memcmp(type_tok.start, "Array", 5) == 0;
+                            if (is_array && check(TOK_IDENTIFIER))
+                            {
+                                array_element_tok = current_;
+                                advance();
+                                has_array_element_type = check(TOK_RBRACKET);
+                            }
                             int depth = 1;
                             while (depth > 0 && !check(TOK_EOF))
                             {
@@ -1233,6 +1246,8 @@ namespace zen
                         {
                             if (has_simple_type)
                                 set_local_type_hint(local, type_tok);
+                            else if (has_array_element_type)
+                                set_local_array_element_type(local, array_element_tok);
                             int val = expression(local);
                             if (val != local) emit_move(local, val);
                         }
@@ -1247,6 +1262,8 @@ namespace zen
                             state_->locals[state_->local_count - 1].depth = 1;
                             if (has_simple_type)
                                 set_local_type_hint(local_reg, type_tok);
+                            else if (has_array_element_type)
+                                set_local_array_element_type(local_reg, array_element_tok);
                             int val = expression(local_reg);
                             if (val != local_reg) emit_move(local_reg, val);
                         }
@@ -1255,6 +1272,8 @@ namespace zen
                             int gidx = find_or_add_global(name_tok.start, name_tok.length);
                             if (has_simple_type)
                                 set_global_type_hint(gidx, type_tok);
+                            else if (has_array_element_type)
+                                set_global_array_element_type(gidx, array_element_tok);
                             int val = expression(-1);
                             state_->emitter.emit_abx(OP_SETGLOBAL, val, gidx, name_tok.line);
                             free_reg(val);
@@ -1263,13 +1282,24 @@ namespace zen
                     /* else: pure annotation — no code, but still record the
                     ** type for a bare `c: Container` followed by later
                     ** `c = Container()` plain assignment. */
-                    else if (has_simple_type)
+                    else if (has_simple_type || has_array_element_type)
                     {
                         int local = resolve_local(state_, name_tok);
                         if (local >= 0)
-                            set_local_type_hint(local, type_tok);
+                        {
+                            if (has_simple_type)
+                                set_local_type_hint(local, type_tok);
+                            else
+                                set_local_array_element_type(local, array_element_tok);
+                        }
                         else
-                            set_global_type_hint(find_or_add_global(name_tok.start, name_tok.length), type_tok);
+                        {
+                            int gidx = find_or_add_global(name_tok.start, name_tok.length);
+                            if (has_simple_type)
+                                set_global_type_hint(gidx, type_tok);
+                            else
+                                set_global_array_element_type(gidx, array_element_tok);
+                        }
                     }
                     return;
                 }

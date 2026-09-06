@@ -76,6 +76,10 @@ namespace zen
         /* Type hint: `param: TypeName` — used for OP_GETFIELD_IDX */
         bool has_type_hint;
         Token type_hint; /* type name token (if has_type_hint) */
+        /* `Array[Type]`: the array itself remains dynamic, but an indexed
+        ** element has this statically declared class. */
+        bool has_array_element_type;
+        Token array_element_type;
     };
 
     /* =========================================================
@@ -327,7 +331,10 @@ namespace zen
         ** same as any other type hint in this compiler). */
         void set_local_type_hint(int reg, const Token &type_tok);
         void set_global_type_hint(int gidx, const Token &type_tok);
+        void set_local_array_element_type(int reg, const Token &type_tok);
+        void set_global_array_element_type(int gidx, const Token &type_tok);
         bool global_type_hint(int gidx, const char *&name, int32_t &len) const;
+        bool array_element_class(int reg, const char *&name, int32_t &len) const;
         /* receiver_class() plus the global-annotation table, via
         ** pending_receiver_ — the one extra source of "the receiver's
         ** static class name" a plain `obj.method(...)` dot_expr call has
@@ -450,7 +457,14 @@ namespace zen
         ** scope. Small fixed table — this is a rare, deliberate annotation,
         ** not something every global carries. See set_global_type_hint(). */
         static const int kMaxGlobalTypeHints = 64;
-        struct GlobalTypeHint { int gidx; Token type_tok; };
+        struct GlobalTypeHint
+        {
+            int gidx;
+            Token type_tok;
+            bool has_class_type;
+            bool has_array_element_type;
+            Token array_element_type;
+        };
         GlobalTypeHint global_type_hints_[kMaxGlobalTypeHints];
         int global_type_hint_count_;
 
@@ -476,6 +490,14 @@ namespace zen
         ** receiver isn't a local (see set_global_type_hint()). */
         Token pending_receiver_;
         bool pending_receiver_valid_;
+        Token pending_subscript_receiver_;
+        bool pending_subscript_receiver_valid_;
+
+        /* A subscript result's type is only valid until the following dot
+        ** expression consumes it; keeping this ephemeral avoids assigning
+        ** type metadata to arbitrary reusable temporaries. */
+        int typed_subscript_reg_;
+        Token typed_subscript_class_;
 
         int lookup_class_field(ObjString *name) const;
         int add_class_field(ObjString *name);

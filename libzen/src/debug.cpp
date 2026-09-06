@@ -114,6 +114,7 @@ namespace zen
         "INVOKE_GENERIC",
         "CLASSFLATTEN",
         "CLASSSEAL",
+        "INVOKE_VT_FAST",
     };
 
     const char *opcode_name(OpCode op)
@@ -700,6 +701,11 @@ namespace zen
         case OP_CLASSSEAL:
         {
             printf("R[%d].seal()", a);
+            break;
+        }
+        case OP_INVOKE_VT_FAST:
+        {
+            printf("R[%d] = R[%d].vt_fast[%d](%d args)", a, a, c, b);
             break;
         }
 

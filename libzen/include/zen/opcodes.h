@@ -197,6 +197,10 @@ namespace zen
         /* Marks a completed class immutable. Emitted once at the end of a
         ** script class body; ClassBuilder::end() does the native equivalent. */
         OP_CLASSSEAL,
+
+        /* Fully static script-method call. The compiler emits it only for
+        ** an explicitly typed receiver with an exact, non-generic arity. */
+        OP_INVOKE_VT_FAST,
     };
 
 /* Encode/Decode — ABC format */

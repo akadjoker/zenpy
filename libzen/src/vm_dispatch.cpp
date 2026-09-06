@@ -657,6 +657,7 @@ namespace zen
             &&lbl_OP_INVOKE_GENERIC,
             &&lbl_OP_CLASSFLATTEN,
             &&lbl_OP_CLASSSEAL,
+            &&lbl_OP_INVOKE_VT_FAST,
         };
 
 #define DISPATCH() goto *dispatch_table[ZEN_OP(*ip)]
@@ -4278,6 +4279,37 @@ namespace zen
             uint32_t i = *ip;
             as_class(R[ZEN_A(i)])->sealed = true;
             NEXT();
+        }
+
+        CASE(OP_INVOKE_VT_FAST)
+        {
+            /* The compiler has proved: receiver is an annotated instance,
+            ** slot is present in its sealed class vtable, and this exact
+            ** script signature consumes arg_count values. This is the
+            ** game-loop path: no name/type/arity/default checks remain. */
+            uint32_t i = *ip;
+            uint8_t base = ZEN_A(i);
+            uint8_t arg_count = ZEN_B(i);
+            uint8_t slot = ZEN_C(i);
+            ObjInstance *inst = as_instance(R[base]);
+            ObjClosure *cl = as_closure(inst->klass->vtable[slot]);
+            ObjFunc *fn = cl->func;
+            if (fiber->frame_count >= kMaxFrames)
+                RT_ERROR("stack overflow");
+            CHECK_STACK_SPACE(fiber, &R[base], fn->num_regs);
+            ++ip;
+            SAVE_IP();
+            CallFrame *new_frame = &fiber->frames[fiber->frame_count++];
+            new_frame->closure = cl;
+            new_frame->func = fn;
+            new_frame->ip = fn->code;
+            new_frame->base = &R[base];
+            new_frame->ret_reg = base;
+            new_frame->ret_count = 1;
+            fiber->stack_top = new_frame->base + fn->num_regs;
+            clear_new_regs(new_frame->base, 1 + arg_count, fn->num_regs);
+            LOAD_STATE();
+            DISPATCH();
         }
 
         /* --- Misc --- */

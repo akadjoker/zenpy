@@ -1419,8 +1419,6 @@ namespace zen
             }
             bool obj_is_top = (obj == state_->next_reg - 1);
             int base = (!obj_is_local && obj_is_top) ? obj : alloc_reg();
-            fprintf(stderr, "[DOT] obj=%d dest=%d obj_is_local=%d obj_is_top=%d base=%d next_reg=%d\n", obj, dest, (int)obj_is_local, (int)obj_is_top, base, state_->next_reg);
-            fprintf(stderr, "[DOT] obj=%d dest=%d obj_is_local=%d obj_is_top=%d base=%d next_reg=%d\n", obj, dest, (int)obj_is_local, (int)obj_is_top, base, state_->next_reg);
             if (base != obj)
                 emit_move(base, obj);
             const FuncSig *sig = method_sig;

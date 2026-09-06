@@ -256,3 +256,85 @@ grep -rn "def_native\|register_fn\|add_method" modules/
 - fib(20): ~0.072s  
 - bench_full (list 500K): ~0.033s
 - string 100K build: ~0.002-0.004s
+
+
+
+Medições atuais, no mesmo core:
+
+| Demo | Zen | Lua | Wren | Python |
+|---|---:|---:|---:|---:|
+| fib | 0,246s | 0,109s | 0,209s | 0,245s |
+| for_loop | 0,199s | 0,042s | 0,143s | 0,489s |
+| method_call | 0,207s | 0,185s | 0,095s | 0,191s |
+| binary_trees | 0,360s | 0,515s | 0,206s | 0,367s |
+
+`for_loop` é o caso mais claro. Como corre no topo do módulo, `sum` e `i` são globais. Cada volta faz:
+
+```text
+GETGLOBAL i, LOADK limite, LT, JMPIFNOT,
+GETGLOBAL sum, GETGLOBAL i, ADD, SETGLOBAL sum,
+GETGLOBAL i, ADDI, SETGLOBAL i, JMP
+```
+
+São 12 instruções por iteração. A mesma lógica dentro de `def loop()` caiu de 0,199s para 0,150s só porque passa a usar registos locais. Isto é um ganho geral, não um opcode de bunnymark.
+
+O próximo trabalho deve ser:
+
+1. Fechar o compilador de loops:
+   - `i += 1` hoje gera `LOADI 1 + ADD`; devia emitir `ADDI`, como já faz `i = i + 1`.
+   - `while i < limite` ainda gera `LT` e `JMPIFNOT` separados, apesar de já existir `OP_LTJMPIFNOT`.
+   - constantes como `5000000` são carregadas em cada volta; num loop local podem ficar num registo antes do loop.
+   - terminar a emissão do `for` numérico geral; `OP_FORPREP/OP_FORLOOP` já existe, mas o compilador ainda não o usa.
+
+2. Fechar chamadas normais:
+   - `fib()` ainda compila para `GETGLOBAL fib` + `CALL`.
+   - `OP_CALLGLOBAL` já existe na VM, mas o compilador nunca o emite.
+   - usar isso em toda chamada direta a função global beneficia fib, helpers, callbacks e jogos.
+
+3. Inferência de tipo local para chamadas:
+   - `toggle = Toggle(...)` já prova o tipo de `toggle`, mas o compilador esquece isso.
+   - `activate()` devolve `self`, mas o compilador não propaga `Self` para `activate().value()`.
+   - se propagar esses factos, usa os `INVOKE_VT_FAST` que já criámos, sem inventar outro caminho para o demo.
+
+4. `binary_trees` já está bem melhor:
+   - Zen está ao nível de Python e bate Lua neste caso.
+   - o que falta é tipo de campos, por exemplo `left: Tree?`, para `self.left.check()` deixar de ser dispatch dinâmico.
+
+
+
+### Estado (2026-09-06, branch perf/lua-hot-path-gc)
+
+Feito, cada ponto num commit, suite 60/60 (3 testes novos: 56, 57, 58):
+
+1. Loops: `i += 1` → ADDI e `while a < b` → LTJMPIFNOT já estavam; agora
+   também `if`/`elif` fundem a comparação, a constante de `while i < 5000000`
+   é carregada uma vez antes do loop, e `for i in range(...)` compila para
+   FORPREP/FORLOOP (contagem fixa à entrada, 1 dispatch por volta).
+2. Chamadas: `fib()` compila para CALLGLOBAL (a VM lê a global para R[A] e
+   segue o caminho do OP_CALL, logo classes/bound methods/erros iguais).
+3. Inferência: `toggle = Toggle(...)` regista a classe (local ou global de
+   módulo); `activate()` que devolve self (`-> Self` ou todos os `return`
+   são `return self`) propaga a classe em `activate().value()`; ambos os
+   elos saem INVOKE_VT. INVOKE_VT passou a 2 palavras com fallback para
+   OP_INVOKE, portanto nunca muda comportamento.
+4. `local = expr` / `return expr` escrevem o resultado direto no registo
+   destino (sem MOVE) quando o RHS é linear.
+
+Medições (mesma janela, best of 3): fib 0,271→0,204s; for_loop (globais)
+0,162→0,157s; for_loop com locais 0,104→0,061s (Lua 0,042s); method_call
+0,238→0,189s; binary_trees 0,371→0,339s. Tabela completa em
+tests/manual/cross_lang_bench/RESULTS.md.
+
+Bugs pré-existentes corrigidos pelo caminho: OP_INVOKE não empacotava
+`*args` em métodos variádicos com receptor dinâmico; `resolve_upvalue`
+marcava `captured` no local com índice==registo, por isso uma variável de
+loop capturada por closure nunca recebia OP_CLOSE (as lambdas viam lixo).
+
+Bunnymark raylib (tests/manual/bunnymark_raylib, 4 linguagens, mesmo host,
+mesma classe Bunny, 60 fps): Zen 70 400, Lua 63 000, Wren 54 600, Python
+30 800 sprites.
+
+Próximo: o que resta no method_call é custo por chamada (push de frame,
+dois memsets de registos, LOAD_STATE, limpeza no RETURN) — ~49 ns por
+call+return; `Toggle.value` já são só 2 instruções. Ponto 4 (tipo de campos
+`left: Tree?`) continua por fazer.

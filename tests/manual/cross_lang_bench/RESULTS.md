@@ -110,3 +110,47 @@ commits, measured the same interleaved way. Lua's equivalent sits around
 dispatch overhead spread thin across MOVE/LOADI/GETFIELD_IDX/LT and
 OP_INVOKE's per-call arity checks (per `perf annotate`), not a single
 pathological path.
+
+
+## 2026-09-06 (later) — branch `perf/lua-hot-path-gc`: loops, calls, inference
+
+Same machine, same window, best of 3, Release -O3. Wren not re-run (no
+`wren_cli` on this machine today; its earlier numbers are listed for scale).
+
+| Benchmark        | ZenPy before | ZenPy now | Lua 5.4 | Python 3.12 | Wren (earlier) |
+|------------------|-------------:|----------:|--------:|------------:|---------------:|
+| fib(28) x5       | 0.271s | **0.204s** | 0.108s | 0.231s | 0.209s |
+| for_loop (globals, 5M) | 0.162s | 0.157s | — | 0.463s | 0.143s |
+| for_loop_local (locals, 5M) | 0.104s | **0.061s** | 0.042s | — | — |
+| method_call      | 0.238s | **0.189s** | 0.177s | 0.191s | 0.095s |
+| binary_trees     | 0.371s | **0.339s** | 0.552s | 0.368s | 0.206s |
+
+`for_loop.lua` declares `sum`/`i` as `local`, so the like-for-like Zen
+number is `for_loop_local.py` (module-level Zen names are globals): the gap
+to Lua went from 4.8x to 1.45x. The module-level form still pays
+GETGLOBAL/SETGLOBAL on every access and did not move.
+
+What changed (one commit each, in order):
+
+1. `OP_CALLGLOBAL` — `name(...)` on a global folds GETGLOBAL+CALL; the VM
+   materialises the callee in R[A] and continues on OP_CALL's own path.
+2. `for i in range(...)` → `OP_FORPREP`/`OP_FORLOOP` (Lua 5.4 style: count
+   fixed on entry, one dispatch per iteration; `continue` becomes a forward
+   jump). Empty loop: 20M iterations 0.11s → 0.064s.
+3. `x = ClassName(...)` infers x's class (locals and module globals), a
+   method that returns self (`-> Self`, or every return is `return self`)
+   keeps the class across `a.m().n()`, and `OP_INVOKE_VT` became a two-word
+   instruction that falls back to `OP_INVOKE` for anything that is not a
+   plain script-instance call — a static receiver class is now a speed hint
+   only. Also fixed: `OP_INVOKE` never packed `*args` for vararg methods.
+4. `while i < LIT` loads the literal once before the loop; `if`/`elif`
+   use the fused compare-and-jump; `local = <expr>` and `return <expr>`
+   write the result from its producing instruction (no MOVE) when the RHS
+   is straight-line. Also fixed: a closure capturing a loop variable never
+   got its OP_CLOSE (`captured` was set on the wrong local).
+
+Remaining gap: per-call frame cost (frame push, two register memsets,
+LOAD_STATE, RETURN's stale-register clear) — method_call is ~49 ns per
+call+return and `Toggle.value` is now two instructions, so the dispatch
+loop is no longer where that time goes. See `tests/manual/bunnymark_raylib/`
+for the sprite-count comparison against Lua/Wren/Python under raylib.

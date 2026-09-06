@@ -585,6 +585,11 @@ namespace zen
         int32_t num_fields; /* actual allocated field count for this instance */
         Value *fields;      /* array de num_fields Values */
         void *native_data;  /* C++ object pointer (from native_ctor), NULL for pure script */
+        /* Normal game objects keep their declared fields immediately after
+        ** this header: one arena allocation and one cache-friendly block.
+        ** A dynamic field addition detaches to a separate array safely. */
+        int32_t inline_field_count;
+        bool fields_inline;
     };
 
     inline bool is_class(Value v) { return is_obj_type(v, OBJ_CLASS); }

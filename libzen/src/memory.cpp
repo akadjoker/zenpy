@@ -1384,11 +1384,12 @@ namespace zen
     {
         ObjInstance *inst;
         int nf = klass->num_fields;
+        const size_t total_size = sizeof(ObjInstance) + sizeof(Value) * (size_t)nf;
         if (klass->persistent)
         {
             /* Persistent: arena alloc sem trigger GC, NUNCA entra na lista do GC.
             ** C++ é dono da memória. Chama vm.destroy_instance() para libertar. */
-            inst = (ObjInstance *)zen_alloc_now(gc, sizeof(ObjInstance));
+            inst = (ObjInstance *)zen_alloc_now(gc, total_size);
             inst->obj.type = OBJ_INSTANCE;
             inst->obj.color = GC_BLACK;
             inst->obj.interned = 0;
@@ -1401,25 +1402,21 @@ namespace zen
             ** function returns, the new instance is not yet reachable from a
             ** VM root, so keep GC disabled during construction. */
             gc_pause(gc);
-            inst = (ObjInstance *)alloc_obj(gc, sizeof(ObjInstance), OBJ_INSTANCE);
+            inst = (ObjInstance *)alloc_obj(gc, total_size, OBJ_INSTANCE);
         }
 
         inst->klass = klass;
         inst->native_data = nullptr;
         inst->num_fields = nf;
+        inst->inline_field_count = nf;
+        /* A zero-field instance still starts in the inline state: if a
+        ** runtime field is later added, it must allocate a detached buffer
+        ** rather than attempt to realloc a null/non-owned pointer. */
+        inst->fields_inline = true;
+        inst->fields = nullptr;
         if (nf > 0)
         {
-            if (klass->persistent)
-            {
-                /* Persistent instance: fields from arena (zen_alloc_now).
-                ** The GC never sweeps these because the persistent instance
-                ** is not in the GC object list. zen_free releases back to arena. */
-                inst->fields = (Value *)zen_alloc_now(gc, sizeof(Value) * nf);
-            }
-            else
-            {
-                inst->fields = (Value *)zen_alloc(gc, sizeof(Value) * nf);
-            }
+            inst->fields = (Value *)(inst + 1);
             /* A field the class body gave a value starts on that value, the
             ** rest on None. This is what makes "class A:" with "speed = 5.0"
             ** work without a constructor, and it runs before __init__ so a
@@ -1463,13 +1460,14 @@ namespace zen
                 inst->native_data = nullptr;
             }
         }
-        /* Free fields back to arena */
-        if (inst->fields)
+        /* Detached dynamic fields have their own allocation. Inline fields
+        ** live in the block released just below. */
+        if (inst->fields && !inst->fields_inline)
         {
             zen_free(gc, inst->fields, sizeof(Value) * inst->num_fields);
         }
         /* Free the instance itself back to arena */
-        zen_free(gc, inst, sizeof(ObjInstance));
+        zen_free(gc, inst, sizeof(ObjInstance) + sizeof(Value) * inst->inline_field_count);
     }
 
     /* =========================================================
@@ -1741,7 +1739,10 @@ namespace zen
         case OBJ_CLASS:
             return sizeof(ObjClass);
         case OBJ_INSTANCE:
-            return sizeof(ObjInstance);
+        {
+            ObjInstance *inst = (ObjInstance *)obj;
+            return sizeof(ObjInstance) + sizeof(Value) * inst->inline_field_count;
+        }
         case OBJ_RANGE:
             return sizeof(ObjRange);
         }
@@ -1873,7 +1874,7 @@ namespace zen
                     inst->native_data = nullptr;
                 }
             }
-            if (inst->fields)
+            if (inst->fields && !inst->fields_inline)
                 zen_free(gc, inst->fields, sizeof(Value) * inst->num_fields);
             break;
         }

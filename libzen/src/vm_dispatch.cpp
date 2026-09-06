@@ -3029,10 +3029,20 @@ namespace zen
                     int32_t old_n = inst->num_fields;
                     int32_t new_n = class_idx + 1;
                     gc_pause(&gc_);
-                    inst->fields = (Value *)zen_realloc(
-                        &gc_, inst->fields,
-                        sizeof(Value) * old_n,
-                        sizeof(Value) * new_n);
+                    if (inst->fields_inline)
+                    {
+                        Value *detached = (Value *)zen_alloc(&gc_, sizeof(Value) * new_n);
+                        memcpy(detached, inst->fields, sizeof(Value) * old_n);
+                        inst->fields = detached;
+                        inst->fields_inline = false;
+                    }
+                    else
+                    {
+                        inst->fields = (Value *)zen_realloc(
+                            &gc_, inst->fields,
+                            sizeof(Value) * old_n,
+                            sizeof(Value) * new_n);
+                    }
                     gc_resume(&gc_);
                     for (int32_t fi = old_n; fi < new_n; fi++)
                         inst->fields[fi] = val_nil();
@@ -3094,10 +3104,20 @@ namespace zen
                     /* All instances use arena — persistent ones are simply
                     ** not in the GC object list so never swept. */
                     gc_pause(&gc_);
-                    inst->fields = (Value *)zen_realloc(
-                        &gc_, inst->fields,
-                        sizeof(Value) * old_n,
-                        sizeof(Value) * new_n);
+                    if (inst->fields_inline)
+                    {
+                        Value *detached = (Value *)zen_alloc(&gc_, sizeof(Value) * new_n);
+                        memcpy(detached, inst->fields, sizeof(Value) * old_n);
+                        inst->fields = detached;
+                        inst->fields_inline = false;
+                    }
+                    else
+                    {
+                        inst->fields = (Value *)zen_realloc(
+                            &gc_, inst->fields,
+                            sizeof(Value) * old_n,
+                            sizeof(Value) * new_n);
+                    }
                     gc_resume(&gc_);
                     for (int fi = old_n; fi < new_n; fi++)
                         inst->fields[fi] = val_nil();

@@ -100,7 +100,29 @@ def nonlocal_gc():
 assert nonlocal_gc() == 1000
 print("nonlocal_gc OK")
 
-# --- 6. Class instance lifecycle ---
+# --- 6. Instances may outlive a class gaining fields ---
+# The first assignment happens after the instance has been allocated.  This
+# exercises the inline-fields-to-detached-fields transition used by the
+# compact instance representation.
+class LateFields:
+    pass
+
+late = LateFields()
+late.name = "kept alive"
+late.value = 42
+
+# Force plenty of allocations after the transition; stress-GC runs collect on
+# each allocation, so this also proves the detached field buffer is traced.
+i = 0
+while i < 1000:
+    garbage = [i, i + 1, i + 2]
+    i = i + 1
+
+assert late.name == "kept alive"
+assert late.value == 42
+print("late_instance_fields OK")
+
+# --- 7. Class instance lifecycle ---
 def instance_lifecycle():
     class Node:
         def __init__(self, val, next):

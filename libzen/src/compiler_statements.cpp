@@ -1525,7 +1525,37 @@ namespace zen
 
         /* Condition */
         int cond = expression(-1);
-        int exit_jump = state_->emitter.emit_jump(OP_JMPIFNOT, cond, previous_.line);
+        /* A comparison used solely as a while condition need not materialise
+        ** its boolean just to branch on it. This is a general lowering of
+        ** `while a < b` / `while a <= b`; the fused VM handler preserves
+        ** string and overloaded-comparison behavior as well. */
+        int exit_jump;
+        bool fused_compare = false;
+        int compare_offset = state_->emitter.current_offset() - 1;
+        if (compare_offset >= 0)
+        {
+            Instruction compare = state_->emitter.instruction_at(compare_offset);
+            if (ZEN_A(compare) == cond && ZEN_OP(compare) == OP_LT)
+            {
+                state_->emitter.shrink_to(compare_offset);
+                exit_jump = state_->emitter.emit_lt_jmpifnot(ZEN_B(compare), ZEN_C(compare), previous_.line);
+                fused_compare = true;
+            }
+            else if (ZEN_A(compare) == cond && ZEN_OP(compare) == OP_LE)
+            {
+                state_->emitter.shrink_to(compare_offset);
+                exit_jump = state_->emitter.emit_le_jmpifnot(ZEN_B(compare), ZEN_C(compare), previous_.line);
+                fused_compare = true;
+            }
+            else
+            {
+                exit_jump = state_->emitter.emit_jump(OP_JMPIFNOT, cond, previous_.line);
+            }
+        }
+        else
+        {
+            exit_jump = state_->emitter.emit_jump(OP_JMPIFNOT, cond, previous_.line);
+        }
         free_reg(cond);
 
         /* Body */
@@ -1535,7 +1565,10 @@ namespace zen
         state_->emitter.emit_loop(loop_start, 0, previous_.line);
 
         /* Patch exit */
-        state_->emitter.patch_jump(exit_jump);
+        if (fused_compare)
+            state_->emitter.patch_fused_jump(exit_jump);
+        else
+            state_->emitter.patch_jump(exit_jump);
 
         /* Patch breaks */
         for (int i = 0; i < loop.break_count; i++)

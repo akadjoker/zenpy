@@ -4674,11 +4674,36 @@ namespace zen
             uint32_t i = *ip;
             Value vb = R[ZEN_B(i)], vc = R[ZEN_C(i)];
             bool less;
-            if (vb.type == VAL_INT && vc.type == VAL_INT)
+            bool at_jump_offset = false;
+            if (__builtin_expect(is_instance(vb) || is_instance(vc), 0))
+            {
+                /* If an overloaded comparison enters script, resume after
+                ** this fused instruction, at its jump-offset word. */
+                ++ip;
+                at_jump_offset = true;
+                Value result;
+                SAVE_IP();
+                if (try_binary_operator(this, vb, vc, SLOT_LT, SLOT_LT, &result))
+                {
+                    if (had_error_)
+                        return;
+                    LOAD_STATE();
+                    less = is_truthy_full(result);
+                }
+                else
+                {
+                    LOAD_STATE();
+                    less = to_number(vb) < to_number(vc);
+                }
+            }
+            else if (is_string(vb) && is_string(vc))
+                less = strcmp(safe_string_chars(vb), safe_string_chars(vc)) < 0;
+            else if (vb.type == VAL_INT && vc.type == VAL_INT)
                 less = vb.as.integer < vc.as.integer;
             else
                 less = to_number(vb) < to_number(vc);
-            ++ip; /* advance to the sBx word */
+            if (!at_jump_offset)
+                ++ip; /* normal path: advance to the sBx word */
             if (!less)
                 ip += ZEN_SBX(*ip);
             NEXT();
@@ -4689,11 +4714,34 @@ namespace zen
             uint32_t i = *ip;
             Value vb = R[ZEN_B(i)], vc = R[ZEN_C(i)];
             bool le;
-            if (vb.type == VAL_INT && vc.type == VAL_INT)
+            bool at_jump_offset = false;
+            if (__builtin_expect(is_instance(vb) || is_instance(vc), 0))
+            {
+                ++ip;
+                at_jump_offset = true;
+                Value result;
+                SAVE_IP();
+                if (try_binary_operator(this, vb, vc, SLOT_LE, SLOT_LE, &result))
+                {
+                    if (had_error_)
+                        return;
+                    LOAD_STATE();
+                    le = is_truthy_full(result);
+                }
+                else
+                {
+                    LOAD_STATE();
+                    le = to_number(vb) <= to_number(vc);
+                }
+            }
+            else if (is_string(vb) && is_string(vc))
+                le = strcmp(safe_string_chars(vb), safe_string_chars(vc)) <= 0;
+            else if (vb.type == VAL_INT && vc.type == VAL_INT)
                 le = vb.as.integer <= vc.as.integer;
             else
                 le = to_number(vb) <= to_number(vc);
-            ++ip; /* advance to the sBx word */
+            if (!at_jump_offset)
+                ++ip;
             if (!le)
                 ip += ZEN_SBX(*ip);
             NEXT();

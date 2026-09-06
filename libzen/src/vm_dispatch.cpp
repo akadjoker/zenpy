@@ -1806,6 +1806,16 @@ namespace zen
                 ObjClosure *cl = as_closure(callee);
                 ObjFunc *fn = cl->func;
 
+                /* A generic function called without <...> syntax must not
+                ** silently treat its first value argument(s) as the type
+                ** parameter(s) — OP_CALL_GENERIC is the only opcode that
+                ** knows how to split type args from value args. */
+                if (fn->generic_arity > 0)
+                {
+                    RT_ERROR("'%s' is generic and must be called with <...> type arguments",
+                              fn->name ? fn->name->chars : "?");
+                }
+
                 /* Generator function: create a suspended fiber instead of calling */
                 if (fn->is_generator)
                 {
@@ -3464,6 +3474,14 @@ namespace zen
                 {
                     ObjClosure *cl = as_closure(mval);
                     ObjFunc *fn = cl->func;
+                    /* Same reasoning as OP_CALL: a generic method invoked
+                    ** through plain OP_INVOKE (no <...>) must not silently
+                    ** bind a value argument into a type-parameter register. */
+                    if (fn->generic_arity > 0)
+                    {
+                        RT_ERROR("'%s.%s' is generic and must be called with <...> type arguments",
+                                  klass->name->chars, mname);
+                    }
                     if (fn->arity < 0)
                     {
                         /* Vararg method */
@@ -3630,6 +3648,10 @@ namespace zen
                 cur->stack_top = saved_top;
                 if (had_error_)
                     return;
+                if (nret < 0)
+                {
+                    RT_ERROR("generic native method '%s' returned error", mname);
+                }
                 copy_native_results(&R[base], value_args, nret, nresults);
                 NEXT();
             }
@@ -3661,9 +3683,10 @@ namespace zen
                     }
                 }
 
+                int min_args = 0;
                 if (fn->arity < 0)
                 {
-                    int min_args = (-fn->arity) - 1;
+                    min_args = (-fn->arity) - 1;
                     if (nvalue < min_args)
                         RT_ERROR("%s.%s() expects at least %d args but got %d", klass->name->chars, mname, min_args, nvalue);
                 }
@@ -3694,7 +3717,22 @@ namespace zen
                 new_frame->ret_count = nresults;
                 fiber->stack_top = new_frame->base + fn->num_regs;
 
-                if (fn->arity >= 0 && fn->default_count > 0 && nvalue < fn->arity)
+                if (fn->arity < 0)
+                {
+                    /* Vararg method: pack the trailing values into *args,
+                    ** same as OP_CALL_GENERIC's vararg branch — this was
+                    ** previously missing here, silently leaving *args
+                    ** holding whatever raw value sat in that register. */
+                    int extra = nvalue - min_args;
+                    gc_pause(&gc_);
+                    ObjArray *arr = new_array(&gc_);
+                    if (extra > 0)
+                        array_push_n(&gc_, arr, new_frame->base + 1 + ngeneric + min_args, extra);
+                    new_frame->base[1 + ngeneric + min_args] = val_obj((Obj *)arr);
+                    gc_resume(&gc_);
+                    fiber->stack_top = new_frame->base + fn->num_regs;
+                }
+                else if (fn->default_count > 0 && nvalue < fn->arity)
                 {
                     int required = fn->arity - fn->default_count;
                     for (int di = nvalue; di < fn->arity; di++)
@@ -3702,7 +3740,7 @@ namespace zen
                 }
 
                 {
-                    int used_value = fn->arity >= 0 ? fn->arity : nvalue;
+                    int used_value = fn->arity < 0 ? ((-fn->arity - 1) + 1) : fn->arity;
                     int used = 1 + ngeneric + used_value;
                     clear_new_regs(new_frame->base, used, fn->num_regs);
                 }

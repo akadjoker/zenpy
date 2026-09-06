@@ -984,6 +984,16 @@ static int container_get_component(VM *vm, Value receiver, Value *type_args, int
     return 1;
 }
 
+/* Regression: a GenericNativeFn signaling failure (nret < 0, same
+** convention as plain NativeFn) must surface as a runtime error, not be
+** silently swallowed into a nil result. */
+static int container_always_fails(VM *vm, Value receiver, Value *type_args, int ntype_args,
+                                   Value *args, int nargs)
+{
+    (void)vm; (void)receiver; (void)type_args; (void)ntype_args; (void)args; (void)nargs;
+    return -1;
+}
+
 static void test_generic_native_method()
 {
     printf("\n[Test 13] ClassBuilder::generic_method() — entity.get_component<T>()\n");
@@ -996,6 +1006,7 @@ static void test_generic_native_method()
         .dtor(container_dtor)
         .method("add_component", container_add_component, 1)
         .generic_method("get_component", container_get_component, /*generic_arity=*/1, /*arity=*/0)
+        .generic_method("always_fails", container_always_fails, /*generic_arity=*/1, /*arity=*/0)
         .end();
 
     /* Note: `c: Container = Container()` — the explicit class annotation is
@@ -1057,6 +1068,41 @@ t2 = c2.get_component<Transform>()
 )");
     Value t2v = vm.get_global("t2");
     CHECK(!vm.had_error() && is_instance(t2v), "expected plain native method + generic method to coexist");
+
+    /* Regression: a GenericNativeFn returning -1 (the established
+    ** error-signal convention) must raise a runtime error, not be silently
+    ** swallowed into a nil result — see OP_INVOKE_GENERIC's native branch. */
+    TEST("A generic native method returning -1 raises a runtime error, not nil");
+    run_source(vm, R"(
+c3: Container = Container()
+oops = c3.always_fails<Transform>()
+)");
+    CHECK(vm.had_error(), "expected had_error() == true when the native signals failure");
+
+    /* Regression: receiver_static_class() must not misattribute a closure's
+    ** captured UPVALUE to an unrelated GLOBAL of the same name that happens
+    ** to carry its own class annotation. Container is a native class, so
+    ** this can only be exercised through a native generic method — a
+    ** script-only equivalent doesn't reach the code path being tested
+    ** (method_signature() already resolves script classes without falling
+    ** back to the global-hint table at all). */
+    TEST("A closure's captured local isn't misattributed to an unrelated global's type hint");
+    run_source(vm, R"(
+def outer():
+    c: Container = Container()
+    c.add_component(Transform(1, 2))
+    def inner():
+        return c.get_component<Transform>()
+    return inner()
+
+class Sprite:
+    pass
+c: Sprite = None
+
+upvalue_result = outer()
+)");
+    Value uv = vm.get_global("upvalue_result");
+    CHECK(!vm.had_error() && is_instance(uv), "expected the captured Container's component, not misresolution via the unrelated global 'c: Sprite'");
 }
 
 /* =========================================================

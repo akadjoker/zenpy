@@ -64,6 +64,27 @@ def with_default<T>(value = 78):
 assert with_default<Transform>() == 78
 assert with_default<Transform>(5) == 5
 
+# --- Generic function/method calling convention with *args: the extra
+# positional values must land packed into an array, exactly like a plain
+# (non-generic) vararg function/method — this was a real bug found by
+# review (OP_INVOKE_GENERIC never packed the vararg array; only its sibling
+# OP_CALL_GENERIC did). ---
+def collect_free<T>(*items):
+    assert T == Transform
+    return items
+
+assert collect_free<Transform>(1, 2, 3) == [1, 2, 3]
+assert collect_free<Transform>() == []
+
+class Box:
+    def collect<T>(self, *items):
+        assert T == Sprite
+        return items
+
+box = Box()
+assert box.collect<Sprite>(1, 2, 3) == [1, 2, 3]
+assert box.collect<Sprite>() == []
+
 # --- `<` and `>` remain ordinary comparisons everywhere else, including
 # right next to a real generic call, and even when the compared names are
 # classes/instances (adjacency + "callee is a known generic" both matter —

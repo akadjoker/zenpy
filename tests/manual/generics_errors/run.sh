@@ -16,11 +16,13 @@ if [[ ! -x "$ZEN" ]]; then
 fi
 
 declare -A EXPECT=(
-    [01_missing_generic_syntax.py]="expected at most 0 args but got"
+    [01_missing_generic_syntax.py]="is generic and must be called with"
     [02_generic_call_on_nongeneric.py]="Function is not generic"
     [03_wrong_generic_arity.py]="Wrong number of type arguments"
     [04_non_type_generic_arg.py]="is not a type"
     [05_missing_value_args.py]="expected at least"
+    [06_missing_generic_syntax_with_value_args.py]="is generic and must be called with"
+    [07_missing_generic_syntax_method.py]="is generic and must be called with"
 )
 
 pass=0

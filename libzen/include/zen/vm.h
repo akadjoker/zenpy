@@ -349,6 +349,7 @@ namespace zen
         ObjString **selectors_;       /* interned method names (heap-allocated) */
         int num_selectors_;
         int selectors_capacity_;
+        int init_selector_; /* vtable slot of "__init__": -1 until that name is interned */
 
     public:
         bool had_error() const { return had_error_; }

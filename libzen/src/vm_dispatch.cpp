@@ -1,3 +1,10 @@
+#ifdef ZEN_OPCODE_PROFILE
+#include "debug.h"
+#include <x86intrin.h>
+#include <algorithm>
+#include <cstdlib>
+#include <cstdio>
+#endif
 #include "vm.h"
 #include "compiler.h"
 #include "debug.h"
@@ -58,9 +65,17 @@ namespace zen
        Call AFTER setting stack_top = base + num_regs. */
     static inline void clear_new_regs(Value *base, int first_used, int num_regs)
     {
-        int count = num_regs - first_used;
-        if (count > 0)
-            memset(&base[first_used], 0, count * sizeof(Value));
+        /* Frames are small (a handful of registers): a few direct stores
+        ** beat a memset call. Large frames still take memset. */
+        Value *p = base + first_used;
+        Value *end = base + num_regs;
+        if (end - p > 16)
+        {
+            memset(p, 0, (size_t)(end - p) * sizeof(Value));
+            return;
+        }
+        for (; p < end; p++)
+            *p = val_nil();
     }
 
     static inline const char *val_type_str(Value v)
@@ -501,6 +516,55 @@ namespace zen
         return val_obj((Obj *)new_string(gc, buf, len));
     }
 
+#ifdef ZEN_OPCODE_PROFILE
+    static uint64_t g_prof_cycles[256];
+    static uint64_t g_prof_count[256];
+    static int g_prof_prev = -1;
+    static uint64_t g_prof_t0 = 0;
+    static bool g_prof_registered = false;
+
+    static void zen_prof_dump()
+    {
+        int order[256];
+        int n = 0;
+        uint64_t total = 0;
+        for (int i = 0; i < 256; i++)
+        {
+            if (g_prof_count[i])
+            {
+                order[n++] = i;
+                total += g_prof_cycles[i];
+            }
+        }
+        std::sort(order, order + n, [](int a, int b) { return g_prof_cycles[a] > g_prof_cycles[b]; });
+        fprintf(stderr, "\n%-18s %12s %14s %7s %8s\n", "opcode", "count", "cycles", "%", "avg");
+        for (int k = 0; k < n && k < 40; k++)
+        {
+            int i = order[k];
+            fprintf(stderr, "%-18s %12llu %14llu %6.1f%% %8.1f\n", opcode_name((OpCode)i),
+                    (unsigned long long)g_prof_count[i], (unsigned long long)g_prof_cycles[i],
+                    100.0 * (double)g_prof_cycles[i] / (double)(total ? total : 1),
+                    (double)g_prof_cycles[i] / (double)g_prof_count[i]);
+        }
+        fprintf(stderr, "total dispatches: %llu\n", (unsigned long long)[]{ uint64_t c = 0; for (int i = 0; i < 256; i++) c += g_prof_count[i]; return c; }());
+    }
+
+    static inline void zen_prof_tick(int op)
+    {
+        uint64_t now = __rdtsc();
+        if (g_prof_prev >= 0)
+            g_prof_cycles[g_prof_prev] += now - g_prof_t0;
+        else if (!g_prof_registered)
+        {
+            g_prof_registered = true;
+            atexit(zen_prof_dump);
+        }
+        g_prof_count[op]++;
+        g_prof_prev = op;
+        g_prof_t0 = now;
+    }
+#endif
+
     void VM::execute(ObjFiber *fiber)
     {
         /* Cache hot state em locals */
@@ -665,7 +729,21 @@ namespace zen
             &&lbl_OP_FIELD_MULADD,
         };
 
+#ifdef ZEN_OPCODE_PROFILE
+/* Per-opcode cycle profile (build with -DZEN_OPCODE_PROFILE). Every
+** dispatch charges the cycles since the previous dispatch to the opcode
+** that just ran, so the table shows where the interpreter's time goes
+** without perf/valgrind. rdtsc adds a constant per dispatch; compare
+** opcodes against each other, not against wall-clock. */
+#define DISPATCH()                     \
+    do                                 \
+    {                                  \
+        zen_prof_tick(ZEN_OP(*ip));    \
+        goto *dispatch_table[ZEN_OP(*ip)]; \
+    } while (0)
+#else
 #define DISPATCH() goto *dispatch_table[ZEN_OP(*ip)]
+#endif
 #define CASE(op) lbl_##op:
 #define NEXT()      \
     do              \
@@ -1895,6 +1973,28 @@ namespace zen
                 ObjClosure *cl = as_closure(callee);
                 ObjFunc *fn = cl->func;
 
+                /* The common call: exact argument count, no defaults, no
+                ** *args, not generic, not a generator. One combined test;
+                ** everything else falls through to the general path below. */
+                if (__builtin_expect((fn->generic_arity | fn->default_count | (int32_t)fn->is_generator) == 0 &&
+                                         fn->arity == nargs, 1))
+                {
+                    if (fiber->frame_count >= kMaxFrames)
+                        RT_ERROR("stack overflow");
+                    CHECK_STACK_SPACE(fiber, &R[a + 1], fn->num_regs);
+                    CallFrame *new_frame = &fiber->frames[fiber->frame_count++];
+                    new_frame->closure = cl;
+                    new_frame->func = fn;
+                    new_frame->ip = fn->code;
+                    new_frame->base = &R[a + 1];
+                    new_frame->ret_reg = a;
+                    new_frame->ret_count = nresults;
+                    fiber->stack_top = new_frame->base + fn->num_regs;
+                    clear_new_regs(new_frame->base, nargs, fn->num_regs);
+                    LOAD_STATE();
+                    DISPATCH();
+                }
+
                 /* A generic function called without <...> syntax must not
                 ** silently treat its first value argument(s) as the type
                 ** parameter(s) — OP_CALL_GENERIC is the only opcode that
@@ -2001,13 +2101,15 @@ namespace zen
                     inst->native_data = ctor_src->native_ctor(this, nargs, &R[a + 1]);
                 }
 
-                /* Look for __init__ method */
-                ObjString *s_init = intern_string(&gc_, "__init__", 8, hash_string("__init__", 8));
-
-                bool found;
-                Value init_method = map_get(klass->methods, val_obj((Obj *)s_init), &found);
-                if (!found && klass->parent)
-                    init_method = map_get(klass->parent->methods, val_obj((Obj *)s_init), &found);
+                /* __init__ sits in the vtable at its selector's slot like
+                ** every other method, and a subclass's vtable is flattened
+                ** from its parents: one indexed load, no interning and no
+                ** method-map probe per construction — and an inherited
+                ** constructor is found at any depth, not just one level up. */
+                Value init_method = (init_selector_ >= 0 && init_selector_ < klass->vtable_size)
+                                        ? klass->vtable[init_selector_]
+                                        : val_nil();
+                bool found = !is_nil(init_method);
 
                 if (found && is_closure(init_method))
                 {
@@ -2311,23 +2413,13 @@ namespace zen
                 caller_base[ret_reg + j] = val_nil();
             }
 
-            /* Clear stale callee registers that overlap with the caller's
-               GC scan range.  Avoids dangling pointers from callee temporaries
-               being scanned by the GC after the call returns.
-               Skips result slots (which may coincide with frame->base for
-               __init__ where base == &R[ret_reg]).  Typically 3-8 slots
-               (~50-128 bytes) — comparable to clear_new_regs at call time. */
-            {
-                int rslots = copy_count > ret_count ? copy_count : ret_count;
-                if (rslots < 0) rslots = 0;
-                Value *past_results = caller_base + ret_reg + rslots;
-                Value *clear_start = (frame->base > past_results) ? frame->base : past_results;
-                Value *clear_end   = frame->base + frame->func->num_regs;
-                Value *scan_limit  = caller_base + caller_frame->func->num_regs;
-                if (clear_end > scan_limit) clear_end = scan_limit;
-                int n = (int)(clear_end - clear_start);
-                if (n > 0) memset(clear_start, 0, n * sizeof(Value));
-            }
+            /* The callee's registers that overlap the caller's frame keep
+            ** whatever the callee left there. They were live (scanned)
+            ** during the callee, so they can never dangle; the GC merely
+            ** treats them as conservatively alive until the caller reuses
+            ** them, as Lua does. The slots above the caller's frame lie
+            ** outside the scan and every new frame nils its own registers
+            ** on entry (clear_new_regs), so no memset is needed here. */
 
             fiber->stack_top = caller_base + caller_frame->func->num_regs;
             if (external_call_stop_depth_ >= 0 && fiber->frame_count <= external_call_stop_depth_)
@@ -3546,6 +3638,28 @@ namespace zen
                 {
                     ObjClosure *cl = as_closure(mval);
                     ObjFunc *fn = cl->func;
+                    /* Common case first: exact arity, no defaults/*args, not
+                    ** generic, not a generator — see OP_CALL. */
+                    if (__builtin_expect((fn->generic_arity | fn->default_count | (int32_t)fn->is_generator) == 0 &&
+                                             fn->arity == arg_count, 1))
+                    {
+                        if (fiber->frame_count >= kMaxFrames)
+                            RT_ERROR("stack overflow");
+                        CHECK_STACK_SPACE(fiber, &R[base], fn->num_regs);
+                        ++ip;
+                        SAVE_IP();
+                        CallFrame *new_frame = &fiber->frames[fiber->frame_count++];
+                        new_frame->closure = cl;
+                        new_frame->func = fn;
+                        new_frame->ip = fn->code;
+                        new_frame->base = &R[base];
+                        new_frame->ret_reg = base;
+                        new_frame->ret_count = nresults;
+                        fiber->stack_top = new_frame->base + fn->num_regs;
+                        clear_new_regs(new_frame->base, 1 + arg_count, fn->num_regs);
+                        LOAD_STATE();
+                        DISPATCH();
+                    }
                     /* Same reasoning as OP_CALL: a generic method invoked
                     ** through plain OP_INVOKE (no <...>) must not silently
                     ** bind a value argument into a type-parameter register. */

@@ -1398,10 +1398,8 @@ namespace zen
         }
         else
         {
-            /* The field array allocation below can trigger GC. Until this
-            ** function returns, the new instance is not yet reachable from a
-            ** VM root, so keep GC disabled during construction. */
-            gc_pause(gc);
+            /* One allocation, header and fields together; alloc_obj never
+            ** collects, so nothing here needs the GC paused. */
             inst = (ObjInstance *)alloc_obj(gc, total_size, OBJ_INSTANCE);
         }
 
@@ -1429,8 +1427,6 @@ namespace zen
         {
             inst->fields = nullptr;
         }
-        if (!klass->persistent)
-            gc_resume(gc);
         return inst;
     }
 

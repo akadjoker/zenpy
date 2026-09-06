@@ -106,6 +106,7 @@ namespace zen
         selectors_ = (ObjString **)calloc(selectors_capacity_, sizeof(ObjString *));
 
         num_selectors_ = 0;
+        init_selector_ = -1;
 
         /* Criar main fiber */
         main_fiber_ = new_fiber(nullptr, kMaxFrames * 16);
@@ -135,6 +136,7 @@ namespace zen
             selectors_ = nullptr;
             selectors_capacity_ = 0;
             num_selectors_ = 0;
+        init_selector_ = -1;
         }
 
         /* Free all objects via GC sweep */
@@ -353,6 +355,10 @@ namespace zen
             Value *base = fiber->stack;
             for (int i = 0; i < nargs; i++)
                 base[i] = args[i];
+            /* Every frame starts with its unused registers nil, so the GC
+            ** never scans a stale pointer left above an earlier stack top. */
+            for (int i = nargs; i < cl->func->num_regs; i++)
+                base[i] = val_nil();
 
             fiber->frame_count = 1;
             CallFrame *frame = &fiber->frames[0];
@@ -413,6 +419,8 @@ namespace zen
             Value *base = fiber->stack_top;
             for (int i = 0; i < nargs; i++)
                 base[i] = args[i];
+            for (int i = nargs; i < cl->func->num_regs; i++)
+                base[i] = val_nil(); /* same entry-clear invariant as OP_CALL */
             fiber->stack_top = base + cl->func->num_regs;
             CallFrame *frame = &fiber->frames[fiber->frame_count++];
             frame->closure = cl;
@@ -572,6 +580,8 @@ namespace zen
 
         idx = num_selectors_++;
         selectors_[idx] = intern_string(&gc_, name, len, hash_string(name, len));
+        if (len == 8 && memcmp(name, "__init__", 8) == 0)
+            init_selector_ = idx; /* constructors are found through this slot */
         return idx;
     }
 

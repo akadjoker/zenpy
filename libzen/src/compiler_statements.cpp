@@ -1592,7 +1592,11 @@ namespace zen
                     left_ok = fop == OP_GETGLOBAL || fop == OP_GETUPVAL || fop == OP_MOVE ||
                               fop == OP_GETFIELD_IDX || fop == OP_LEN;
                 }
-                if (left_ok && (cop == OP_LT || cop == OP_LE || cop == OP_EQ) && ZEN_A(cmp) == cond &&
+                /* An int8 literal is better served by the compare-immediate
+                ** branch (no register at all): leave that to emit_cond_jump. */
+                bool small_imm = lop == OP_LOADI && ZEN_SBX(ld) >= -128 && ZEN_SBX(ld) <= 127 &&
+                                 (cop == OP_LT || cop == OP_LE);
+                if (left_ok && !small_imm && (cop == OP_LT || cop == OP_LE || cop == OP_EQ) && ZEN_A(cmp) == cond &&
                     (lop == OP_LOADK || lop == OP_LOADI) &&
                     ZEN_A(ld) == ZEN_C(cmp) && ZEN_B(cmp) != ZEN_C(cmp) && !is_local_reg(ZEN_C(cmp)))
                 {

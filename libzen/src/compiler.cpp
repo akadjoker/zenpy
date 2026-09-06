@@ -51,6 +51,7 @@ namespace zen
         typed_call_reg_ = -1;
         last_expr_ctor_valid_ = false;
         fn_written_global_count_ = 0;
+        last_cmp_.valid = false;
 
         sigs_ = nullptr; sig_count_ = 0; sig_cap_ = 0;
         sig_params_ = nullptr; sig_param_count_ = 0; sig_param_cap_ = 0;
@@ -129,6 +130,7 @@ namespace zen
         typed_call_reg_ = -1;
         last_expr_ctor_valid_ = false;
         fn_written_global_count_ = 0;
+        last_cmp_.valid = false;
         global_type_hint_count_ = 0;
 
         sigs_ = nullptr; sig_count_ = 0; sig_cap_ = 0;
@@ -375,6 +377,7 @@ namespace zen
             return false;
         }
         e.patch_a_at(off, dst);
+        last_cmp_.valid = false; /* its boolean no longer lives in `src` */
         if (typed_subscript_reg_ == src)
             typed_subscript_reg_ = -1;
         if (typed_call_reg_ == src)
@@ -386,6 +389,56 @@ namespace zen
     {
         Emitter &e = state_->emitter;
         fused = false;
+
+        /* `x < 2`, `x >= 0`, `x == None`, `x is None` (and negations) as a
+        ** branch condition: drop the literal load and the boolean, branch
+        ** on the operand and the literal directly. */
+        if (last_cmp_.valid && last_cmp_.end_offset == e.current_offset() &&
+            last_cmp_.reg == cond && !is_local_reg(cond) && !is_local_reg(last_cmp_.rhs) &&
+            last_cmp_.lhs != last_cmp_.rhs && last_cmp_.lhs != cond)
+        {
+            LastCmp c = last_cmp_;
+            last_cmp_.valid = false;
+            int line = e.line_at(c.load_offset);
+            if (c.imm_kind == 1)
+            {
+                OpCode op = OP_LTIJMPIFNOT;
+                bool ok = true;
+                switch (c.op)
+                {
+                case TOK_LT:   op = OP_LTIJMPIFNOT; break;
+                case TOK_LTEQ: op = OP_LEIJMPIFNOT; break;
+                case TOK_GT:   op = OP_GTIJMPIFNOT; break;
+                case TOK_GTEQ: op = OP_GEIJMPIFNOT; break;
+                default: ok = false; break;
+                }
+                if (ok)
+                {
+                    e.shrink_to(c.load_offset);
+                    fused = true;
+                    return e.emit_cmpi_jmpifnot(op, c.lhs, c.imm, line);
+                }
+            }
+            else if (c.imm_kind == 2)
+            {
+                OpCode op = OP_JMPIFNEQNIL;
+                bool ok = true;
+                switch (c.op)
+                {
+                case TOK_EQEQ:   op = OP_JMPIFNEQNIL; break; /* `if x == None:` skips when x is not None */
+                case TOK_BANGEQ: op = OP_JMPIFEQNIL;  break;
+                case TOK_IS:     op = OP_JMPIFNOTNIL; break;
+                default: ok = false; break;
+                }
+                if (ok)
+                {
+                    e.shrink_to(c.load_offset);
+                    return e.emit_jump(op, c.lhs, line);
+                }
+            }
+        }
+        last_cmp_.valid = false;
+
         int off = e.current_offset() - 1;
         if (off >= 0 && e.last_op_start() == off)
         {

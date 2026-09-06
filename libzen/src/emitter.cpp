@@ -55,6 +55,8 @@ namespace zen
         {
         case OP_JMP: case OP_JMPIF: case OP_JMPIFNOT:
         case OP_LTJMPIFNOT: case OP_LEJMPIFNOT:
+        case OP_LTIJMPIFNOT: case OP_LEIJMPIFNOT: case OP_GTIJMPIFNOT: case OP_GEIJMPIFNOT:
+        case OP_JMPIFNIL: case OP_JMPIFNOTNIL: case OP_JMPIFEQNIL: case OP_JMPIFNEQNIL:
         case OP_FOR_ITER: case OP_FORPREP: case OP_FORLOOP:
             jump_count_++; /* a data word that happens to look like one only makes callers more conservative */
             break;
@@ -397,6 +399,12 @@ namespace zen
     int Emitter::emit_le_jmpifnot(int b, int c, int line)
     {
         last_op_start_ = emit(ZEN_ENCODE(OP_LEJMPIFNOT, 0, b, c), line);
+        return emit(ZEN_ENCODE_SBX(OP_JMP, 0, 0), line);
+    }
+
+    int Emitter::emit_cmpi_jmpifnot(OpCode op, int b, int imm, int line)
+    {
+        last_op_start_ = emit(ZEN_ENCODE(op, 0, b, (uint8_t)(int8_t)imm), line);
         return emit(ZEN_ENCODE_SBX(OP_JMP, 0, 0), line);
     }
 

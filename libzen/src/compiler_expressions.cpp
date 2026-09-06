@@ -749,8 +749,30 @@ namespace zen
             return reg;
         }
 
+        int right_start = state_->emitter.current_offset();
         int right = parse_precedence(get_precedence(op.type) + 1, -1);
         int reg = (dest >= 0) ? dest : alloc_reg();
+
+        /* A literal right operand — a small int or None — loaded by exactly
+        ** one instruction into its own temporary. Remembered for
+        ** emit_cond_jump(), which turns the comparison into a single
+        ** branch when it is used as an if/while condition. */
+        int lit_kind = 0;
+        int lit_imm = 0;
+        if (state_->emitter.current_offset() == right_start + 1 && !is_local_reg(right))
+        {
+            Instruction li = state_->emitter.instruction_at(right_start);
+            if (ZEN_A(li) == right)
+            {
+                if (ZEN_OP(li) == OP_LOADI && ZEN_SBX(li) >= -128 && ZEN_SBX(li) <= 127)
+                {
+                    lit_kind = 1;
+                    lit_imm = ZEN_SBX(li);
+                }
+                else if (ZEN_OP(li) == OP_LOADNIL)
+                    lit_kind = 2;
+            }
+        }
 
         /* Helper: emit a single comparison op into reg */
         auto emit_cmp = [&](TokenType t, int lhs, int rhs)
@@ -788,6 +810,18 @@ namespace zen
         };
 
         emit_cmp(op.type, left, right);
+        last_cmp_.valid = lit_kind != 0;
+        if (lit_kind != 0)
+        {
+            last_cmp_.end_offset = state_->emitter.current_offset();
+            last_cmp_.load_offset = right_start;
+            last_cmp_.reg = reg;
+            last_cmp_.lhs = left;
+            last_cmp_.rhs = right;
+            last_cmp_.op = op.type;
+            last_cmp_.imm_kind = lit_kind;
+            last_cmp_.imm = lit_imm;
+        }
         if (left != reg && left != right)
             free_reg(left);
 

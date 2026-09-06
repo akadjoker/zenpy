@@ -116,6 +116,14 @@ namespace zen
         "CLASSSEAL",
         "INVOKE_VT_FAST",
         "FIELD_MULADD",
+        "LTIJMPIFNOT",
+        "LEIJMPIFNOT",
+        "GTIJMPIFNOT",
+        "GEIJMPIFNOT",
+        "JMPIFNIL",
+        "JMPIFNOTNIL",
+        "JMPIFEQNIL",
+        "JMPIFNEQNIL",
     };
 
     const char *opcode_name(OpCode op)
@@ -402,6 +410,32 @@ namespace zen
         case OP_JMPIFNOT:
             printf("if !R[%d]: pc += %d  \t; -> %04d", a, sbx, offset + 1 + sbx);
             break;
+        case OP_JMPIFNIL:
+            printf("if R[%d] is None: -> %04d", a, offset + 1 + sbx);
+            break;
+        case OP_JMPIFNOTNIL:
+            printf("if R[%d] is not None: -> %04d", a, offset + 1 + sbx);
+            break;
+        case OP_JMPIFEQNIL:
+            printf("if R[%d] == None: -> %04d", a, offset + 1 + sbx);
+            break;
+        case OP_JMPIFNEQNIL:
+            printf("if R[%d] != None: -> %04d", a, offset + 1 + sbx);
+            break;
+        case OP_LTIJMPIFNOT:
+        case OP_LEIJMPIFNOT:
+        case OP_GTIJMPIFNOT:
+        case OP_GEIJMPIFNOT:
+        {
+            uint32_t word2 = func->code[offset + 1];
+            int jsbx = ZEN_SBX(word2);
+            const char *rel = op == OP_LTIJMPIFNOT ? "<" : op == OP_LEIJMPIFNOT ? "<=" : op == OP_GTIJMPIFNOT ? ">" : ">=";
+            printf("if !(R[%d] %s %d): -> %04d", b, rel, (int)(int8_t)c, offset + 2 + jsbx);
+            printf("\n");
+            printf("   |  %04d  %-16s", offset + 1, "(jump-offset)");
+            printf("sBx=%d  \t; -> %04d", jsbx, offset + 2 + jsbx);
+            return offset + 2;
+        }
 
         /* === Functions === */
         case OP_CALL:

@@ -206,6 +206,25 @@ namespace zen
         ** the original GETFIELD_MUL/MUL/ADD/SETFIELD_IDX sequence so the VM
         ** can deopt without changing language semantics. */
         OP_FIELD_MULADD,
+
+        /* --- Compare-with-immediate branches (2-word: sBx in the next word)
+        ** if !(R[B] <op> C), C a signed 8-bit literal — the `i < 10`,
+        ** `hp <= 0`, `n > 2` shape of loop bounds and guards, without a
+        ** LOADI per test. Operand types behave exactly as in LTJMPIFNOT
+        ** with the literal in a register (numbers, strings, __lt__/__le__). */
+        OP_LTIJMPIFNOT, /* if !(R[B] <  C): pc += sBx(next word) */
+        OP_LEIJMPIFNOT, /* if !(R[B] <= C)                        */
+        OP_GTIJMPIFNOT, /* if !(R[B] >  C), i.e. !(C <  R[B])     */
+        OP_GEIJMPIFNOT, /* if !(R[B] >= C), i.e. !(C <= R[B])     */
+
+        /* --- Branches on None (1-word, A + sBx) ---
+        ** `if x is None:` / `if x == None:` and their negations branch on
+        ** R[A] directly instead of LOADNIL + EQ/IS + JMPIFNOT. The EQ pair
+        ** still honours a class's __eq__; the IS pair is pure identity. */
+        OP_JMPIFNIL,    /* if R[A] is None:      pc += sBx  (`x is not None:`) */
+        OP_JMPIFNOTNIL, /* if R[A] is not None:  pc += sBx  (`x is None:`)     */
+        OP_JMPIFEQNIL,  /* if R[A] == None:      pc += sBx  (`x != None:`)     */
+        OP_JMPIFNEQNIL, /* if R[A] != None:      pc += sBx  (`x == None:`)     */
     };
 
 /* Encode/Decode — ABC format */

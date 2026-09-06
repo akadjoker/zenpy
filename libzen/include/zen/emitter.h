@@ -62,6 +62,8 @@ namespace zen
         /* --- Fused compare+jump (2-word superinstructions) --- */
         int emit_lt_jmpifnot(int b, int c, int line); /* retorna offset do sBx word */
         int emit_le_jmpifnot(int b, int c, int line);
+        /* OP_LTIJMPIFNOT..OP_GEIJMPIFNOT: R[b] against the 8-bit literal imm */
+        int emit_cmpi_jmpifnot(OpCode op, int b, int imm, int line);
         void patch_fused_jump(int sbx_offset); /* patch the sBx word */
 
         /* --- FOR_ITER (2-word: word1=ABC, word2=jump offset) --- */

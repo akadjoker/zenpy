@@ -727,6 +727,14 @@ namespace zen
             &&lbl_OP_CLASSSEAL,
             &&lbl_OP_INVOKE_VT_FAST,
             &&lbl_OP_FIELD_MULADD,
+            &&lbl_OP_LTIJMPIFNOT,
+            &&lbl_OP_LEIJMPIFNOT,
+            &&lbl_OP_GTIJMPIFNOT,
+            &&lbl_OP_GEIJMPIFNOT,
+            &&lbl_OP_JMPIFNIL,
+            &&lbl_OP_JMPIFNOTNIL,
+            &&lbl_OP_JMPIFEQNIL,
+            &&lbl_OP_JMPIFNEQNIL,
         };
 
 #ifdef ZEN_OPCODE_PROFILE
@@ -4782,6 +4790,109 @@ namespace zen
                 ip += ZEN_SBX(*ip);
             NEXT();
         }
+
+        /* --- Compare-with-immediate branches --- */
+#define ZEN_CMPI_JMPIFNOT(IMM_LEFT, LE)                                                          \
+        {                                                                                        \
+            uint32_t i = *ip;                                                                    \
+            Value vx = R[ZEN_B(i)];                                                              \
+            int64_t imm = (int8_t)ZEN_C(i);                                                      \
+            bool hold;                                                                           \
+            bool at_jump_offset = false;                                                         \
+            if (__builtin_expect(vx.type == VAL_INT, 1))                                         \
+                hold = (IMM_LEFT) ? ((LE) ? imm <= vx.as.integer : imm < vx.as.integer)          \
+                                  : ((LE) ? vx.as.integer <= imm : vx.as.integer < imm);         \
+            else if (vx.type == VAL_FLOAT)                                                       \
+                hold = (IMM_LEFT) ? ((LE) ? (double)imm <= vx.as.number : (double)imm < vx.as.number) \
+                                  : ((LE) ? vx.as.number <= (double)imm : vx.as.number < (double)imm); \
+            else                                                                                 \
+            {                                                                                    \
+                /* Exactly what LT/LE do with the literal in a register. */                       \
+                Value vi = val_int(imm);                                                         \
+                Value vb = (IMM_LEFT) ? vi : vx;                                                 \
+                Value vc = (IMM_LEFT) ? vx : vi;                                                 \
+                if (is_instance(vx))                                                             \
+                {                                                                                \
+                    ++ip;                                                                        \
+                    at_jump_offset = true;                                                       \
+                    Value result;                                                                \
+                    SAVE_IP();                                                                   \
+                    if (try_binary_operator(this, vb, vc, (LE) ? SLOT_LE : SLOT_LT,              \
+                                            (LE) ? SLOT_LE : SLOT_LT, &result))                  \
+                    {                                                                            \
+                        if (had_error_)                                                          \
+                            return;                                                              \
+                        LOAD_STATE();                                                            \
+                        hold = is_truthy_full(result);                                           \
+                    }                                                                            \
+                    else                                                                         \
+                    {                                                                            \
+                        LOAD_STATE();                                                            \
+                        hold = (LE) ? to_number(vb) <= to_number(vc) : to_number(vb) < to_number(vc); \
+                    }                                                                            \
+                }                                                                                \
+                else                                                                             \
+                    hold = (LE) ? to_number(vb) <= to_number(vc) : to_number(vb) < to_number(vc); \
+            }                                                                                    \
+            if (!at_jump_offset)                                                                 \
+                ++ip;                                                                            \
+            if (!hold)                                                                           \
+                ip += ZEN_SBX(*ip);                                                              \
+            NEXT();                                                                              \
+        }
+        CASE(OP_LTIJMPIFNOT) ZEN_CMPI_JMPIFNOT(false, false)
+        CASE(OP_LEIJMPIFNOT) ZEN_CMPI_JMPIFNOT(false, true)
+        CASE(OP_GTIJMPIFNOT) ZEN_CMPI_JMPIFNOT(true, false)
+        CASE(OP_GEIJMPIFNOT) ZEN_CMPI_JMPIFNOT(true, true)
+#undef ZEN_CMPI_JMPIFNOT
+
+        /* --- Branches on None --- */
+        CASE(OP_JMPIFNIL)
+        {
+            uint32_t i = *ip;
+            if (R[ZEN_A(i)].type == VAL_NIL)
+                ip += ZEN_SBX(i);
+            NEXT();
+        }
+        CASE(OP_JMPIFNOTNIL)
+        {
+            uint32_t i = *ip;
+            if (R[ZEN_A(i)].type != VAL_NIL)
+                ip += ZEN_SBX(i);
+            NEXT();
+        }
+#define ZEN_JMP_EQNIL(WANT_EQUAL)                                                                \
+        {                                                                                        \
+            uint32_t i = *ip;                                                                    \
+            Value v = R[ZEN_A(i)];                                                               \
+            bool eq;                                                                             \
+            if (__builtin_expect(is_instance(v), 0))                                             \
+            {                                                                                    \
+                /* `x == None` on an instance consults __eq__, as OP_EQ does. */                  \
+                Value result;                                                                    \
+                SAVE_IP();                                                                       \
+                if (try_binary_operator(this, v, val_nil(), SLOT_EQ, SLOT_EQ, &result))          \
+                {                                                                                \
+                    if (had_error_)                                                              \
+                        return;                                                                  \
+                    LOAD_STATE();                                                                \
+                    eq = is_truthy_full(result);                                                 \
+                }                                                                                \
+                else                                                                             \
+                {                                                                                \
+                    LOAD_STATE();                                                                \
+                    eq = false;                                                                  \
+                }                                                                                \
+            }                                                                                    \
+            else                                                                                 \
+                eq = v.type == VAL_NIL;                                                          \
+            if (eq == (WANT_EQUAL))                                                              \
+                ip += ZEN_SBX(i);                                                                \
+            NEXT();                                                                              \
+        }
+        CASE(OP_JMPIFEQNIL) ZEN_JMP_EQNIL(true)
+        CASE(OP_JMPIFNEQNIL) ZEN_JMP_EQNIL(false)
+#undef ZEN_JMP_EQNIL
 
         CASE(OP_FORPREP)
         {

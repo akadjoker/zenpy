@@ -551,6 +551,24 @@ namespace zen
         int typed_call_reg_;
         Token typed_call_class_;
         bool typed_call_exact_;
+        /* The shape of the most recent simple comparison, left by
+        ** comparison() for emit_cond_jump(): valid only while nothing else
+        ** has been emitted since (end_offset == current offset). Lets
+        ** `x < 2` / `x == None` branch without materialising the literal
+        ** or the boolean. */
+        struct LastCmp
+        {
+            bool valid;
+            int end_offset;   /* offset right after the comparison's code */
+            int load_offset;  /* the LOADI/LOADNIL of the literal operand  */
+            int reg;          /* the boolean's register                    */
+            int lhs;          /* the non-literal operand's register        */
+            int rhs;          /* the literal's temporary                   */
+            TokenType op;     /* TOK_LT/GT/LTEQ/GTEQ/EQEQ/BANGEQ/IS          */
+            int imm_kind;     /* 1 = int8 literal, 2 = None                 */
+            int imm;
+        };
+        LastCmp last_cmp_;
         /* Set by call_expr() when the expression just parsed was exactly a
         ** `ClassName(...)` constructor call; cleared by every other rule. */
         bool last_expr_ctor_valid_;

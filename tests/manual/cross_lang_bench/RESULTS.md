@@ -1,10 +1,18 @@
 # Cross-language microbenchmarks — ZenPy vs Lua 5.4 / Python 3.12 / Wren
 
-Run on 2026-09-06, branch `feature/reified-generics` (commit 9eb4955), **after** the
-two rounds of correctness fixes from `/code-review` (critical OP_INVOKE_GENERIC
-instruction-pointer bug and the generic-arity bypass gaps). ZenPy built in
-**Release** mode (`-DCMAKE_BUILD_TYPE=Release -DZEN_SANITIZE=OFF`) — the default
-`build/` dir is Debug+ASan/UBSan and is 20-30x slower; never benchmark that one.
+Original run on 2026-09-06, branch `feature/reified-generics` (commit 9eb4955),
+**after** the two rounds of correctness fixes from `/code-review` (critical
+OP_INVOKE_GENERIC instruction-pointer bug and the generic-arity bypass gaps).
+Updated after `perf/vtable-dispatch-and-move-elision` (branched off the above)
+fixed two VM/compiler perf bugs found while explaining why ZenPy — a
+register-based VM, like Lua — was losing to Wren (stack-based) in every
+benchmark: see `vm_perf_regression_diagnosis` project memory for the full
+diagnosis (dead OP_INVOKE_VT opcode, script-class vtables never inheriting
+their parent's, redundant MOVEs in chained method calls).
+
+ZenPy built in **Release** mode (`-DCMAKE_BUILD_TYPE=Release -DZEN_SANITIZE=OFF`)
+— the default `build/` dir is Debug+ASan/UBSan and is 20-30x slower; never
+benchmark that one.
 
 Benchmarks are the classic set Wren itself uses to track its own performance
 (`fib`, `for_loop`, `method_call`, `binary_trees` — ported line-for-line from
@@ -13,12 +21,22 @@ exact equivalent). Best-of-3 runs each.
 
 | Benchmark      | Lua 5.4  | Wren     | Python 3.12 | ZenPy    |
 |----------------|---------:|---------:|------------:|---------:|
-| fib(28) x5     | 0.108s (1.00x) | 0.209s (1.93x) | 0.229s (2.12x) | 0.304s (2.81x) |
-| for_loop (5M)  | 0.042s (1.00x) | 0.139s (3.33x) | 0.492s (11.84x) | 0.247s (5.94x) |
-| method_call    | 0.178s (1.86x) | 0.096s (1.00x) | 0.202s (2.12x) | 0.228s (2.38x) |
-| binary_trees   | 0.570s (2.63x) | 0.217s (1.00x) | 0.386s (1.78x) | 0.422s (1.95x) |
+| fib(28) x5     | 0.110s (1.00x) | 0.211s (1.92x) | 0.238s (2.16x) | 0.304s (2.76x) |
+| for_loop (5M)  | 0.044s (1.00x) | 0.138s (3.14x) | 0.494s (11.24x) | 0.249s (5.66x) |
+| method_call    | 0.188s (1.97x) | 0.095s (1.00x) | 0.203s (2.13x) | 0.208s (2.18x) |
+| binary_trees   | 0.646s (3.05x) | 0.212s (1.00x) | 0.380s (1.80x) | 0.422s (1.99x) |
 
 (multiplier = slowdown vs. the fastest interpreter for that benchmark)
+
+`method_call` improved ~8.4% (0.228s → 0.208s) from the two vtable/MOVE fixes —
+the only benchmark of the four that exercises inheritance and chained method
+calls, which is exactly what those two fixes target. `fib`/`for_loop`/
+`binary_trees` are unchanged within measurement noise, as expected: they don't
+hit either code path. Several more diagnosed causes (dead OP_INVOKE_VT opcode
+never emitted by the compiler, `ObjInstance`'s two-allocation construction,
+`super()` resolving its parent class via a global-array indirection every
+call) remain as follow-up — see the project memory for the full list and
+why each one is safe to defer.
 
 ## Takeaways
 

@@ -635,16 +635,12 @@ namespace zen
     ** Always true for self (reg 0 in any method). */
     bool Compiler::is_current_class_instance(int reg) const
     {
+        /* Only `self` earns the unchecked direct index: it is an instance
+        ** of this class (or a subclass, whose layout extends it) by
+        ** construction. An annotated local or parameter of this class is
+        ** a promise, not a fact — it takes the checked form instead. */
         if (!state_->is_method || !in_class_) return false;
-        if (reg == 0) return true; /* self is always reg 0 */
-        /* Also check type-annotated locals */
-        for (int i = 0; i < state_->local_count; i++)
-        {
-            if (state_->locals[i].reg == reg && state_->locals[i].has_type_hint &&
-                identifiers_equal(state_->locals[i].type_hint, current_class_))
-                return true;
-        }
-        return false;
+        return reg == 0;
     }
 
     /* Save current class field table to the registry. Called after class_declaration(). */
@@ -1686,6 +1682,25 @@ namespace zen
             }
         }
         return false;
+    }
+
+    int Compiler::registry_field_index(const char *cls, int32_t cls_len, ObjString *fname) const
+    {
+        /* The class being compiled is not in the registry yet: its fields
+        ** seen so far are in class_field_table_. */
+        if (in_class_ && name_eq(current_class_.start, current_class_.length, cls, cls_len))
+            return lookup_class_field(fname);
+        for (int i = 0; i < class_registry_count_; i++)
+        {
+            const ClassFieldRegistry &r = class_registry_[i];
+            if (!name_eq(r.name.start, r.name.length, cls, cls_len))
+                continue;
+            for (int j = 0; j < r.count; j++)
+                if (r.fields[j] == fname)
+                    return j;
+            return -1;
+        }
+        return -1;
     }
 
     bool Compiler::receiver_static_class(int reg, const char *&name, int32_t &len, bool *exact) const

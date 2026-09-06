@@ -233,6 +233,16 @@ namespace zen
         ** is entered by a JMP to this instruction, so one dispatch per
         ** iteration replaces FOR_ITER + JMP. */
         OP_FOR_NEXT,
+
+        /* --- Checked direct field access (2-word) ---
+        ** For a receiver whose class the compiler knows statically but
+        ** cannot vouch for (an annotated parameter, an inferred local, an
+        ** Array[T] element): word1 carries the field index, word2 is the
+        ** ordinary by-name GETFIELD/SETFIELD. If the instance's class has
+        ** that very field name at that index the access is O(1) and word2
+        ** is skipped; otherwise word2 runs as it always would. */
+        OP_GETFIELD_IDXC, /* word1: R[A] = R[B].fields[C] if names match; word2: GETFIELD A,B,name */
+        OP_SETFIELD_IDXC, /* word1: R[A].fields[B] = R[C] if names match; word2: SETFIELD A,name,C */
     };
 
 /* Encode/Decode — ABC format */

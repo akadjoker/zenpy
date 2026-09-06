@@ -240,6 +240,7 @@ namespace zen
         /* --- Declarations --- */
         void declaration();
         void fun_declaration(bool force_async = false);
+        void param_type_hint(int param_reg);
         void class_declaration();
         void struct_declaration();
         void enum_declaration();
@@ -377,6 +378,9 @@ namespace zen
         ** inferred class it already had). */
         void note_global_written_in_function(int gidx);
         const FuncSig *find_method_in_chain(const char *cls, int32_t cls_len, const Token &method) const;
+        /* Index of `fname` in the field layout of an already-compiled class
+        ** of this file (class_registry_), or -1. */
+        int registry_field_index(const char *cls, int32_t cls_len, ObjString *fname) const;
         bool method_overridden_below(const char *cls, int32_t cls_len, const Token &method) const;
         /* True if `cls_name.method` is a NATIVE class method registered via
         ** ClassBuilder::generic_method() (never a script def — those go

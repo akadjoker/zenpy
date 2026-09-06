@@ -736,6 +736,8 @@ namespace zen
             &&lbl_OP_JMPIFEQNIL,
             &&lbl_OP_JMPIFNEQNIL,
             &&lbl_OP_FOR_NEXT,
+            &&lbl_OP_GETFIELD_IDXC,
+            &&lbl_OP_SETFIELD_IDXC,
         };
 
 #ifdef ZEN_OPCODE_PROFILE
@@ -3266,6 +3268,54 @@ namespace zen
                 RT_ERROR("GETFIELD_IDX expected instance/struct: dst=R%d receiver=R%d receiver_type=%s field_index=%d", ZEN_A(i), ZEN_B(i), value_debug_type(obj), field_idx);
             }
             NEXT();
+        }
+        CASE(OP_GETFIELD_IDXC)
+        {
+            /* word1: R[A] = R[B].fields[C] when R[B]'s class has the field
+            ** named by word2 at index C; otherwise word2 — the ordinary
+            ** GETFIELD by name — runs as it always did. */
+            uint32_t i = *ip;
+            Value obj = R[ZEN_B(i)];
+            if (__builtin_expect(is_instance(obj), 1))
+            {
+                ObjInstance *inst = as_instance(obj);
+                ObjClass *k = inst->klass;
+                const int idx = ZEN_C(i);
+                ObjString *name = as_string(K[ZEN_C(ip[1])]);
+                if (__builtin_expect(idx < inst->num_fields && idx < k->num_fields && k->field_names[idx] == name, 1))
+                {
+                    R[ZEN_A(i)] = inst->fields[idx];
+                    ip += 2;
+                    DISPATCH();
+                }
+            }
+            ++ip;
+            DISPATCH();
+        }
+        CASE(OP_SETFIELD_IDXC)
+        {
+            /* word1: R[A].fields[B] = R[C] under the same check; word2 is
+            ** the by-name SETFIELD (which also handles a new field). */
+            uint32_t i = *ip;
+            Value recv = R[ZEN_A(i)];
+            if (__builtin_expect(is_instance(recv), 1))
+            {
+                ObjInstance *inst = as_instance(recv);
+                ObjClass *k = inst->klass;
+                const int idx = ZEN_B(i);
+                ObjString *name = as_string(K[ZEN_B(ip[1])]);
+                if (__builtin_expect(idx < inst->num_fields && idx < k->num_fields && k->field_names[idx] == name, 1))
+                {
+                    Value v = R[ZEN_C(i)];
+                    if (__builtin_expect(is_string(v), 0))
+                        v.as.obj->flags |= OBJ_FLAG_SHARED;
+                    inst->fields[idx] = v;
+                    ip += 2;
+                    DISPATCH();
+                }
+            }
+            ++ip;
+            DISPATCH();
         }
         CASE(OP_SETFIELD_IDX)
         {

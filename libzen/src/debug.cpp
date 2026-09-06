@@ -125,6 +125,8 @@ namespace zen
         "JMPIFEQNIL",
         "JMPIFNEQNIL",
         "FOR_NEXT",
+        "GETFIELD_IDXC",
+        "SETFIELD_IDXC",
     };
 
     const char *opcode_name(OpCode op)
@@ -593,6 +595,26 @@ namespace zen
         case OP_GETFIELD_IDX:
             printf("R[%d] = R[%d].fields[%d]", a, b, c);
             break;
+        case OP_GETFIELD_IDXC:
+        {
+            uint32_t word2 = func->code[offset + 1];
+            const char *fname = const_str(func, ZEN_C(word2));
+            printf("R[%d] = R[%d].fields[%d] if field %d is \"%s\"", a, b, c, c, fname ? fname : "?");
+            printf("\n");
+            printf("   |  %04d  %-16s", offset + 1, "(GETFIELD)");
+            printf("R[%d] = R[%d].%s", ZEN_A(word2), ZEN_B(word2), fname ? fname : "?");
+            return offset + 2;
+        }
+        case OP_SETFIELD_IDXC:
+        {
+            uint32_t word2 = func->code[offset + 1];
+            const char *fname = const_str(func, ZEN_B(word2));
+            printf("R[%d].fields[%d] = R[%d] if field %d is \"%s\"", a, b, c, b, fname ? fname : "?");
+            printf("\n");
+            printf("   |  %04d  %-16s", offset + 1, "(SETFIELD)");
+            printf("R[%d].%s = R[%d]", ZEN_A(word2), fname ? fname : "?", ZEN_C(word2));
+            return offset + 2;
+        }
         case OP_SETFIELD_IDX:
             printf("R[%d].fields[%d] = R[%d]", a, b, c);
             break;

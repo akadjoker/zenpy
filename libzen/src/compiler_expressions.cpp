@@ -1648,12 +1648,30 @@ namespace zen
             }
         }
 
+        /* A receiver of statically known class other than the one being
+        ** compiled (annotated parameter, inferred local, Array[T] element,
+        ** self-returning chain): use the checked direct-index form, whose
+        ** second word is the by-name access it falls back to. */
+        int checked_fidx = -1;
+        if (receiver_has_static_class)
+        {
+            checked_fidx = registry_field_index(receiver_class_name, receiver_class_len, token_string(field));
+            if (checked_fidx > 255)
+                checked_fidx = -1;
+        }
+
         /* Assignment: obj.field = expr */
         if (can_assign && match(TOK_EQ))
         {
             int val = expression(-1);
             int name_ki = state_->emitter.add_string_constant(field.start, field.length);
-            state_->emitter.emit_abc(OP_SETFIELD, obj, name_ki, val, previous_.line);
+            if (checked_fidx >= 0)
+            {
+                state_->emitter.emit_abc(OP_SETFIELD_IDXC, obj, checked_fidx, val, previous_.line);
+                state_->emitter.emit((uint32_t)ZEN_ENCODE(OP_SETFIELD, obj, name_ki, val), previous_.line);
+            }
+            else
+                state_->emitter.emit_abc(OP_SETFIELD, obj, name_ki, val, previous_.line);
             free_reg(val);
             if (obj != reg)
                 free_reg(obj);
@@ -1802,7 +1820,13 @@ namespace zen
 
         /* Field read */
         int name_ki = state_->emitter.add_string_constant(field.start, field.length);
-        state_->emitter.emit_abc(OP_GETFIELD, reg, obj, name_ki, field.line);
+        if (checked_fidx >= 0)
+        {
+            state_->emitter.emit_abc(OP_GETFIELD_IDXC, reg, obj, checked_fidx, field.line);
+            state_->emitter.emit((uint32_t)ZEN_ENCODE(OP_GETFIELD, reg, obj, name_ki), field.line);
+        }
+        else
+            state_->emitter.emit_abc(OP_GETFIELD, reg, obj, name_ki, field.line);
         if (obj != reg)
             free_reg(obj);
         return reg;

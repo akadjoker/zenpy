@@ -153,6 +153,45 @@ namespace zen
     **     body
     ** ========================================================= */
 
+    /* `param: Type` — a simple class name or Array[Class] becomes the
+    ** parameter's static type, exactly like an annotated local; any other
+    ** annotation (dotted, quoted, generic) is accepted and skipped. */
+    void Compiler::param_type_hint(int param_reg)
+    {
+        if (!match(TOK_COLON))
+            return;
+        if (check(TOK_STRING) || check(TOK_FSTRING))
+        {
+            advance(); /* e.g. 'list[int]' */
+            return;
+        }
+        consume(TOK_IDENTIFIER, "Expected type name.");
+        Token type_tok = previous_;
+        bool simple = !check(TOK_DOT) && !check(TOK_LBRACKET);
+        while (match(TOK_DOT)) consume(TOK_IDENTIFIER, "Expected type name.");
+        if (match(TOK_LBRACKET))
+        {
+            const bool is_array = type_tok.length == 5 && memcmp(type_tok.start, "Array", 5) == 0;
+            if (is_array && check(TOK_IDENTIFIER))
+            {
+                Token elem = current_;
+                advance();
+                if (check(TOK_RBRACKET) && param_reg >= 0)
+                    set_local_array_element_type(param_reg, elem);
+            }
+            int depth = 1;
+            while (depth > 0 && !check(TOK_EOF))
+            {
+                if (match(TOK_LBRACKET)) depth++;
+                else if (match(TOK_RBRACKET)) depth--;
+                else advance();
+            }
+            return;
+        }
+        if (simple && param_reg >= 0)
+            set_local_type_hint(param_reg, type_tok);
+    }
+
     void Compiler::fun_declaration(bool force_async)
     {
         consume(TOK_IDENTIFIER, "Expected function name.");
@@ -249,31 +288,8 @@ namespace zen
                     break; /* *args must be last */
                 }
                 consume(TOK_IDENTIFIER, "Expected parameter name.");
-                add_local(previous_);
-                /* Ignore type hint: param: Type */
-                if (match(TOK_COLON))
-                {
-                    /* consume the type expression: string literal or dotted identifier */
-                    if (check(TOK_STRING) || check(TOK_FSTRING))
-                    {
-                        advance(); /* e.g. 'list[int]' */
-                    }
-                    else
-                    {
-                        consume(TOK_IDENTIFIER, "Expected type name.");
-                        while (match(TOK_DOT)) consume(TOK_IDENTIFIER, "Expected type name.");
-                        if (match(TOK_LBRACKET))
-                        {
-                            int depth = 1;
-                            while (depth > 0 && !check(TOK_EOF))
-                            {
-                                if (match(TOK_LBRACKET)) depth++;
-                                else if (match(TOK_RBRACKET)) depth--;
-                                else advance();
-                            }
-                        }
-                    }
-                }
+                int param_reg = add_local(previous_);
+                param_type_hint(param_reg);
                 if (match(TOK_EQ))
                 {
                     if (default_start_idx < 0) default_start_idx = arity;
@@ -598,28 +614,8 @@ namespace zen
                             break;
                         }
                         consume(TOK_IDENTIFIER, "Expected parameter name.");
-                        add_local(previous_);
-                        /* Ignore type hint */
-                        if (match(TOK_COLON))
-                        {
-                            if (check(TOK_STRING) || check(TOK_FSTRING))
-                                advance();
-                            else
-                            {
-                                consume(TOK_IDENTIFIER, "Expected type name.");
-                                while (match(TOK_DOT)) consume(TOK_IDENTIFIER, "Expected type name.");
-                                if (match(TOK_LBRACKET))
-                                {
-                                    int depth = 1;
-                                    while (depth > 0 && !check(TOK_EOF))
-                                    {
-                                        if (match(TOK_LBRACKET)) depth++;
-                                        else if (match(TOK_RBRACKET)) depth--;
-                                        else advance();
-                                    }
-                                }
-                            }
-                        }
+                        int param_reg = add_local(previous_);
+                        param_type_hint(param_reg);
                         if (match(TOK_EQ))
                         {
                             if (default_start_idx < 0) default_start_idx = arity;

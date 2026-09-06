@@ -338,13 +338,22 @@ namespace zen
         }
         if (is_closure(callee))
         {
+            ObjClosure *cl = as_closure(callee);
+            /* Same reasoning as the native branch above: a generic script
+            ** function called through this C++ embedding entry point must
+            ** not silently bind args[0] into the type-parameter register. */
+            if (cl->func->generic_arity > 0)
+            {
+                runtime_error("'%s' is generic and must be called with <...> type arguments",
+                              cl->func->name ? cl->func->name->chars : "?");
+                return val_nil();
+            }
             /* Place callee + args on main fiber stack, call, return result */
             ObjFiber *fiber = main_fiber_;
             Value *base = fiber->stack;
             for (int i = 0; i < nargs; i++)
                 base[i] = args[i];
 
-            ObjClosure *cl = as_closure(callee);
             fiber->frame_count = 1;
             CallFrame *frame = &fiber->frames[0];
             frame->closure = cl;
@@ -393,11 +402,17 @@ namespace zen
         }
         if (is_closure(callee))
         {
+            ObjClosure *cl = as_closure(callee);
+            if (cl->func->generic_arity > 0)
+            {
+                runtime_error("'%s' is generic and must be called with <...> type arguments",
+                              cl->func->name ? cl->func->name->chars : "?");
+                return val_nil();
+            }
             ObjFiber *fiber = current_fiber_;
             Value *base = fiber->stack_top;
             for (int i = 0; i < nargs; i++)
                 base[i] = args[i];
-            ObjClosure *cl = as_closure(callee);
             fiber->stack_top = base + cl->func->num_regs;
             CallFrame *frame = &fiber->frames[fiber->frame_count++];
             frame->closure = cl;
@@ -1528,22 +1543,35 @@ namespace zen
             {
                 ObjNative *nat = as_native(method);
                 if (nat->generic_arity > 0)
+                {
                     runtime_error("'%s.init' is a generic native method and cannot be constructed this way",
                                   klass->name ? klass->name->chars : "?");
-                else
-                    nat->fn(this, call_args, nargs + 1);
+                    gc_resume(&gc_);
+                    return self;
+                }
+                nat->fn(this, call_args, nargs + 1);
             }
             else if (is_closure(method))
             {
+                ObjClosure *cl = as_closure(method);
+                /* Same reasoning as every other closure-call site: a
+                ** generic init<T> constructed via this C++ embedding entry
+                ** point must not silently bind a value arg into T's slot. */
+                if (cl->func->generic_arity > 0)
+                {
+                    runtime_error("'%s.init' is generic and must be constructed with <...> type arguments",
+                                  klass->name ? klass->name->chars : "?");
+                    gc_resume(&gc_);
+                    return self;
+                }
                 /* Push args to fiber stack and call */
                 ObjFiber *fiber = current_fiber_;
                 Value *base = fiber->stack_top;
                 for (int i = 0; i <= nargs; i++)
                     base[i] = call_args[i];
-                fiber->stack_top = base + as_closure(method)->func->num_regs;
+                fiber->stack_top = base + cl->func->num_regs;
 
                 CallFrame *frame = &fiber->frames[fiber->frame_count++];
-                ObjClosure *cl = as_closure(method);
                 frame->closure = cl;
                 frame->func = cl->func;
                 frame->ip = cl->func->code;
@@ -1595,6 +1623,13 @@ namespace zen
                 /* Call the method directly */
                 if (is_closure(method))
                 {
+                    ObjClosure *cl = as_closure(method);
+                    if (cl->func->generic_arity > 0)
+                    {
+                        runtime_error("'%s' is generic and must be invoked with <...> type arguments",
+                                      method_name);
+                        return val_nil();
+                    }
                     ObjFiber *fiber = current_fiber_;
                     if (fiber->frame_count >= fiber->frame_capacity)
                     {
@@ -1606,7 +1641,6 @@ namespace zen
                     for (int i = 0; i < nargs; i++)
                         base[i + 1] = args[i];
 
-                    ObjClosure *cl = as_closure(method);
                     fiber->stack_top = base + cl->func->num_regs;
 
                     int saved_frame_count = fiber->frame_count; /* save before push */
@@ -1686,6 +1720,13 @@ namespace zen
         }
         else if (is_closure(method))
         {
+            ObjClosure *cl = as_closure(method);
+            if (cl->func->generic_arity > 0)
+            {
+                runtime_error("'%s' is generic and must be invoked with <...> type arguments",
+                              cl->func->name ? cl->func->name->chars : "?");
+                return val_nil();
+            }
             ObjFiber *fiber = current_fiber_;
             if (fiber->frame_count >= fiber->frame_capacity)
             {
@@ -1697,7 +1738,6 @@ namespace zen
             for (int i = 0; i < nargs; i++)
                 base[i + 1] = args[i];
 
-            ObjClosure *cl = as_closure(method);
             fiber->stack_top = base + cl->func->num_regs;
 
             int saved_frame_count = fiber->frame_count; /* save before push */
@@ -1739,22 +1779,44 @@ namespace zen
 
         if (is_native(method))
         {
+            ObjNative *nat = as_native(method);
+            /* Unreachable today (generic_method() never populates
+            ** operator_slots), but guard anyway — reading ->fn through the
+            ** union while generic_arity>0 is undefined behavior, not just a
+            ** wrong result, and every other ObjNative call site got this
+            ** same check. */
+            if (nat->generic_arity > 0)
+            {
+                runtime_error("'%s' is a generic native operator and cannot be called this way",
+                              nat->name ? nat->name->chars : "?");
+                return val_nil();
+            }
             Value call_args[17];
             call_args[0] = instance;
             for (int i = 0; i < nargs && i < 16; i++)
                 call_args[i + 1] = args[i];
             gc_pause(&gc_);
-            int nret = as_native(method)->fn(this, call_args, nargs + 1);
+            int nret = nat->fn(this, call_args, nargs + 1);
             gc_resume(&gc_);
             return nret > 0 ? call_args[0] : val_nil();
         }
 
         if (is_closure(method))
         {
+            ObjClosure *cl = as_closure(method);
+            /* A generic dunder (def __add__<T>(self, other): ...) is
+            ** reachable via plain infix syntax (a + b) with no <...>
+            ** opt-in possible at the call site at all — must reject, not
+            ** silently bind `other` into T's register. */
+            if (cl->func->generic_arity > 0)
+            {
+                runtime_error("'%s' is a generic operator method and cannot be invoked this way",
+                              cl->func->name ? cl->func->name->chars : "?");
+                return val_nil();
+            }
             ObjFiber *fiber = current_fiber_;
             Value *base = fiber->stack_top;
 
-            ObjClosure *cl = as_closure(method);
             if (fiber->frame_count >= kMaxFrames)
             {
                 runtime_error("stack overflow");

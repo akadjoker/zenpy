@@ -1183,8 +1183,20 @@ namespace zen
 
         *out_ngeneric = ngeneric;
         /* nvalue may carry the spread flag in bit 7 (see argument_list) —
-        ** preserve it untouched, only the low 7 bits are an actual count. */
-        return (ngeneric + (nvalue & 0x7F)) | (nvalue & 0x80);
+        ** preserve it untouched, only the low 7 bits are an actual count.
+        ** ngeneric + (nvalue's count) must itself stay under 128: past
+        ** that, the sum spills into bit 7 and gets misread as a spread
+        ** flag by every caller's `if (nargs & 0x80)` check — reject before
+        ** that arithmetic can produce a bogus count. kMaxRegisters (250)
+        ** bounds each half individually but not their sum, so this can't
+        ** be caught earlier by the per-register checks alone. */
+        int total = ngeneric + (nvalue & 0x7F);
+        if (total > 0x7F)
+        {
+            error("Too many combined type and value arguments in a generic call.");
+            total &= 0x7F;
+        }
+        return total | (nvalue & 0x80);
     }
 
     /* Two tokens are "adjacent" when nothing (not even a space) separates

@@ -85,6 +85,32 @@ box = Box()
 assert box.collect<Sprite>(1, 2, 3) == [1, 2, 3]
 assert box.collect<Sprite>() == []
 
+# --- CRITICAL regression: calling a script-defined generic METHOD (not a
+# free function) must not corrupt the caller's own registers on return.
+# OP_INVOKE_GENERIC is a 3-word instruction; advancing the instruction
+# pointer by only 2 words left the caller's saved resume address pointing
+# mid-instruction, so returning from the call decoded the raw ngeneric
+# operand as a bogus next instruction (typically clobbering R[0], i.e.
+# `self` inside a method) before execution resynchronized. ---
+class Holder:
+    def __init__(self, entity):
+        self.entity = entity
+        self.tag = "holder-tag"
+    def use(self):
+        # A local live across the generic call, AND self (R[0]) — both
+        # must survive untouched.
+        keep_me = 999
+        x = self.entity.get_component<Sprite>()
+        assert keep_me == 999
+        return self.tag
+
+class Entity:
+    def get_component<T>(self):
+        return T
+
+holder = Holder(Entity())
+assert holder.use() == "holder-tag"
+
 # --- `<` and `>` remain ordinary comparisons everywhere else, including
 # right next to a real generic call, and even when the compared names are
 # classes/instances (adjacency + "callee is a known generic" both matter —

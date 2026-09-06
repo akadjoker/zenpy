@@ -1924,6 +1924,15 @@ namespace zen
                 {
                     ObjClosure *cl = as_closure(init_method);
                     ObjFunc *fn = cl->func;
+                    /* A generic __init__<T> constructed via plain ClassName(x)
+                    ** (no <...>) must not silently bind x into T's register —
+                    ** same failure mode as a plain generic function/method
+                    ** called without <...>, just reached via construction. */
+                    if (fn->generic_arity > 0)
+                    {
+                        RT_ERROR("'%s.__init__' is generic and must be constructed with <...> type arguments",
+                                  klass->name->chars);
+                    }
                     /* Check arity (init's arity = user params, self is implicit) */
                     if (fn->arity < 0)
                     {
@@ -3569,9 +3578,18 @@ namespace zen
             uint16_t sel_slot = (uint16_t)(word2 >> 16);
             uint16_t name_ki = (uint16_t)(word2 & 0xFFFF);
             int ngeneric = (int)ip[2];
-            ip += 2;
-            SAVE_IP();
-
+            /* `ip` still points at word1 here — deliberately NOT advanced
+            ** yet, unlike OP_INVOKE's `*(++ip)` which leaves ip on its last
+            ** word. Each branch below must advance ip by exactly 3 words
+            ** total before resuming: the native branch falls through to
+            ** NEXT() (which itself does one ++ip), so it advances by 2
+            ** first; the closure branch never reaches NEXT() (it jumps via
+            ** DISPATCH()), so it must advance by all 3 itself before
+            ** SAVE_IP(). Getting either wrong leaves the caller's saved
+            ** resume ip mid-instruction: on return the VM decodes a raw
+            ** operand word (e.g. ngeneric) as a bogus opcode, corrupting
+            ** the caller's registers before execution resynchronizes —
+            ** found live via exactly this bug in the closure branch. */
             Value receiver = R[base];
             ObjString *method = as_string(K[name_ki]);
             const char *mname = method->chars;
@@ -3653,6 +3671,10 @@ namespace zen
                     RT_ERROR("generic native method '%s' returned error", mname);
                 }
                 copy_native_results(&R[base], value_args, nret, nresults);
+                /* Advance past word2+word3 ourselves — NEXT() only adds 1
+                ** more, for a total of 3, matching this instruction's real
+                ** width (ip is still on word1 at this point). */
+                ip += 2;
                 NEXT();
             }
 
@@ -3662,6 +3684,14 @@ namespace zen
             }
 
             {
+                /* Closure branch never reaches NEXT() (it exits via
+                ** LOAD_STATE()/DISPATCH() into the callee), so it must
+                ** account for all 3 words itself before saving ip for the
+                ** eventual return — this is the exact spot the original
+                ** bug lived: advancing only 2 here corrupts the caller's
+                ** registers on return (see the comment above this CASE). */
+                ip += 3;
+                SAVE_IP();
                 ObjClosure *cl = as_closure(mval);
                 ObjFunc *fn = cl->func;
                 if (fn->generic_arity == 0)
@@ -3852,6 +3882,15 @@ namespace zen
             {
                 ObjClosure *cl = as_closure(mval);
                 ObjFunc *fn = cl->func;
+                /* super().method<T>(...) has no dedicated syntax/opcode yet
+                ** (compiler.cpp's super_expr() never parses <...>), so a
+                ** generic parent method reached via plain super().method(x)
+                ** must not silently bind x into T's register. */
+                if (fn->generic_arity > 0)
+                {
+                    const char *mname = as_string(frame->func->constants[name_ki])->chars;
+                    RT_ERROR("'%s' is generic and cannot be called via super() yet", mname);
+                }
                 if (fn->arity < 0)
                 {
                     int min_args = (-fn->arity) - 1;

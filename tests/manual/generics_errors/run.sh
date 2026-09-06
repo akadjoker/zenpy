@@ -23,6 +23,10 @@ declare -A EXPECT=(
     [05_missing_value_args.py]="expected at least"
     [06_missing_generic_syntax_with_value_args.py]="is generic and must be called with"
     [07_missing_generic_syntax_method.py]="is generic and must be called with"
+    [08_generic_init_via_plain_construction.py]="is generic and must be constructed with"
+    [09_generic_super_call.py]="cannot be called via super"
+    [10_generic_dunder_operator.py]="cannot be invoked this way"
+    [11_bitpack_overflow.py]="Too many combined type and value arguments"
 )
 
 pass=0

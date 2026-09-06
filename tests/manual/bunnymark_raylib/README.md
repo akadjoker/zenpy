@@ -40,12 +40,16 @@ the same.
 
 Auto-add, target 60 fps, 25 s each (`./run_all.sh`):
 
-| Language        | max bunnies at >= 60 fps |
-|-----------------|-------------------------:|
-| ZenPy           | 70 400 |
-| Lua 5.4.8       | 63 000 |
-| Wren 0.4.0      | 54 600 |
-| CPython 3.12    | 30 800 |
+| Language        | max bunnies at >= 60 fps (run 1 / run 2) |
+|-----------------|-----------------------------------------:|
+| ZenPy           | 70 400 / 70 800 |
+| Lua 5.4.8       | 63 000 / 60 600 |
+| Wren 0.4.0      | 54 600 / 58 800 |
+| CPython 3.12    | 30 800 / 34 800 |
+
+(Run 2 is after the round-2 VM work; the spread between runs is the
+measurement noise — at these counts the raylib draw call per sprite
+dominates, not the script.)
 
 Fixed 20 000 bunnies, 4 s (`./run_all.sh --fixed 20000 --seconds 4`):
 

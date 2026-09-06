@@ -338,3 +338,45 @@ Próximo: o que resta no method_call é custo por chamada (push de frame,
 dois memsets de registos, LOAD_STATE, limpeza no RETURN) — ~49 ns por
 call+return; `Toggle.value` já são só 2 instruções. Ponto 4 (tipo de campos
 `left: Tree?`) continua por fazer.
+
+
+### Ronda 2 (2026-09-06, commits 6c7b950..415a011)
+
+Modelo de custo com microbenchmarks (função vazia, 3 args, 33 registos,
+método tipado/dinâmico) + profiler por opcode (`-DZEN_OPCODE_PROFILE`, rdtsc
+em cada DISPATCH; comparar opcodes entre si, não com o relógio). Conclusões:
+INVOKE vs INVOKE_VT < 1 ns; o custo estava no call/return (~20 ns → ~16 ns
+agora; Lua ~9 ns) e, em binary_trees, na construção `Tree(...)` (36% do
+tempo: `intern_string("__init__")` + `map_get` em cada construção).
+
+Feito:
+- `__init__` resolvido pela vtable (slot do selector; `init_selector_` fica
+  definido quando o nome é internado, também via bytecode carregado);
+  `new_instance` sem pause/resume do GC.
+- Fast path de chamada em OP_CALL/OP_INVOKE (um teste: aridade exacta, sem
+  defaults/*args, não genérico, não generator); `clear_new_regs` em stores
+  directos para frames pequenos; memset de saída do RETURN removido
+  (registos foram vistos vivos pelo GC; ficam conservadoramente vivos até
+  serem reutilizados, como em Lua); `call_global`/`call_fn` limpam o frame.
+- Saltos fundidos: `x < 2`/`<=`/`>`/`>=` com literal int8
+  (LTI/LEI/GTI/GEI JMPIFNOT, 2 palavras) e `x == None`/`!= None`/`is None`
+  (JMPIFNIL/JMPIFNOTNIL identidade; JMPIFEQNIL/JMPIFNEQNIL respeitam
+  `__eq__`). Bytecode 2.5.
+- `for x in iterável` com OP_FOR_NEXT no fim do corpo (1 dispatch/iteração,
+  arrays primeiro); local lido como operando esquerdo/objecto de acesso já
+  não é copiado para `dest`; LOAD_STATE sem o ramo de closure nulo.
+
+Medições finais do dia (best of 3, mesma janela): fib 0,271→0,161s (Lua
+0,109); for_loop locais 0,104→0,061s (Lua 0,042); method_call 0,238→0,167s
+(Lua 0,176); binary_trees 0,371→0,243s (Lua 0,547, Python 0,367).
+
+Pré-existente, encontrado agora e NÃO corrigido: `v > 2` / `2 < v` com `v`
+instância que define `__gt__` devolve False — o compilador troca operandos
+(`LT 2, v`) e a VM despacha pelo slot `__lt__` sem reflectir para `__gt__`.
+Igual antes e depois desta ronda (tests/59 não o fixa).
+
+Próximos candidatos: GETFIELD verificado (2 palavras: idx + nome) para
+receptores de classe estática que não a actual (parâmetros anotados
+`e: Enemy`, locais inferidos de outra classe, elementos `Array[T]`) — hoje
+só `self`/classe actual usam GETFIELD_IDX; o resto faz varrimento linear
+por nome. E o custo restante por chamada (frame push + LOAD_STATE).

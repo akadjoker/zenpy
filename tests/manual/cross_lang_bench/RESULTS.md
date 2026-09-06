@@ -154,3 +154,49 @@ LOAD_STATE, RETURN's stale-register clear) — method_call is ~49 ns per
 call+return and `Toggle.value` is now two instructions, so the dispatch
 loop is no longer where that time goes. See `tests/manual/bunnymark_raylib/`
 for the sprite-count comparison against Lua/Wren/Python under raylib.
+
+
+## 2026-09-06 (round 2) — calls, construction, fused branches, for-each
+
+Same machine and window, best of 3, Release -O3. Zen commits 6c7b950..415a011.
+
+| Benchmark        | ZenPy start of day | after round 1 | **now** | Lua 5.4 | Python 3.12 | Wren (earlier) |
+|------------------|-------------------:|--------------:|--------:|--------:|------------:|---------------:|
+| fib(28) x5       | 0.271s | 0.204s | **0.161s** | 0.109s | 0.232s | 0.209s |
+| for_loop (globals) | 0.162s | 0.157s | **0.156s** | — | 0.480s | 0.143s |
+| for_loop_local   | 0.104s | 0.061s | **0.061s** | 0.042s | — | — |
+| method_call      | 0.238s | 0.189s | **0.167s** | 0.176s | 0.197s | 0.095s |
+| binary_trees     | 0.371s | 0.339s | **0.243s** | 0.547s | 0.367s | 0.206s |
+
+Over the day: fib -41%, method_call -30%, binary_trees -35%, local loop -41%.
+ZenPy is now ahead of Lua on method_call and binary_trees and ahead of
+Python everywhere; Lua keeps fib (1.5x) and the pure local loop (1.45x).
+
+What round 2 changed (one commit each):
+
+1. `ClassName(...)` resolves `__init__` through the vtable slot of its
+   selector instead of interning "__init__" and probing the method map on
+   every construction; `new_instance` no longer pauses the GC around its
+   single allocation. (binary_trees: the constructor was 36% of the time.)
+2. OP_CALL/OP_INVOKE take a one-test fast path for the common call;
+   register clearing on entry is a few direct stores instead of memset; the
+   RETURN-side memset is gone (those registers were scanned while live and
+   cannot dangle — the GC keeps them conservatively alive, as Lua's does);
+   call_global/call_fn nil their frames like every other entry point.
+3. `if x < 2` / `while i <= 9` / `if hp > 0` compare against an 8-bit
+   literal and branch in one instruction; `x == None` / `x != None` /
+   `x is None` branch on the register directly (the `==` forms still
+   honour a class's `__eq__`).
+4. `for x in iterable` steps at the bottom of the loop (OP_FOR_NEXT),
+   arrays first; a local read as the left operand of an operator or
+   field/subscript access is no longer copied first.
+
+Per-opcode profile (build with `-DZEN_OPCODE_PROFILE`, rdtsc per dispatch,
+compare opcodes against each other only): what remains above the dispatch
+floor is the call/return pair itself (~16 ns per call+return versus ~9 ns
+in Lua) and GETFIELD_IDX right after a call (dependent loads).
+
+Bunnymark (tests/manual/bunnymark_raylib, 60 fps, 25 s, same window):
+Zen 70 800, Lua 60 600, Wren 58 800, Python 34 800 sprites — at these
+counts the draw call dominates, so the VM changes barely move it; the
+run-to-run noise is about ±5%.

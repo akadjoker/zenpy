@@ -653,7 +653,30 @@ namespace zen
                 }
                 Token op = current_;
                 advance();
+                int rhs_start = state_->emitter.current_offset();
                 int rhs = expression(-1);
+
+                /* The ordinary binary-expression peephole already turns
+                ** `x = x + 1` into ADDI. Apply the identical encoding to
+                ** the idiomatic `x += 1` form: a loop counter should not
+                ** pay a LOADI temporary merely because it uses augmented
+                ** assignment. OP_ADDI/SUBI retain the full ADD/SUB contract
+                ** (numbers, strings and overloaded instances). */
+                if ((op.type == TOK_PLUS_EQ || op.type == TOK_MINUS_EQ) &&
+                    state_->emitter.current_offset() == rhs_start + 1)
+                {
+                    Instruction li = state_->emitter.instruction_at(rhs_start);
+                    int imm = ZEN_SBX(li);
+                    if (ZEN_OP(li) == OP_LOADI && ZEN_A(li) == rhs &&
+                        imm >= -128 && imm <= 127)
+                    {
+                        state_->emitter.shrink_to(rhs_start);
+                        free_reg(rhs);
+                        state_->emitter.emit_abc(op.type == TOK_PLUS_EQ ? OP_ADDI : OP_SUBI,
+                                                 reg, reg, (uint8_t)(int8_t)imm, op.line);
+                        return reg;
+                    }
+                }
                 OpCode arith = OP_ADD;
                 switch (op.type)
                 {
@@ -731,7 +754,25 @@ namespace zen
             /* Non-marking pair: keeps a global string accumulator unshared
             ** so ADD can append in place — see OP_GETGLOBAL_AUG. */
             state_->emitter.emit_abx(OP_GETGLOBAL_AUG, r, gidx, previous_.line);
+            int rhs_start = state_->emitter.current_offset();
             int rhs = expression(-1);
+
+            if ((op.type == TOK_PLUS_EQ || op.type == TOK_MINUS_EQ) &&
+                state_->emitter.current_offset() == rhs_start + 1)
+            {
+                Instruction li = state_->emitter.instruction_at(rhs_start);
+                int imm = ZEN_SBX(li);
+                if (ZEN_OP(li) == OP_LOADI && ZEN_A(li) == rhs &&
+                    imm >= -128 && imm <= 127)
+                {
+                    state_->emitter.shrink_to(rhs_start);
+                    free_reg(rhs);
+                    state_->emitter.emit_abc(op.type == TOK_PLUS_EQ ? OP_ADDI : OP_SUBI,
+                                             r, r, (uint8_t)(int8_t)imm, op.line);
+                    state_->emitter.emit_abx(OP_SETGLOBAL_AUG, r, gidx, previous_.line);
+                    return r;
+                }
+            }
             OpCode arith = OP_ADD;
             switch (op.type)
             {

@@ -15,6 +15,10 @@ i = i + 1
 assert i == 6
 i = i - 1
 assert i == 5
+i += 1
+assert i == 6
+i -= 1
+assert i == 5
 assert i + one == i + 1
 assert i - one == i - 1
 assert i + 127 == 132

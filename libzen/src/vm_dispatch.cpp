@@ -4706,26 +4706,66 @@ namespace zen
 
         CASE(OP_FORPREP)
         {
-            /* R[A]=counter, R[A+1]=limit, R[A+2]=step
-               Subtract step so first FORLOOP increments to start value.
-               Then jump to FORLOOP for initial test. */
+            /* for R[A+3] in range(R[A], R[A+1], R[A+2]):
+            **   R[A]   current value      R[A+1] stop → iterations left
+            **   R[A+2] step               R[A+3] loop variable
+            ** The iteration count is fixed here, on entry (the body may
+            ** rebind the loop variable, never the schedule), which leaves
+            ** FORLOOP a decrement, an add and a branch. Arguments coerce
+            ** the way the range() builtin coerces them. Empty: skip. */
             uint32_t i = *ip;
             int a = ZEN_A(i);
-            R[a].as.integer -= R[a + 2].as.integer;
-            ip += ZEN_SBX(i); /* jump to FORLOOP */
+            Value vs = R[a], vl = R[a + 1], vst = R[a + 2];
+            int64_t start, stop, step;
+            if (__builtin_expect(vs.type == VAL_INT && vl.type == VAL_INT && vst.type == VAL_INT, 1))
+            {
+                start = vs.as.integer;
+                stop = vl.as.integer;
+                step = vst.as.integer;
+            }
+            else
+            {
+                start = to_integer(vs);
+                stop = to_integer(vl);
+                step = to_integer(vst);
+            }
+            if (step == 0)
+                RT_ERROR("range(): step cannot be 0.");
+            uint64_t count;
+            if (step > 0)
+                count = start < stop
+                            ? ((uint64_t)stop - (uint64_t)start - 1) / (uint64_t)step + 1
+                            : 0;
+            else
+                count = start > stop
+                            ? ((uint64_t)start - (uint64_t)stop - 1) / ((uint64_t)(-(step + 1)) + 1) + 1
+                            : 0;
+            if (count == 0)
+            {
+                ip += ZEN_SBX(i);
+                NEXT();
+            }
+            R[a] = val_int(start);
+            R[a + 1] = val_int((int64_t)count);
+            R[a + 2] = val_int(step);
+            R[a + 3] = val_int(start);
             NEXT();
         }
 
         CASE(OP_FORLOOP)
         {
-            /* R[A] += R[A+2]; if still in range: pc += sBx (back to body) */
+            /* if --R[A+1] > 0: R[A] += R[A+2]; R[A+3] = R[A]; pc += sBx */
             uint32_t i = *ip;
             int a = ZEN_A(i);
-            int32_t counter = R[a].as.integer + R[a + 2].as.integer;
-            int32_t limit = R[a + 1].as.integer;
-            R[a].as.integer = counter;
-            if (counter < limit)
-                ip += ZEN_SBX(i); /* loop back */
+            int64_t left = R[a + 1].as.integer - 1;
+            if (left > 0)
+            {
+                R[a + 1].as.integer = left;
+                int64_t next = (int64_t)((uint64_t)R[a].as.integer + (uint64_t)R[a + 2].as.integer);
+                R[a].as.integer = next;
+                R[a + 3] = val_int(next);
+                ip += ZEN_SBX(i);
+            }
             NEXT();
         }
 

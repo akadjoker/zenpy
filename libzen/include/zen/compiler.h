@@ -102,6 +102,11 @@ namespace zen
         int scope_depth;    /* scope depth at loop entry */
         int breaks[64];     /* patch offsets for break jumps */
         int break_count;
+        /* A numeric for's step instruction sits after the body, so its
+        ** `continue` is a forward jump patched once the body is done. */
+        bool continue_forward;
+        int continues[64];
+        int continue_count;
     };
 
     /* =========================================================
@@ -239,6 +244,10 @@ namespace zen
         void match_statement();
         void while_statement();
         void for_statement();
+        /* True when the tokens ahead are `range(` naming the builtin (no
+        ** local, `global`, def or class shadows it) with positional
+        ** arguments only — the shape for_statement lowers to FORPREP/FORLOOP. */
+        bool builtin_range_call_ahead();
         void return_statement();
         void break_statement();
         void continue_statement();

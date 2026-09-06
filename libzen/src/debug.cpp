@@ -769,10 +769,10 @@ namespace zen
 
         /* === For loop === */
         case OP_FORPREP:
-            printf("R[%d] -= R[%d+2]; -> %04d  \t; for prep", a, a, offset + 1 + sbx);
+            printf("for R[%d] in range(R[%d], R[%d], R[%d]); if empty -> %04d", a + 3, a, a + 1, a + 2, offset + 1 + sbx);
             break;
         case OP_FORLOOP:
-            printf("R[%d] += R[%d+2]; if < R[%d+1]: -> %04d", a, a, a, offset + 1 + sbx);
+            printf("if --R[%d] > 0: R[%d] += R[%d]; R[%d] = R[%d]; -> %04d", a + 1, a, a + 2, a + 3, a, offset + 1 + sbx);
             break;
 
         /* === Fused field+arith (2-word) === */

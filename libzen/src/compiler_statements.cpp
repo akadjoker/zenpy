@@ -1518,6 +1518,8 @@ namespace zen
         int loop_idx = state_->loop_depth++;
         LoopInfo &loop = state_->loops[loop_idx];
         loop.break_count = 0;
+        loop.continue_count = 0;
+        loop.continue_forward = false;
         loop.scope_depth = state_->scope_depth;
 
         int loop_start = state_->emitter.current_offset();
@@ -1606,6 +1608,104 @@ namespace zen
 
         consume(TOK_IN, "Expected 'in' after variable name.");
 
+        /* Numeric loop: `for i in range(a, b, step)`.
+        **
+        ** Instead of allocating a range object and stepping it through the
+        ** generic FOR_ITER protocol, keep the schedule in three registers
+        ** and let one FORLOOP per iteration advance the counter, refresh
+        ** the loop variable and branch:
+        **
+        **     R[base]   counter        R[base+1] stop → iterations left
+        **     R[base+2] step           R[base+3] the loop variable
+        **
+        **     <args into base..base+2>
+        **     FORPREP base -> exit        ; validates, counts, sets R[base+3]
+        **   body:
+        **     ...                         ; `continue` jumps to FORLOOP
+        **     FORLOOP base -> body
+        **   exit:
+        **
+        ** Same observable behaviour as iterating the range object: the
+        ** iteration count is fixed on entry, rebinding `i` in the body
+        ** does not alter the schedule, and step 0 is the same error. */
+        if (var_count == 1 && builtin_range_call_ahead())
+        {
+            advance(); /* range */
+            advance(); /* ( */
+            int base = alloc_reg();
+            int stop_reg = alloc_reg();
+            int step_reg = alloc_reg();
+            int args[3];
+            int nargs = 0;
+            if (!check(TOK_RPAREN))
+            {
+                do
+                {
+                    if (nargs == 3)
+                    {
+                        error("range() expects 1-3 arguments.");
+                        break;
+                    }
+                    args[nargs++] = expression(-1);
+                } while (match(TOK_COMMA));
+            }
+            consume(TOK_RPAREN, "Expected ')' after range() arguments.");
+            if (nargs == 0)
+                error("range() expects 1-3 arguments.");
+            int line = previous_.line;
+            if (nargs == 1)
+            {
+                state_->emitter.emit_asbx(OP_LOADI, base, 0, line);
+                emit_move(stop_reg, args[0]);
+                state_->emitter.emit_asbx(OP_LOADI, step_reg, 1, line);
+            }
+            else if (nargs >= 2)
+            {
+                emit_move(base, args[0]);
+                emit_move(stop_reg, args[1]);
+                if (nargs == 3)
+                    emit_move(step_reg, args[2]);
+                else
+                    state_->emitter.emit_asbx(OP_LOADI, step_reg, 1, line);
+            }
+            /* Argument temporaries are dead now; the loop variable must be
+            ** the register right above step. */
+            state_->next_reg = step_reg + 1;
+            int var_reg = add_local(var_names[0]);
+            if (var_reg != base + 3)
+                error("internal: numeric for register layout.");
+
+            int loop_idx = state_->loop_depth++;
+            LoopInfo &loop = state_->loops[loop_idx];
+            loop.break_count = 0;
+            loop.continue_count = 0;
+            loop.continue_forward = true;
+            loop.scope_depth = state_->scope_depth;
+
+            int prep = state_->emitter.emit_asbx(OP_FORPREP, base, 0, line);
+            int loop_start = state_->emitter.current_offset();
+            loop.start_offset = loop_start;
+
+            colon_block();
+
+            for (int i = 0; i < loop.continue_count; i++)
+                state_->emitter.patch_jump(loop.continues[i]);
+            int back = loop_start - (state_->emitter.current_offset() + 1);
+            state_->emitter.emit_asbx(OP_FORLOOP, base, back, previous_.line);
+            state_->emitter.patch_jump(prep);
+
+            for (int i = 0; i < loop.break_count; i++)
+                state_->emitter.patch_jump(loop.breaks[i]);
+
+            state_->loop_depth--;
+            end_scope();
+            /* end_scope released the loop variable; the schedule registers
+            ** below it are dead too. */
+            if (state_->next_reg == base + 3)
+                state_->next_reg = base;
+            return;
+        }
+
         /* Iterable expression — R[iter_reg] */
         int iter_reg = alloc_reg();
         int iter_result = expression(iter_reg);
@@ -1633,6 +1733,8 @@ namespace zen
         int loop_idx = state_->loop_depth++;
         LoopInfo &loop = state_->loops[loop_idx];
         loop.break_count = 0;
+        loop.continue_count = 0;
+        loop.continue_forward = false;
         loop.scope_depth = state_->scope_depth;
 
         int loop_start = state_->emitter.current_offset();
@@ -1814,7 +1916,78 @@ namespace zen
             return;
         }
         LoopInfo &loop = state_->loops[state_->loop_depth - 1];
+        if (loop.continue_forward)
+        {
+            if (loop.continue_count >= 64)
+            {
+                error("Too many continue statements in loop.");
+                return;
+            }
+            loop.continues[loop.continue_count++] = state_->emitter.emit_jump(OP_JMP, 0, previous_.line);
+            return;
+        }
         state_->emitter.emit_loop(loop.start_offset, 0, previous_.line);
+    }
+
+    bool Compiler::builtin_range_call_ahead()
+    {
+        if (!check(TOK_IDENTIFIER) || current_.length != 5 ||
+            memcmp(current_.start, "range", 5) != 0)
+            return false;
+        Token name = current_;
+        /* Anything that rebinds the name in this file makes it not the
+        ** builtin: a local or enclosing local, a `global range`, a def or
+        ** class called range. A module-level `range = ...` assignment is
+        ** not visible to a single pass and is not supported. */
+        for (CompilerState *s = state_; s != nullptr; s = s->parent)
+        {
+            for (int i = s->local_count - 1; i >= 0; i--)
+                if (identifiers_equal(s->locals[i].name, name))
+                    return false;
+        }
+        if (is_declared_global(name))
+            return false;
+        if (find_signature(nullptr, 0, name.start, name.length) ||
+            find_sig_class(name.start, name.length))
+            return false;
+
+        /* Shape: `range(` with plain positional arguments — no spread, no
+        ** keyword — closed on the same logical line. */
+        LexerState saved_lex = lexer_.save_state();
+        Token saved_cur = current_;
+        Token saved_prev = previous_;
+        advance();
+        bool ok = check(TOK_LPAREN);
+        if (ok)
+        {
+            int depth = 0;
+            for (;;)
+            {
+                advance();
+                if (check(TOK_EOF) || check(TOK_NEWLINE) || check(TOK_ERROR))
+                {
+                    ok = false;
+                    break;
+                }
+                if (check(TOK_LPAREN) || check(TOK_LBRACKET) || check(TOK_LBRACE))
+                    depth++;
+                else if (check(TOK_RPAREN) || check(TOK_RBRACKET) || check(TOK_RBRACE))
+                {
+                    if (depth == 0)
+                        break;
+                    depth--;
+                }
+                else if (depth == 0 && (check(TOK_STAR) || check(TOK_DSTAR) || check(TOK_EQ)))
+                {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        lexer_.restore_state(saved_lex);
+        current_ = saved_cur;
+        previous_ = saved_prev;
+        return ok;
     }
 
     /* =========================================================

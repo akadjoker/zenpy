@@ -42,7 +42,8 @@ int main(int argc, char **argv)
 
     VM vm;
     vm.open_lib_globals(&zen_lib_base);
-    vm.def_native("native_draw", native_draw, 2);
+    /* The benchmark callback neither allocates nor retains Values. */
+    vm.def_native("native_draw", native_draw, 2, ZEN_NATIVE_GC_SAFE);
 
     Compiler compiler;
     const char *source = R"ZEN(
@@ -90,14 +91,14 @@ def run_frames(bunnies, frames):
     }
     vm.run(fn);
 
-    Value make_bunnies = vm.get_global("make_bunnies");
-    Value run_frames_fn = vm.get_global("run_frames");
     Value n_val = val_int(n);
-    Value bunnies = vm.call_fn(make_bunnies, &n_val, 1);
+    /* call_fn() is for callbacks issued by a native while a script frame is
+       active. These are top-level embedding calls, so create a root frame. */
+    Value bunnies = vm.call_global("make_bunnies", &n_val, 1);
 
     auto start = std::chrono::high_resolution_clock::now();
     Value args[2] = { bunnies, val_int(frames) };
-    vm.call_fn(run_frames_fn, args, 2);
+    vm.call_global("run_frames", args, 2);
     auto end = std::chrono::high_resolution_clock::now();
 
     double elapsed = std::chrono::duration<double>(end - start).count();

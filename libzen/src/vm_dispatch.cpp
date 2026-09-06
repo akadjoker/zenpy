@@ -1490,24 +1490,101 @@ namespace zen
         /* --- Superinstructions (immediate) --- */
         CASE(OP_ADDI)
         {
+            /* R[A] = R[B] + imm. The compiler folds `x + <small int literal>`
+            ** into this without knowing x's type, so every path here must
+            ** produce exactly what OP_ADD would with vc = val_int(imm). The
+            ** two numeric paths below ARE NUM_BINOP(+) specialised for an
+            ** int right operand; the object path mirrors OP_ADD's remaining
+            ** branches (instance operator overload with stringify fallback,
+            ** string + number concatenation, everything else numeric). */
             uint32_t i = *ip;
             Value vb = R[ZEN_B(i)];
             int8_t imm = (int8_t)ZEN_C(i);
-            if (vb.type == VAL_INT)
+            if (__builtin_expect(vb.type == VAL_INT, 1))
                 R[ZEN_A(i)] = val_int((int64_t)((uint64_t)vb.as.integer + (int64_t)imm));
-            else
+            else if (__builtin_expect(!is_obj(vb), 1))
                 R[ZEN_A(i)] = val_float(to_number(vb) + imm);
+            else if (is_instance(vb))
+            {
+                Value vc = val_int((int64_t)imm);
+                Value result;
+                SAVE_IP();
+                if (try_binary_operator(this, vb, vc, SLOT_ADD, SLOT_RADD, &result))
+                {
+                    if (had_error_) return;
+                    LOAD_STATE();
+                    R[ZEN_A(i)] = result;
+                }
+                else
+                {
+                    LOAD_STATE();
+                    Value sv = vb, sc = vc;
+                    Value str_result;
+                    if (try_string_operator(this, sv, &str_result))
+                        sv = str_result;
+                    else
+                        sv = default_to_string(&gc_, sv);
+                    if (had_error_) return;
+                    if (try_string_operator(this, sc, &str_result))
+                        sc = str_result;
+                    else
+                        sc = default_to_string(&gc_, sc);
+                    if (had_error_) return;
+                    LOAD_STATE();
+                    R[ZEN_A(i)] = val_obj((Obj *)new_string_concat(&gc_, as_string(sv), as_string(sc)));
+                }
+            }
+            else if (is_string(vb))
+            {
+                char buf2[64];
+                const char *sa = safe_string_chars(vb);
+                int la = safe_string_len(vb);
+                int lb = int_to_cstr((int64_t)imm, buf2);
+                ObjString *result = new_string_uninit(&gc_, la + lb);
+                memcpy(result->chars, sa, la);
+                memcpy(result->chars + la, buf2, lb);
+                result->obj.hash = hash_string(result->chars, la + lb);
+                R[ZEN_A(i)] = val_obj((Obj *)result);
+            }
+            else
+            {
+                R[ZEN_A(i)] = val_float(to_number(vb) + imm);
+            }
             NEXT();
         }
         CASE(OP_SUBI)
         {
+            /* R[A] = R[B] - imm — same contract as OP_ADDI: must equal
+            ** OP_SUB with vc = val_int(imm), including the instance
+            ** operator-overload path (which, like OP_SUB, falls back to
+            ** plain numeric subtraction when no __sub__/__rsub__ applies). */
             uint32_t i = *ip;
             Value vb = R[ZEN_B(i)];
             int8_t imm = (int8_t)ZEN_C(i);
-            if (vb.type == VAL_INT)
+            if (__builtin_expect(vb.type == VAL_INT, 1))
                 R[ZEN_A(i)] = val_int((int64_t)((uint64_t)vb.as.integer - (int64_t)imm));
-            else
+            else if (__builtin_expect(!is_obj(vb), 1))
                 R[ZEN_A(i)] = val_float(to_number(vb) - imm);
+            else if (is_instance(vb))
+            {
+                Value result;
+                SAVE_IP();
+                if (try_binary_operator(this, vb, val_int((int64_t)imm), SLOT_SUB, SLOT_RSUB, &result))
+                {
+                    if (had_error_) return;
+                    LOAD_STATE();
+                    R[ZEN_A(i)] = result;
+                }
+                else
+                {
+                    LOAD_STATE();
+                    R[ZEN_A(i)] = val_float(to_number(vb) - imm);
+                }
+            }
+            else
+            {
+                R[ZEN_A(i)] = val_float(to_number(vb) - imm);
+            }
             NEXT();
         }
 

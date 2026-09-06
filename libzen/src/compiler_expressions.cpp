@@ -614,7 +614,39 @@ namespace zen
     {
         int prec = get_precedence(op.type);
         int adjust = is_right_associative(op.type) ? 0 : 1;
+        int right_start = state_->emitter.current_offset();
         int right = parse_precedence(prec + adjust, -1);
+
+        /* Peephole: `x + <small int literal>` / `x - <small int literal>`
+        ** (the `i + 1` of every loop counter). When the right operand
+        ** compiled to exactly one instruction and it is a LOADI into the
+        ** operand's own fresh temporary with an immediate that fits the
+        ** 8-bit C field, drop that LOADI and emit the immediate form
+        ** instead — one instruction and one register fewer. OP_ADDI/OP_SUBI
+        ** are defined to behave exactly like OP_ADD/OP_SUB with that int
+        ** right operand for every left-operand type (instances with
+        ** __add__, strings, ...), so this is purely an encoding change. */
+        if ((op.type == TOK_PLUS || op.type == TOK_MINUS) &&
+            state_->emitter.current_offset() == right_start + 1)
+        {
+            Instruction li = state_->emitter.instruction_at(right_start);
+            if (ZEN_OP(li) == OP_LOADI && ZEN_A(li) == right)
+            {
+                int imm = ZEN_SBX(li);
+                if (imm >= -128 && imm <= 127)
+                {
+                    state_->emitter.shrink_to(right_start);
+                    free_reg(right); /* the literal's temporary no longer exists */
+                    int ireg = (dest >= 0) ? dest : alloc_reg();
+                    state_->emitter.emit_abc(op.type == TOK_PLUS ? OP_ADDI : OP_SUBI,
+                                             ireg, left, (uint8_t)(int8_t)imm, op.line);
+                    if (left != ireg)
+                        free_reg(left);
+                    return ireg;
+                }
+            }
+        }
+
         int reg = (dest >= 0) ? dest : alloc_reg();
 
         OpCode opcode;

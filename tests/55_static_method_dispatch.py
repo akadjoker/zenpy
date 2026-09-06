@@ -60,4 +60,27 @@ def sum_values(items):
 
 assert sum_values([Base(), Child()]) == 30
 
+# `self.field * local` is compiled as the fused GETFIELD_MUL form used by
+# movement code. It must retain ordinary arithmetic and operator overloads.
+class Motion:
+    def __init__(self, velocity):
+        self.velocity = velocity
+
+    def distance(self, dt):
+        return self.velocity * dt
+
+class ScaleBySeven:
+    def __mul__(self, value):
+        return value * 7
+
+class ObjectMotion:
+    def __init__(self):
+        self.velocity = ScaleBySeven()
+
+    def distance(self, dt):
+        return self.velocity * dt
+
+assert Motion(1.5).distance(2.0) == 3.0
+assert ObjectMotion().distance(3) == 21
+
 print("static method dispatch OK")

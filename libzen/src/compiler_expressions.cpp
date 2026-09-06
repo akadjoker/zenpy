@@ -697,6 +697,20 @@ namespace zen
         }
 
         state_->emitter.emit_abc(opcode, reg, left, right, op.line);
+
+        /* `self.field * local` is the innermost operation in the usual game
+        ** update (`self.x + self.vx * dt`).  With a local right operand its
+        ** bytecode is adjacent GETFIELD_IDX / MUL, so fuse their dispatches.
+        ** OP_GETFIELD_MUL keeps the original MUL word and deopts to it for
+        ** object/string operands: this changes encoding, not semantics. */
+        if (opcode == OP_MUL &&
+            state_->emitter.current_offset() == right_start + 1 &&
+            right_start > 0)
+        {
+            Instruction field_load = state_->emitter.instruction_at(right_start - 1);
+            if (ZEN_OP(field_load) == OP_GETFIELD_IDX && ZEN_A(field_load) == left)
+                state_->emitter.rewrite_opcode_at(right_start - 1, OP_GETFIELD_MUL);
+        }
         if (right != reg)
             free_reg(right);
         if (left != reg)

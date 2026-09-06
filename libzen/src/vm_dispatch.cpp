@@ -4727,17 +4727,28 @@ namespace zen
         CASE(OP_GETFIELD_MUL)
         {
             /* word1: GETFIELD_IDX  R[A] = R[B].fields[C]
-               word2: MUL           R[A] = R[B] * R[C]    */
+               word2: MUL           R[A] = R[B] * R[C]
+               Primitive values take the fused path.  For every other
+               value, leave ip on the original MUL word and dispatch it so
+               string repetition and overloaded __mul__ retain their normal
+               semantics. */
             uint32_t i1 = *ip;
             ObjInstance *inst = as_instance(R[ZEN_B(i1)]);
             R[ZEN_A(i1)] = inst->fields[ZEN_C(i1)];
             ++ip;
             uint32_t i2 = *ip;
             Value vb = R[ZEN_B(i2)], vc = R[ZEN_C(i2)];
-            if (vb.type == VAL_INT && vc.type == VAL_INT)
-                R[ZEN_A(i2)] = val_int((int64_t)((uint64_t)vb.as.integer * (uint64_t)vc.as.integer));
+            if (__builtin_expect(!is_obj(vb) && !is_obj(vc), 1))
+            {
+                if (vb.type == VAL_INT && vc.type == VAL_INT)
+                    R[ZEN_A(i2)] = val_int((int64_t)((uint64_t)vb.as.integer * (uint64_t)vc.as.integer));
+                else
+                    R[ZEN_A(i2)] = val_float(to_number(vb) * to_number(vc));
+            }
             else
-                R[ZEN_A(i2)] = val_float(to_number(vb) * to_number(vc));
+            {
+                DISPATCH();
+            }
             NEXT();
         }
 

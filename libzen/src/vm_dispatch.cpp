@@ -509,6 +509,10 @@ namespace zen
         Value *R = frame->base;
         Value *K = frame->func->constants;
         ObjUpvalue **UV = frame->closure ? frame->closure->upvalues : nullptr;
+        /* OP_CALL and OP_CALLGLOBAL share one body (see op_call_shared);
+        ** the decoded operands travel through these so the shared entry
+        ** point does not jump over any initialised local. */
+        int call_a = 0, call_nargs = 0, call_nresults = 0;
 
 /* Macro para reload após CALL/RETURN (frame mudou) */
 #define LOAD_STATE()                                \
@@ -1849,11 +1853,15 @@ namespace zen
         /* --- Funções --- */
         CASE(OP_CALL)
         {
-            uint32_t i = *ip;
-            int a = ZEN_A(i);
-            int nargs = ZEN_B(i);
-            int nresults = ZEN_C(i);
+            call_a = ZEN_A(*ip);
+            call_nargs = ZEN_B(*ip);
+            call_nresults = ZEN_C(*ip);
             ++ip;
+        op_call_shared:
+        {
+            int a = call_a;
+            int nargs = call_nargs;
+            int nresults = call_nresults;
             SAVE_IP();
 
             /* Spread expansion: bit 7 of nargs means last arg is an array to unpack */
@@ -2226,74 +2234,23 @@ namespace zen
             LOAD_STATE();
             DISPATCH();
         }
+        }
 
         CASE(OP_CALLGLOBAL)
         {
-            uint32_t i = *ip;
-            int a = ZEN_A(i);
-            int nargs = ZEN_B(i);
-            int nresults = ZEN_C(i);
+            /* GETGLOBAL + CALL in one dispatch. Word 2 carries the global
+            ** index. The callee is read into R[A] exactly as GETGLOBAL
+            ** would have done and the call then continues on OP_CALL's own
+            ** path, so closures, natives, classes, bound methods and every
+            ** error message behave precisely as in the two-instruction
+            ** form. Only the dispatch is saved. */
+            call_a = ZEN_A(*ip);
+            call_nargs = ZEN_B(*ip);
+            call_nresults = ZEN_C(*ip);
             ++ip;
-            int gidx = ZEN_BX(*ip); /* word 2: global index */
+            R[call_a] = globals_[ZEN_BX(*ip)];
             ++ip;
-            SAVE_IP();
-
-            /* Spread expansion */
-            if (nargs & 0x80)
-            {
-                int fixed = (nargs & 0x7F) - 1;
-                Value spread_val = R[a + 1 + fixed];
-                if (!is_array(spread_val))
-                {
-                    RT_ERROR("argument unpacking requires a list");
-                }
-                ObjArray *arr = as_array(spread_val);
-                int arr_len = arr_count(arr);
-                for (int si = 0; si < arr_len; si++)
-                    R[a + 1 + fixed + si] = arr->data[si];
-                nargs = fixed + arr_len;
-            }
-
-            Value callee = globals_[gidx];
-
-            /* Mark string args as shared — matches OP_CALL behaviour */
-            for (int ai = 0; ai < nargs; ai++) {
-                Value av = R[a + 1 + ai];
-                if (__builtin_expect(is_string(av), 0))
-                    av.as.obj->flags |= OBJ_FLAG_SHARED;
-            }
-
-            if (is_closure(callee))
-            {
-                ObjClosure *cl = as_closure(callee);
-                ObjFunc *fn = cl->func;
-                if (fiber->frame_count >= kMaxFrames)
-                {
-                    RT_ERROR("stack overflow");
-                }
-                CHECK_STACK_SPACE(fiber, &R[a + 1], fn->num_regs);
-                CallFrame *new_frame = &fiber->frames[fiber->frame_count++];
-                new_frame->closure = cl;
-                new_frame->func = fn;
-                new_frame->ip = fn->code;
-                new_frame->base = &R[a + 1];
-                new_frame->ret_reg = a;
-                new_frame->ret_count = nresults;
-                fiber->stack_top = new_frame->base + fn->num_regs;
-                clear_new_regs(new_frame->base, nargs, fn->num_regs);
-                LOAD_STATE();
-                DISPATCH();
-            }
-            if (is_native(callee))
-            {
-                ObjNative *nat = as_native(callee);
-                int nret = call_native(this, nat, &R[a + 1], nargs);
-                if (had_error_)
-                    return;
-                copy_native_results(&R[a], &R[a + 1], nret, nresults);
-                DISPATCH();
-            }
-            RT_ERROR("attempt to call non-function (got %s)", val_type_str(callee));
+            goto op_call_shared;
         }
 
         CASE(OP_RETURN)

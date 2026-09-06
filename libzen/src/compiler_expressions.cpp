@@ -1024,13 +1024,33 @@ namespace zen
         if (base != callee)
             emit_move(base, callee);
 
+        /* A direct call to a global name — `fib(n)`, `helper(x)`, any
+        ** module-level def or imported function — arrives here as
+        ** `GETGLOBAL base` immediately followed by this call. Fold the pair
+        ** into OP_CALLGLOBAL: the VM reads the global into R[base] itself
+        ** and continues on OP_CALL's path, one dispatch fewer per call. */
+        int fused_global_idx = -1;
+        if (base == callee && state_->emitter.current_offset() > 0)
+        {
+            int prev_off = state_->emitter.current_offset() - 1;
+            Instruction prev = state_->emitter.instruction_at(prev_off);
+            if (ZEN_OP(prev) == OP_GETGLOBAL && (int)ZEN_A(prev) == callee)
+            {
+                fused_global_idx = (int)ZEN_BX(prev);
+                state_->emitter.shrink_to(prev_off);
+            }
+        }
+
         /* Parse arguments into consecutive registers after callee */
         int nargs = argument_list(base, 0, sig);
 
         consume(TOK_RPAREN, "Expected ')' after arguments.");
 
         /* OP_CALL: R[base](R[base+1]..R[base+nargs]) → R[base] */
-        state_->emitter.emit_abc(OP_CALL, base, nargs, 1, previous_.line);
+        if (fused_global_idx >= 0)
+            state_->emitter.emit_callglobal(base, nargs, 1, fused_global_idx, previous_.line);
+        else
+            state_->emitter.emit_abc(OP_CALL, base, nargs, 1, previous_.line);
 
         /* Restore registers: call result is in base */
         state_->next_reg = base + 1;

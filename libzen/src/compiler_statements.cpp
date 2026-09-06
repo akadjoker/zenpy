@@ -2062,7 +2062,8 @@ namespace zen
                 {
                     Instruction instr = state_->emitter.instruction_at(off);
                     uint32_t op = (instr >> 24);
-                    if (op == (uint32_t)OP_CALL || op == (uint32_t)OP_INVOKE) { call_offset = off; break; }
+                    if (op == (uint32_t)OP_CALL || op == (uint32_t)OP_CALLGLOBAL ||
+                        op == (uint32_t)OP_INVOKE || op == (uint32_t)OP_INVOKE_VT) { call_offset = off; break; }
                 }
                 if (call_offset < 0)
                 {

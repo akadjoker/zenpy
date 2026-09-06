@@ -3540,15 +3540,17 @@ namespace zen
                 ObjInstance *inst = as_instance(receiver);
                 ObjClass *klass = inst->klass;
 
-                /* Walk class hierarchy for vtable lookup */
-                Value mval = val_nil();
-                ObjClass *search = klass;
-                while (search != nullptr)
+                /* A completed class owns a flattened vtable, so the common
+                   case is one indexed load. Keep the parent walk solely for
+                   dynamic changes made to a parent after a child was made. */
+                Value mval = sel_slot < klass->vtable_size
+                                 ? klass->vtable[sel_slot]
+                                 : val_nil();
+                ObjClass *search = klass->parent;
+                while (is_nil(mval) && search != nullptr)
                 {
                     if (sel_slot < search->vtable_size)
                         mval = search->vtable[sel_slot];
-                    if (!is_nil(mval))
-                        break;
                     search = search->parent;
                 }
 

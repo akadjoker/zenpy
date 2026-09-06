@@ -954,14 +954,26 @@ namespace zen
         ** argument list overwrite pending_callee_. */
         const FuncSig *sig = callee_signature();
 
-        /* Move callee to a fresh register if it's a local — OP_CALL overwrites R[base] with result */
-        int base = callee;
-        int saved_next = state_->next_reg;
-        if (base < saved_next)
+        /* OP_CALL overwrites R[base] with the result, so a LOCAL's own
+        ** register can't serve as base. But the callee is usually not a
+        ** local: it's the temporary a GETGLOBAL/GETFIELD/previous call just
+        ** produced at the top of the register stack — already exactly where
+        ** base needs to be. (The previous `base < next_reg` test here was
+        ** true for every live register, so every call paid a MOVE.) Same
+        ** rule as dot_expr()'s receiver reuse: not a local AND top of stack. */
+        bool callee_is_local = false;
+        for (int i = 0; i < state_->local_count; i++)
         {
-            base = alloc_reg();
-            emit_move(base, callee);
+            if (state_->locals[i].reg == callee)
+            {
+                callee_is_local = true;
+                break;
+            }
         }
+        bool callee_is_top = (callee == state_->next_reg - 1);
+        int base = (!callee_is_local && callee_is_top) ? callee : alloc_reg();
+        if (base != callee)
+            emit_move(base, callee);
 
         /* Parse arguments into consecutive registers after callee */
         int nargs = argument_list(base, 0, sig);
@@ -995,14 +1007,20 @@ namespace zen
         const FuncSig *sig = callee_signature();
 
         /* OP_CALL_GENERIC overwrites R[base] with the return value, just
-        ** like a normal call. */
-        int base = callee;
-        int saved_next = state_->next_reg;
-        if (base < saved_next)
+        ** like a normal call — same base-reuse rule as call_expr(). */
+        bool callee_is_local = false;
+        for (int i = 0; i < state_->local_count; i++)
         {
-            base = alloc_reg();
-            emit_move(base, callee);
+            if (state_->locals[i].reg == callee)
+            {
+                callee_is_local = true;
+                break;
+            }
         }
+        bool callee_is_top = (callee == state_->next_reg - 1);
+        int base = (!callee_is_local && callee_is_top) ? callee : alloc_reg();
+        if (base != callee)
+            emit_move(base, callee);
 
         int ngeneric = 0;
         int nargs = generic_argument_list(base, sig, &ngeneric);
@@ -1125,20 +1143,44 @@ namespace zen
                     error("Too many arguments.");
                     return nargs;
                 }
-                /* Ensure next_reg is at the right position */
-                while (state_->next_reg <= arg_reg)
-                    alloc_reg();
 
                 if (match(TOK_STAR))
                 {
                     /* *expr — spread: must be last arg */
+                    while (state_->next_reg <= arg_reg)
+                        alloc_reg();
                     has_spread = true;
                     expression(arg_reg);
                     nargs++;
                     break; /* no more args after spread */
                 }
 
-                expression(arg_reg);
+                /* Compile the argument with dest=-1 rather than dest=arg_reg.
+                ** arg_reg is the top of the register stack here (base and
+                ** the previous arguments sit right below it, nothing live
+                ** above), so an expression that allocates its result simply
+                ** lands on arg_reg by itself — and one that doesn't (a bare
+                ** local, `self`) is copied there afterwards, exactly the MOVE
+                ** dest=arg_reg would have emitted anyway. What changes is
+                ** WHEN that copy happens: with dest=arg_reg, named_variable()
+                ** moved `self` into arg_reg before a following `.field` was
+                ** even parsed, and dot_expr()'s self-fast-path only recognizes
+                ** register 0, so `f(self.x)` compiled to MOVE + a by-name
+                ** OP_GETFIELD instead of a single OP_GETFIELD_IDX. Keyword
+                ** arguments keep dest=arg_reg: they can land above other
+                ** live arguments, where "nothing above is live" doesn't hold. */
+                while (state_->next_reg < arg_reg)
+                    alloc_reg();
+                int r = expression(-1);
+                if (r != arg_reg)
+                {
+                    while (state_->next_reg <= arg_reg)
+                        alloc_reg();
+                    emit_move(arg_reg, r);
+                }
+                /* The value is in arg_reg; any temporaries the expression
+                ** left above it are dead. */
+                state_->next_reg = arg_reg + 1;
                 nargs++;
             } while (match(TOK_COMMA));
         }
@@ -1429,6 +1471,15 @@ namespace zen
             ** correspondingly, the MOVE out below. Same trick already used
             ** by logical_and()/logical_or() for their left operand, plus
             ** the top-of-stack check free_reg() itself relies on. */
+            /* `reg` was allocated speculatively at the top of dot_expr for
+            ** the field-read shape; a method call's result lands in `base`
+            ** instead, so that register is dead here. Give it back BEFORE
+            ** the top-of-stack test below — otherwise it sits above obj and
+            ** makes a receiver that really is the newest temporary (e.g.
+            ** `xs[i].m()`, `f().m()` as a statement) look like it isn't,
+            ** costing a fresh base + MOVE on every such call. */
+            if (dest < 0)
+                free_reg(reg);
             bool obj_is_local = false;
             for (int i = 0; i < state_->local_count; i++)
             {

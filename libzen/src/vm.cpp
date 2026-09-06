@@ -186,6 +186,7 @@ namespace zen
         fiber->stack_capacity = 0;
         fiber->stack = nullptr;
         fiber->stack_top = nullptr;
+        fiber->stack_end = nullptr;
         fiber->frame_capacity = 0;
         fiber->frames = nullptr;
         fiber->frame_count = 0;
@@ -203,6 +204,7 @@ namespace zen
         fiber->stack_capacity = stack_size;
         fiber->stack = (Value *)zen_alloc(&gc_, stack_size * sizeof(Value));
         fiber->stack_top = fiber->stack;
+        fiber->stack_end = fiber->stack + stack_size;
 
         fiber->frame_capacity = max_frames;
         fiber->frames = (CallFrame *)zen_alloc(&gc_, max_frames * sizeof(CallFrame));

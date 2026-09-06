@@ -56,6 +56,7 @@ namespace zen
         case OP_JMP: case OP_JMPIF: case OP_JMPIFNOT:
         case OP_LTJMPIFNOT: case OP_LEJMPIFNOT:
         case OP_LTIJMPIFNOT: case OP_LEIJMPIFNOT: case OP_GTIJMPIFNOT: case OP_GEIJMPIFNOT:
+        case OP_EQIJMPIFNOT: case OP_NEIJMPIFNOT:
         case OP_JMPIFNIL: case OP_JMPIFNOTNIL: case OP_JMPIFEQNIL: case OP_JMPIFNEQNIL:
         case OP_FOR_ITER: case OP_FOR_NEXT: case OP_FORPREP: case OP_FORLOOP:
             jump_count_++; /* a data word that happens to look like one only makes callers more conservative */

@@ -410,6 +410,8 @@ namespace zen
                 case TOK_LTEQ: op = OP_LEIJMPIFNOT; break;
                 case TOK_GT:   op = OP_GTIJMPIFNOT; break;
                 case TOK_GTEQ: op = OP_GEIJMPIFNOT; break;
+                case TOK_EQEQ: op = OP_EQIJMPIFNOT; break;
+                case TOK_BANGEQ: op = OP_NEIJMPIFNOT; break;
                 default: ok = false; break;
                 }
                 if (ok)
@@ -570,6 +572,7 @@ namespace zen
         if (idx >= 0) return idx;
         if (class_field_count_ >= kMaxClassFields) return -1;
         class_field_table_[class_field_count_] = name;
+        class_field_class_state_[class_field_count_] = 0;
         return class_field_count_++;
     }
 
@@ -651,7 +654,11 @@ namespace zen
         reg.name = class_name;
         reg.count = class_field_count_;
         for (int i = 0; i < class_field_count_; i++)
+        {
             reg.fields[i] = class_field_table_[i];
+            reg.field_class[i] = class_field_class_[i];
+            reg.field_class_state[i] = class_field_class_state_[i];
+        }
     }
 
     /* Look up a previously-compiled class's fields and initialise the
@@ -665,7 +672,11 @@ namespace zen
                 int cnt = class_registry_[i].count;
                 class_field_count_ = cnt;
                 for (int j = 0; j < cnt; j++)
+                {
                     class_field_table_[j] = class_registry_[i].fields[j];
+                    class_field_class_[j] = class_registry_[i].field_class[j];
+                    class_field_class_state_[j] = class_registry_[i].field_class_state[j];
+                }
                 return true;
             }
         }
@@ -687,7 +698,10 @@ namespace zen
                 int cnt = pcls->num_fields;
                 class_field_count_ = cnt;
                 for (int j = 0; j < cnt; j++)
+                {
                     class_field_table_[j] = pcls->field_names[j];
+                    class_field_class_state_[j] = 0;
+                }
                 return true;
             }
         }
@@ -1701,6 +1715,49 @@ namespace zen
             return -1;
         }
         return -1;
+    }
+
+    void Compiler::note_field_class(int fidx, bool rhs_is_none)
+    {
+        if (fidx < 0 || fidx >= kMaxClassFields)
+            return;
+        uint8_t &st = class_field_class_state_[fidx];
+        if (last_expr_ctor_valid_)
+        {
+            if (st == 0)
+            {
+                class_field_class_[fidx] = last_expr_ctor_class_;
+                st = 1;
+            }
+            else if (st == 1 && !identifiers_equal(class_field_class_[fidx], last_expr_ctor_class_))
+                st = 2;
+        }
+        else if (!rhs_is_none)
+            st = 2;
+    }
+
+    bool Compiler::field_class_guess(const char *cls, int32_t cls_len, int fidx, Token &out) const
+    {
+        if (fidx < 0 || fidx >= kMaxClassFields)
+            return false;
+        if (in_class_ && name_eq(current_class_.start, current_class_.length, cls, cls_len))
+        {
+            if (fidx >= class_field_count_ || class_field_class_state_[fidx] != 1)
+                return false;
+            out = class_field_class_[fidx];
+            return true;
+        }
+        for (int i = 0; i < class_registry_count_; i++)
+        {
+            const ClassFieldRegistry &r = class_registry_[i];
+            if (!name_eq(r.name.start, r.name.length, cls, cls_len))
+                continue;
+            if (fidx >= r.count || r.field_class_state[fidx] != 1)
+                return false;
+            out = r.field_class[fidx];
+            return true;
+        }
+        return false;
     }
 
     bool Compiler::receiver_static_class(int reg, const char *&name, int32_t &len, bool *exact) const

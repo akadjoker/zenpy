@@ -381,6 +381,13 @@ namespace zen
         /* Index of `fname` in the field layout of an already-compiled class
         ** of this file (class_registry_), or -1. */
         int registry_field_index(const char *cls, int32_t cls_len, ObjString *fname) const;
+        /* `self.field = <expr>` in the class body: fold the expression's
+        ** class (a constructor call, None, or anything else) into the
+        ** field's guessed class. */
+        void note_field_class(int fidx, bool rhs_is_none);
+        /* The guessed class of field `fidx` of class `cls` (the one being
+        ** compiled or one in the registry), if it is known. */
+        bool field_class_guess(const char *cls, int32_t cls_len, int fidx, Token &out) const;
         bool method_overridden_below(const char *cls, int32_t cls_len, const Token &method) const;
         /* True if `cls_name.method` is a NATIVE class method registered via
         ** ClassBuilder::generic_method() (never a script def — those go
@@ -485,6 +492,12 @@ namespace zen
 
         ObjString *class_field_table_[kMaxClassFields]; /* indexed by field order */
         int class_field_count_;
+        /* Per field of the class being compiled: the class of the
+        ** constructor calls assigned to it (`self.left = Tree(...)`) when
+        ** every non-None assignment seen so far agreed. A hint only — its
+        ** users (OP_INVOKE_VT, OP_GETFIELD_IDXC) fall back when wrong. */
+        Token class_field_class_[kMaxClassFields];
+        uint8_t class_field_class_state_[kMaxClassFields]; /* 0 unknown, 1 known, 2 conflicting */
 
         /* Values a class body gave its fields ("class A:" then "speed = 5.0").
         ** Held until the body closes so they can be emitted after the run of
@@ -503,6 +516,8 @@ namespace zen
         {
             Token name;
             ObjString *fields[kMaxClassFields];
+            Token field_class[kMaxClassFields];
+            uint8_t field_class_state[kMaxClassFields];
             int count;
         };
         ClassFieldRegistry class_registry_[kMaxClasses];

@@ -295,6 +295,7 @@ namespace zen
         Value *stack; /* register stack alocado */
         int32_t stack_capacity;
         Value *stack_top;
+        Value *stack_end; /* stack + stack_capacity, for the frame-fit check */
 
         /* Call frames próprios */
         CallFrame *frames;

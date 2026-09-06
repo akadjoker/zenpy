@@ -1560,6 +1560,12 @@ namespace zen
                 {
                     int rhs_start = state_->emitter.current_offset();
                     int val = expression(-1);
+                    {
+                        bool rhs_none = state_->emitter.current_offset() == rhs_start + 1 &&
+                                        ZEN_OP(state_->emitter.instruction_at(rhs_start)) == OP_LOADNIL &&
+                                        (int)ZEN_A(state_->emitter.instruction_at(rhs_start)) == val;
+                        note_field_class(fidx, rhs_none);
+                    }
                     state_->emitter.emit_abc(OP_SETFIELD_IDX, obj, fidx, val, field.line);
 
                     /* Fuse the exact bytecode shape produced by
@@ -1602,35 +1608,49 @@ namespace zen
                 }
                 /* Augmented assign: self.field += expr  */
                 if (can_assign && (check(TOK_PLUS_EQ) || check(TOK_MINUS_EQ) ||
-                                   check(TOK_STAR_EQ) || check(TOK_SLASH_EQ) || check(TOK_PERCENT_EQ)))
+                                   check(TOK_STAR_EQ) || check(TOK_SLASH_EQ) || check(TOK_PERCENT_EQ) ||
+                                   check(TOK_DSLASH_EQ) || check(TOK_DSTAR_EQ)))
                 {
                     Token op = current_;
                     advance();
                     OpCode arith;
                     switch (op.type)
                     {
-                    case TOK_PLUS_EQ:
-                        arith = OP_ADD;
-                        break;
-                    case TOK_MINUS_EQ:
-                        arith = OP_SUB;
-                        break;
-                    case TOK_STAR_EQ:
-                        arith = OP_MUL;
-                        break;
-                    case TOK_SLASH_EQ:
-                        arith = OP_DIV;
-                        break;
-                    default:
-                        arith = OP_MOD;
-                        break;
+                    case TOK_PLUS_EQ:   arith = OP_ADD;  break;
+                    case TOK_MINUS_EQ:  arith = OP_SUB;  break;
+                    case TOK_STAR_EQ:   arith = OP_MUL;  break;
+                    case TOK_SLASH_EQ:  arith = OP_DIV;  break;
+                    case TOK_DSLASH_EQ: arith = OP_IDIV; break;
+                    case TOK_DSTAR_EQ:  arith = OP_POW;  break;
+                    default:            arith = OP_MOD;  break;
                     }
                     int tmp = alloc_reg();
                     state_->emitter.emit_abc(OP_GETFIELD_IDX, tmp, obj, fidx, field.line);
+                    int rhs_start = state_->emitter.current_offset();
                     int rhs = expression(-1);
-                    state_->emitter.emit_abc(arith, tmp, tmp, rhs, op.line);
+                    note_field_class(fidx, false);
+                    /* `self.hp -= 1`: the same ADDI/SUBI folding locals get. */
+                    bool folded = false;
+                    if ((arith == OP_ADD || arith == OP_SUB) &&
+                        state_->emitter.current_offset() == rhs_start + 1)
+                    {
+                        Instruction li = state_->emitter.instruction_at(rhs_start);
+                        int imm = ZEN_SBX(li);
+                        if (ZEN_OP(li) == OP_LOADI && (int)ZEN_A(li) == rhs && imm >= -128 && imm <= 127)
+                        {
+                            state_->emitter.shrink_to(rhs_start);
+                            free_reg(rhs);
+                            state_->emitter.emit_abc(arith == OP_ADD ? OP_ADDI : OP_SUBI,
+                                                     tmp, tmp, (uint8_t)(int8_t)imm, op.line);
+                            folded = true;
+                        }
+                    }
+                    if (!folded)
+                    {
+                        state_->emitter.emit_abc(arith, tmp, tmp, rhs, op.line);
+                        free_reg(rhs);
+                    }
                     state_->emitter.emit_abc(OP_SETFIELD_IDX, obj, fidx, tmp, op.line);
-                    free_reg(rhs);
                     free_reg(tmp);
                     if (obj != reg)
                         free_reg(obj);
@@ -1641,6 +1661,17 @@ namespace zen
                 {
                     /* Read field */
                     state_->emitter.emit_abc(OP_GETFIELD_IDX, reg, obj, fidx, field.line);
+                    /* `self.left.check()`: if every constructor ever stored
+                    ** in this field was a Tree, the next link dispatches as
+                    ** one (checked forms: a wrong guess only costs speed). */
+                    Token fcls;
+                    if (current_.type == TOK_DOT &&
+                        field_class_guess(current_class_.start, current_class_.length, fidx, fcls))
+                    {
+                        typed_call_reg_ = reg;
+                        typed_call_class_ = fcls;
+                        typed_call_exact_ = false;
+                    }
                     if (obj != reg)
                         free_reg(obj);
                     return reg;
@@ -1673,6 +1704,68 @@ namespace zen
             else
                 state_->emitter.emit_abc(OP_SETFIELD, obj, name_ki, val, previous_.line);
             free_reg(val);
+            if (obj != reg)
+                free_reg(obj);
+            return reg;
+        }
+
+        /* Augmented assignment on any other receiver: obj.field += expr */
+        if (can_assign && (check(TOK_PLUS_EQ) || check(TOK_MINUS_EQ) ||
+                           check(TOK_STAR_EQ) || check(TOK_SLASH_EQ) || check(TOK_PERCENT_EQ) ||
+                           check(TOK_DSLASH_EQ) || check(TOK_DSTAR_EQ)))
+        {
+            Token op = current_;
+            advance();
+            OpCode arith;
+            switch (op.type)
+            {
+            case TOK_PLUS_EQ:   arith = OP_ADD;  break;
+            case TOK_MINUS_EQ:  arith = OP_SUB;  break;
+            case TOK_STAR_EQ:   arith = OP_MUL;  break;
+            case TOK_SLASH_EQ:  arith = OP_DIV;  break;
+            case TOK_DSLASH_EQ: arith = OP_IDIV; break;
+            case TOK_DSTAR_EQ:  arith = OP_POW;  break;
+            default:            arith = OP_MOD;  break;
+            }
+            int name_ki = state_->emitter.add_string_constant(field.start, field.length);
+            int tmp = alloc_reg();
+            if (checked_fidx >= 0)
+            {
+                state_->emitter.emit_abc(OP_GETFIELD_IDXC, tmp, obj, checked_fidx, field.line);
+                state_->emitter.emit((uint32_t)ZEN_ENCODE(OP_GETFIELD, tmp, obj, name_ki), field.line);
+            }
+            else
+                state_->emitter.emit_abc(OP_GETFIELD, tmp, obj, name_ki, field.line);
+            int rhs_start = state_->emitter.current_offset();
+            int rhs = expression(-1);
+            bool folded = false;
+            if ((arith == OP_ADD || arith == OP_SUB) &&
+                state_->emitter.current_offset() == rhs_start + 1)
+            {
+                Instruction li = state_->emitter.instruction_at(rhs_start);
+                int imm = ZEN_SBX(li);
+                if (ZEN_OP(li) == OP_LOADI && (int)ZEN_A(li) == rhs && imm >= -128 && imm <= 127)
+                {
+                    state_->emitter.shrink_to(rhs_start);
+                    free_reg(rhs);
+                    state_->emitter.emit_abc(arith == OP_ADD ? OP_ADDI : OP_SUBI,
+                                             tmp, tmp, (uint8_t)(int8_t)imm, op.line);
+                    folded = true;
+                }
+            }
+            if (!folded)
+            {
+                state_->emitter.emit_abc(arith, tmp, tmp, rhs, op.line);
+                free_reg(rhs);
+            }
+            if (checked_fidx >= 0)
+            {
+                state_->emitter.emit_abc(OP_SETFIELD_IDXC, obj, checked_fidx, tmp, op.line);
+                state_->emitter.emit((uint32_t)ZEN_ENCODE(OP_SETFIELD, obj, name_ki, tmp), op.line);
+            }
+            else
+                state_->emitter.emit_abc(OP_SETFIELD, obj, name_ki, tmp, op.line);
+            free_reg(tmp);
             if (obj != reg)
                 free_reg(obj);
             return reg;
@@ -1824,6 +1917,14 @@ namespace zen
         {
             state_->emitter.emit_abc(OP_GETFIELD_IDXC, reg, obj, checked_fidx, field.line);
             state_->emitter.emit((uint32_t)ZEN_ENCODE(OP_GETFIELD, reg, obj, name_ki), field.line);
+            Token fcls;
+            if (current_.type == TOK_DOT &&
+                field_class_guess(receiver_class_name, receiver_class_len, checked_fidx, fcls))
+            {
+                typed_call_reg_ = reg;
+                typed_call_class_ = fcls;
+                typed_call_exact_ = false;
+            }
         }
         else
             state_->emitter.emit_abc(OP_GETFIELD, reg, obj, name_ki, field.line);

@@ -243,6 +243,13 @@ namespace zen
         ** is skipped; otherwise word2 runs as it always would. */
         OP_GETFIELD_IDXC, /* word1: R[A] = R[B].fields[C] if names match; word2: GETFIELD A,B,name */
         OP_SETFIELD_IDXC, /* word1: R[A].fields[B] = R[C] if names match; word2: SETFIELD A,name,C */
+
+        /* Equality against an 8-bit literal, fused with the branch (2-word,
+        ** like LTIJMPIFNOT): `if x == 0:` / `if n != 1:`. Same operand
+        ** semantics as EQ with the literal in a register (int/float
+        ** cross-type equality, __eq__ on instances). */
+        OP_EQIJMPIFNOT, /* if !(R[B] == C): pc += sBx(next word) */
+        OP_NEIJMPIFNOT, /* if !(R[B] != C): pc += sBx(next word) */
     };
 
 /* Encode/Decode — ABC format */

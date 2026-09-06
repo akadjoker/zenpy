@@ -230,6 +230,8 @@ namespace zen
             SLOT_EQ,
             SLOT_LT,
             SLOT_LE,
+            SLOT_GT, /* reflected partner of LT: `a < b` may run b.__gt__(a) */
+            SLOT_GE, /* reflected partner of LE */
             SLOT_STR,
             SLOT_LEN,
             SLOT_OPERATOR_COUNT = kOperatorSlotCount

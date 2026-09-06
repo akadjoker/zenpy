@@ -28,6 +28,8 @@ namespace zen
         {"__eq__", 6, VM::SLOT_EQ},
         {"__lt__", 6, VM::SLOT_LT},
         {"__le__", 6, VM::SLOT_LE},
+        {"__gt__", 6, VM::SLOT_GT},
+        {"__ge__", 6, VM::SLOT_GE},
         {"__str__", 7, VM::SLOT_STR},
         {"__len__", 7, VM::SLOT_LEN},
     };

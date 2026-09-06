@@ -127,6 +127,8 @@ namespace zen
         "FOR_NEXT",
         "GETFIELD_IDXC",
         "SETFIELD_IDXC",
+        "EQIJMPIFNOT",
+        "NEIJMPIFNOT",
     };
 
     const char *opcode_name(OpCode op)
@@ -429,10 +431,13 @@ namespace zen
         case OP_LEIJMPIFNOT:
         case OP_GTIJMPIFNOT:
         case OP_GEIJMPIFNOT:
+        case OP_EQIJMPIFNOT:
+        case OP_NEIJMPIFNOT:
         {
             uint32_t word2 = func->code[offset + 1];
             int jsbx = ZEN_SBX(word2);
-            const char *rel = op == OP_LTIJMPIFNOT ? "<" : op == OP_LEIJMPIFNOT ? "<=" : op == OP_GTIJMPIFNOT ? ">" : ">=";
+            const char *rel = op == OP_LTIJMPIFNOT ? "<" : op == OP_LEIJMPIFNOT ? "<=" : op == OP_GTIJMPIFNOT ? ">"
+                            : op == OP_GEIJMPIFNOT ? ">=" : op == OP_EQIJMPIFNOT ? "==" : "!=";
             printf("if !(R[%d] %s %d): -> %04d", b, rel, (int)(int8_t)c, offset + 2 + jsbx);
             printf("\n");
             printf("   |  %04d  %-16s", offset + 1, "(jump-offset)");

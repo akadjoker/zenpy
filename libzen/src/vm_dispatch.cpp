@@ -601,7 +601,7 @@ namespace zen
 #define CHECK_STACK_SPACE(fiber_, base_, num_regs_)                       \
     do                                                                    \
     {                                                                     \
-        if ((base_) + (num_regs_) > (fiber_)->stack + (fiber_)->stack_capacity) \
+        if ((base_) + (num_regs_) > (fiber_)->stack_end)                       \
         {                                                                 \
             RT_ERROR("stack overflow (data)");                            \
         }                                                                 \
@@ -738,6 +738,8 @@ namespace zen
             &&lbl_OP_FOR_NEXT,
             &&lbl_OP_GETFIELD_IDXC,
             &&lbl_OP_SETFIELD_IDXC,
+            &&lbl_OP_EQIJMPIFNOT,
+            &&lbl_OP_NEIJMPIFNOT,
         };
 
 #ifdef ZEN_OPCODE_PROFILE
@@ -1772,7 +1774,7 @@ namespace zen
             {
                 Value result;
                 SAVE_IP();
-                if (try_binary_operator(this, vb, vc, SLOT_LT, SLOT_LT, &result))
+                if (try_binary_operator(this, vb, vc, SLOT_LT, SLOT_GT, &result))
                 {
                     if (had_error_)
                         return;
@@ -1801,7 +1803,7 @@ namespace zen
             {
                 Value result;
                 SAVE_IP();
-                if (try_binary_operator(this, vb, vc, SLOT_LE, SLOT_LE, &result))
+                if (try_binary_operator(this, vb, vc, SLOT_LE, SLOT_GE, &result))
                 {
                     if (had_error_)
                         return;
@@ -2379,6 +2381,19 @@ namespace zen
             /* Copiar resultados para o caller */
             int ret_reg = frame->ret_reg;
             int ret_count = frame->ret_count;
+
+            /* The common return: one value wanted, one provided, a script
+            ** caller below, no native waiting at a stop depth. */
+            if (__builtin_expect(fiber->frame_count > 1 && ret_count == 1 && nresults == 1 &&
+                                     external_call_stop_depth_ < 0, 1))
+            {
+                fiber->frame_count--;
+                CallFrame *caller_frame = frame - 1;
+                caller_frame->base[ret_reg] = R[a];
+                fiber->stack_top = caller_frame->base + caller_frame->func->num_regs;
+                LOAD_STATE();
+                DISPATCH();
+            }
 
             fiber->frame_count--;
             if (fiber->frame_count == 0)
@@ -4903,7 +4918,7 @@ namespace zen
                 at_jump_offset = true;
                 Value result;
                 SAVE_IP();
-                if (try_binary_operator(this, vb, vc, SLOT_LT, SLOT_LT, &result))
+                if (try_binary_operator(this, vb, vc, SLOT_LT, SLOT_GT, &result))
                 {
                     if (had_error_)
                         return;
@@ -4941,7 +4956,7 @@ namespace zen
                 at_jump_offset = true;
                 Value result;
                 SAVE_IP();
-                if (try_binary_operator(this, vb, vc, SLOT_LE, SLOT_LE, &result))
+                if (try_binary_operator(this, vb, vc, SLOT_LE, SLOT_GE, &result))
                 {
                     if (had_error_)
                         return;
@@ -4994,7 +5009,7 @@ namespace zen
                     Value result;                                                                \
                     SAVE_IP();                                                                   \
                     if (try_binary_operator(this, vb, vc, (LE) ? SLOT_LE : SLOT_LT,              \
-                                            (LE) ? SLOT_LE : SLOT_LT, &result))                  \
+                                            (LE) ? SLOT_GE : SLOT_GT, &result))                  \
                     {                                                                            \
                         if (had_error_)                                                          \
                             return;                                                              \
@@ -5021,6 +5036,49 @@ namespace zen
         CASE(OP_GTIJMPIFNOT) ZEN_CMPI_JMPIFNOT(true, false)
         CASE(OP_GEIJMPIFNOT) ZEN_CMPI_JMPIFNOT(true, true)
 #undef ZEN_CMPI_JMPIFNOT
+
+        /* --- Equality against a literal, fused with the branch --- */
+#define ZEN_EQI_JMPIFNOT(WANT_EQUAL)                                                             \
+        {                                                                                        \
+            uint32_t i = *ip;                                                                    \
+            Value vx = R[ZEN_B(i)];                                                              \
+            int64_t imm = (int8_t)ZEN_C(i);                                                      \
+            bool eq;                                                                             \
+            bool at_jump_offset = false;                                                         \
+            if (__builtin_expect(vx.type == VAL_INT, 1))                                         \
+                eq = vx.as.integer == imm;                                                       \
+            else if (vx.type == VAL_FLOAT)                                                       \
+                eq = vx.as.number == (double)imm;                                                \
+            else if (is_instance(vx))                                                            \
+            {                                                                                    \
+                ++ip;                                                                            \
+                at_jump_offset = true;                                                           \
+                Value result;                                                                    \
+                SAVE_IP();                                                                       \
+                if (try_binary_operator(this, vx, val_int(imm), SLOT_EQ, SLOT_EQ, &result))      \
+                {                                                                                \
+                    if (had_error_)                                                              \
+                        return;                                                                  \
+                    LOAD_STATE();                                                                \
+                    eq = is_truthy_full(result);                                                 \
+                }                                                                                \
+                else                                                                             \
+                {                                                                                \
+                    LOAD_STATE();                                                                \
+                    eq = values_deep_equal(vx, val_int(imm));                                    \
+                }                                                                                \
+            }                                                                                    \
+            else                                                                                 \
+                eq = values_deep_equal(vx, val_int(imm));                                        \
+            if (!at_jump_offset)                                                                 \
+                ++ip;                                                                            \
+            if (eq != (WANT_EQUAL))                                                              \
+                ip += ZEN_SBX(*ip);                                                              \
+            NEXT();                                                                              \
+        }
+        CASE(OP_EQIJMPIFNOT) ZEN_EQI_JMPIFNOT(true)
+        CASE(OP_NEIJMPIFNOT) ZEN_EQI_JMPIFNOT(false)
+#undef ZEN_EQI_JMPIFNOT
 
         /* --- Branches on None --- */
         CASE(OP_JMPIFNIL)

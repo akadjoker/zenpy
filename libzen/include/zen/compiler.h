@@ -266,6 +266,11 @@ namespace zen
         int logical_and(int left, int dest);
         int logical_or(int left, int dest);
         int ternary_expr(int true_val, int dest);
+        /* True when current_ continues the same postfix chain (`.`, `(`,
+        ** `[`, `?.`) — see the definition in compiler_expressions.cpp for
+        ** why this lets a call adjourn its own move-into-dest to whichever
+        ** link in the chain turns out to be the last one. */
+        bool chain_continues() const;
         int call_expr(int callee, int dest);
         int generic_call_expr(int callee, int dest);
         int dot_expr(int obj, int dest, bool can_assign);

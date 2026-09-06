@@ -906,6 +906,23 @@ namespace zen
         return reg;
     }
 
+    /* True when the token immediately following (current_, already
+    ** advanced past everything this call/dot/subscript just consumed)
+    ** continues the same postfix chain at PREC_CALL — `.`, `(`, `[`, `?.`.
+    ** Used to adjourn a call's own move-into-dest: if another link is
+    ** coming right after, THAT link will receive this result as its
+    ** `callee`/`obj` and do the eventual move into `dest` once it really
+    ** is the last one — collapsing what would otherwise be a MOVE-out
+    ** here immediately followed by a MOVE-in there. Safe because a
+    ** postfix chain never lets anything else observe the intermediate
+    ** register by name in between: each link hands its result straight to
+    ** the next as an explicit operand, instruction after instruction. */
+    bool Compiler::chain_continues() const
+    {
+        return current_.type == TOK_DOT || current_.type == TOK_LPAREN ||
+               current_.type == TOK_LBRACKET || current_.type == TOK_QDOT;
+    }
+
     /* =========================================================
     ** Function call: callee(args...)
     ** ========================================================= */
@@ -939,7 +956,11 @@ namespace zen
             state_->max_reg = state_->next_reg;
 
         int result = base;
-        if (dest >= 0 && dest != result)
+        /* If another link continues the chain right after this call
+        ** (`f()()`, `f().x`, `f()[0]`), defer the move into dest — that
+        ** next link will receive `result` as its own callee/obj and do the
+        ** eventual move once IT turns out to be the chain's last link. */
+        if (dest >= 0 && dest != result && !chain_continues())
         {
             emit_move(dest, result);
             free_reg(result);
@@ -1398,6 +1419,8 @@ namespace zen
             }
             bool obj_is_top = (obj == state_->next_reg - 1);
             int base = (!obj_is_local && obj_is_top) ? obj : alloc_reg();
+            fprintf(stderr, "[DOT] obj=%d dest=%d obj_is_local=%d obj_is_top=%d base=%d next_reg=%d\n", obj, dest, (int)obj_is_local, (int)obj_is_top, base, state_->next_reg);
+            fprintf(stderr, "[DOT] obj=%d dest=%d obj_is_local=%d obj_is_top=%d base=%d next_reg=%d\n", obj, dest, (int)obj_is_local, (int)obj_is_top, base, state_->next_reg);
             if (base != obj)
                 emit_move(base, obj);
             const FuncSig *sig = method_sig;
@@ -1439,7 +1462,10 @@ namespace zen
             }
 
             state_->next_reg = base + 1;
-            if (dest >= 0 && dest != base)
+            /* Defer the move into dest when another link continues the
+            ** chain right after (`a.b().c()`, `a.b()[0]`, `a.b()(x)`) —
+            ** see call_expr()'s identical comment and chain_continues(). */
+            if (dest >= 0 && dest != base && !chain_continues())
             {
                 emit_move(dest, base);
                 free_reg(base);

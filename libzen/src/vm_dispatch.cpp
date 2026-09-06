@@ -655,6 +655,7 @@ namespace zen
             &&lbl_OP_SETGLOBAL_AUG,
             &&lbl_OP_CALL_GENERIC,
             &&lbl_OP_INVOKE_GENERIC,
+            &&lbl_OP_CLASSFLATTEN,
         };
 
 #define DISPATCH() goto *dispatch_table[ZEN_OP(*ip)]
@@ -4105,6 +4106,48 @@ namespace zen
             klass->field_defaults[field_idx] = K[ZEN_C(i)];
             NEXT();
         }
+
+        CASE(OP_CLASSFLATTEN)
+        {
+            /* as_class(R[A]).flatten_vtable_from_parent() — see opcodes.h.
+            ** Mirrors VM::ClassBuilder::end()'s "Flatten parent vtable" in
+            ** vm.cpp, for script classes: without this, OP_INVOKE's vtable
+            ** lookup on a subclass that doesn't override a given method
+            ** finds a nil slot and must walk `->parent` at every single
+            ** call to that inherited method, forever. Doing it once here —
+            ** right after the class body's own OP_SETFIELDs may have grown
+            ** its vtable — makes that walk a one-time cost instead of a
+            ** per-call one. */
+            uint32_t i = *ip;
+            ObjClass *klass = as_class(R[ZEN_A(i)]);
+            ObjClass *p = klass->parent;
+            if (p && p->vtable_size > 0)
+            {
+                if (klass->vtable_size < p->vtable_size)
+                {
+                    int old_size = klass->vtable_size;
+                    int new_size = p->vtable_size;
+                    gc_pause(&gc_);
+                    Value *new_vt = (Value *)zen_alloc(&gc_, sizeof(Value) * new_size);
+                    for (int si = 0; si < old_size; si++)
+                        new_vt[si] = klass->vtable[si];
+                    for (int si = old_size; si < new_size; si++)
+                        new_vt[si] = val_nil();
+                    if (klass->vtable)
+                        zen_free(&gc_, klass->vtable, sizeof(Value) * old_size);
+                    klass->vtable = new_vt;
+                    klass->vtable_size = new_size;
+                    gc_resume(&gc_);
+                }
+                for (int si = 0; si < p->vtable_size; si++)
+                {
+                    if (is_nil(klass->vtable[si]))
+                        klass->vtable[si] = p->vtable[si];
+                }
+            }
+            NEXT();
+        }
+
         /* --- Misc --- */
         CASE(OP_CONCAT)
         {

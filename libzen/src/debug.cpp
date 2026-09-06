@@ -112,6 +112,7 @@ namespace zen
         "SETGLOBAL_AUG",
         "CALL_GENERIC",
         "INVOKE_GENERIC",
+        "CLASSFLATTEN",
     };
 
     const char *opcode_name(OpCode op)
@@ -688,6 +689,11 @@ namespace zen
         case OP_CLASSFIELDDEF:
         {
             printf("R[%d].field_default[%d] = K[%d]", a, b, c);
+            break;
+        }
+        case OP_CLASSFLATTEN:
+        {
+            printf("R[%d].flatten_vtable_from_parent()", a);
             break;
         }
 

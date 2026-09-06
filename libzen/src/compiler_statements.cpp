@@ -784,6 +784,14 @@ namespace zen
         }
         class_field_default_count_ = prev_field_default_count;
 
+        /* Flatten the parent's vtable into this class's now-complete vtable
+        ** (every OP_SETFIELD from the body above may have grown it): makes
+        ** an inherited, non-overridden method resolve in O(1) at every call
+        ** site instead of walking ->parent every time. Only classes with a
+        ** parent need this — a root class's vtable already IS its own. */
+        if (class_has_parent_)
+            state_->emitter.emit_abc(OP_CLASSFLATTEN, class_reg, 0, 0, previous_.line);
+
         free_reg(class_reg);
 
         /* Save the completed class field table for potential subclasses */

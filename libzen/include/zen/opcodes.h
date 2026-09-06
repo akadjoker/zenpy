@@ -181,6 +181,18 @@ namespace zen
         OP_CALL_GENERIC,   /* word1: R[A](gT..gT+B2-1 | args..) ABC=base,nargs,nresults (2-word)
                             ** word2: ngeneric (16-bit, low half) — generic arg count */
         OP_INVOKE_GENERIC, /* like OP_INVOKE, plus a 3rd word carrying ngeneric (3-word) */
+
+        /* as_class(R[A]).flatten_vtable_from_parent() — copies every nil
+        ** slot in R[A]'s vtable from its parent's vtable (recursively
+        ** already-flattened, since a class always compiles/runs before its
+        ** subclasses), so OP_INVOKE's vtable lookup finds an inherited,
+        ** non-overridden method in O(1) instead of walking the parent
+        ** chain. Emitted once, right after a script class body finishes
+        ** (after every OP_SETFIELD that could have added a method) — see
+        ** ClassBuilder::end()'s "Flatten parent vtable" in vm.cpp for the
+        ** equivalent native-class path this mirrors. No-op if R[A] has no
+        ** parent or the parent's vtable is empty. */
+        OP_CLASSFLATTEN,
     };
 
 /* Encode/Decode — ABC format */

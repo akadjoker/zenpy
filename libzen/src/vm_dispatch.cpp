@@ -29,6 +29,19 @@ namespace zen
        fiber stack; restoring the top afterwards frees them all at once. */
     static inline int call_native(VM *vm, ObjNative *nat, Value *args, int nargs)
     {
+        /* Every caller of this helper (OP_CALL, OP_INVOKE, OP_INVOKE_VT, the
+        ** .inl method tables, class __init__, ...) reaches it having already
+        ** decided this is a plain positional call — none of them know how
+        ** to split off type arguments. A generic native (registered via
+        ** ClassBuilder::generic_method) must only ever be reached through
+        ** OP_INVOKE_GENERIC, which calls generic_fn directly and never goes
+        ** through here. */
+        if (nat->generic_arity > 0)
+        {
+            vm->runtime_error("'%s' is a generic native function/method — call it with <...> type arguments",
+                               nat->name ? nat->name->chars : "?");
+            return -1;
+        }
         ObjFiber *fiber = vm->current_fiber();
         Value *saved_top = fiber->stack_top;
         const bool paused = !(nat->flags & ZEN_NATIVE_GC_SAFE);
@@ -640,6 +653,8 @@ namespace zen
             &&lbl_OP_CLASSFIELDDEF,
             &&lbl_OP_GETGLOBAL_AUG,
             &&lbl_OP_SETGLOBAL_AUG,
+            &&lbl_OP_CALL_GENERIC,
+            &&lbl_OP_INVOKE_GENERIC,
         };
 
 #define DISPATCH() goto *dispatch_table[ZEN_OP(*ip)]
@@ -2009,6 +2024,107 @@ namespace zen
                 DISPATCH();
             }
             RT_ERROR("attempt to call non-function (got %s)", val_type_str(R[a]));
+        }
+
+        CASE(OP_CALL_GENERIC)
+        {
+            /* 2-word: word1=[OP|base|nargs|nresults] (nargs = ngeneric+nvalue,
+            ** contiguous registers, same as OP_CALL); word2=ngeneric (low 16 bits). */
+            uint32_t i = *ip;
+            int a = ZEN_A(i);
+            int nargs = ZEN_B(i);
+            int nresults = ZEN_C(i);
+            uint32_t word2 = *(++ip);
+            int ngeneric = (int)(word2 & 0xFFFF);
+            ++ip;
+            SAVE_IP();
+
+            Value callee = R[a];
+            if (!is_closure(callee))
+            {
+                RT_ERROR("generic call target must be a script function (got %s)", val_type_str(callee));
+            }
+            ObjClosure *cl = as_closure(callee);
+            ObjFunc *fn = cl->func;
+
+            if (fn->generic_arity == 0)
+            {
+                RT_ERROR("'%s' is not generic — called with <...> but takes no type arguments",
+                          fn->name ? fn->name->chars : "?");
+            }
+            if (ngeneric != fn->generic_arity)
+            {
+                RT_ERROR("'%s' expects %d type argument%s but got %d",
+                          fn->name ? fn->name->chars : "?", fn->generic_arity,
+                          fn->generic_arity == 1 ? "" : "s", ngeneric);
+            }
+            for (int gi = 0; gi < ngeneric; gi++)
+            {
+                if (!is_class(R[a + 1 + gi]))
+                {
+                    RT_ERROR("'%s': type argument %d is not a type", fn->name ? fn->name->chars : "?", gi + 1);
+                }
+            }
+
+            int nvalue = nargs - ngeneric;
+            /* Mark string args as shared, same as OP_CALL. */
+            for (int ai = 0; ai < nargs; ai++)
+            {
+                Value av = R[a + 1 + ai];
+                if (__builtin_expect(is_string(av), 0))
+                    av.as.obj->flags |= OBJ_FLAG_SHARED;
+            }
+
+            if (fn->is_generator)
+            {
+                RT_ERROR("generic generators are not supported yet");
+            }
+            if (fiber->frame_count >= kMaxFrames)
+            {
+                RT_ERROR("stack overflow");
+            }
+            CHECK_STACK_SPACE(fiber, &R[a + 1], fn->num_regs);
+            CallFrame *new_frame = &fiber->frames[fiber->frame_count++];
+            new_frame->closure = cl;
+            new_frame->func = fn;
+            new_frame->ip = fn->code;
+            new_frame->base = &R[a + 1]; /* base[0..ngeneric-1]=types, base[ngeneric..]=values */
+            new_frame->ret_reg = a;
+            new_frame->ret_count = nresults;
+
+            if (fn->arity < 0)
+            {
+                int min_args = (-fn->arity) - 1;
+                if (nvalue < min_args)
+                    RT_ERROR("expected at least %d args but got %d", min_args, nvalue);
+                int extra = nvalue - min_args;
+                gc_pause(&gc_);
+                ObjArray *arr = new_array(&gc_);
+                if (extra > 0)
+                    array_push_n(&gc_, arr, new_frame->base + ngeneric + min_args, extra);
+                new_frame->base[ngeneric + min_args] = val_obj((Obj *)arr);
+                gc_resume(&gc_);
+            }
+            else
+            {
+                int required = fn->arity - fn->default_count;
+                if (nvalue < required)
+                    RT_ERROR("expected at least %d args but got %d", required, nvalue);
+                if (nvalue > fn->arity)
+                    RT_ERROR("expected at most %d args but got %d", fn->arity, nvalue);
+                fiber->stack_top = new_frame->base + fn->num_regs;
+                for (int di = nvalue; di < fn->arity; di++)
+                    new_frame->base[ngeneric + di] = fn->defaults[di - required];
+            }
+
+            fiber->stack_top = new_frame->base + fn->num_regs;
+            {
+                int used_value = fn->arity < 0 ? ((-fn->arity - 1) + 1) : fn->arity;
+                int used = ngeneric + used_value;
+                clear_new_regs(new_frame->base, used, fn->num_regs);
+            }
+            LOAD_STATE();
+            DISPATCH();
         }
 
         CASE(OP_CALLGLOBAL)
@@ -3420,6 +3536,180 @@ namespace zen
                 RT_ERROR("cannot invoke method '%s' on this type", mname);
             }
             NEXT();
+        }
+
+        CASE(OP_INVOKE_GENERIC)
+        {
+            /* 3-word: word1=[OP|base|nargs|nresults] (nargs=ngeneric+nvalue);
+            ** word2=(sel_slot<<16|name_ki) like OP_INVOKE; word3=ngeneric. */
+            uint32_t i = *ip;
+            uint8_t base = ZEN_A(i);
+            uint8_t nargs = ZEN_B(i);
+            uint8_t nresults = ZEN_C(i);
+            if (nresults == 0) nresults = 1;
+            uint32_t word2 = ip[1];
+            uint16_t sel_slot = (uint16_t)(word2 >> 16);
+            uint16_t name_ki = (uint16_t)(word2 & 0xFFFF);
+            int ngeneric = (int)ip[2];
+            ip += 2;
+            SAVE_IP();
+
+            Value receiver = R[base];
+            ObjString *method = as_string(K[name_ki]);
+            const char *mname = method->chars;
+
+            if (!is_instance(receiver))
+            {
+                RT_ERROR("generic methods are not supported on this type (got %s)", val_type_str(receiver));
+            }
+            ObjInstance *inst = as_instance(receiver);
+            ObjClass *klass = inst->klass;
+
+            Value mval = val_nil();
+            ObjClass *search = klass;
+            while (search != nullptr)
+            {
+                if (sel_slot < search->vtable_size)
+                    mval = search->vtable[sel_slot];
+                if (!is_nil(mval))
+                    break;
+                search = search->parent;
+            }
+            if (is_nil(mval))
+            {
+                RT_ERROR("'%s' has no method '%s'", klass->name->chars, mname);
+            }
+            int nvalue = nargs - ngeneric;
+            for (int ai = 0; ai < nargs; ai++)
+            {
+                Value av = R[base + 1 + ai];
+                if (__builtin_expect(is_string(av), 0))
+                    av.as.obj->flags |= OBJ_FLAG_SHARED;
+            }
+
+            if (is_native(mval))
+            {
+                /* Native generic method, e.g. entity.get_component<Transform>().
+                ** Registered via ClassBuilder::generic_method() — see
+                ** object.h's ObjNative::generic_fn. Type args and value args
+                ** are handed to C++ as two separate arrays; unlike script
+                ** generics there is no shared-register trick to perform,
+                ** just two pointers into the same contiguous register block. */
+                ObjNative *nat = as_native(mval);
+                if (nat->generic_arity == 0)
+                {
+                    RT_ERROR("'%s.%s' is not generic — called with <...> but takes no type arguments",
+                              klass->name->chars, mname);
+                }
+                if (ngeneric != nat->generic_arity)
+                {
+                    RT_ERROR("'%s.%s' expects %d type argument%s but got %d",
+                              klass->name->chars, mname, nat->generic_arity,
+                              nat->generic_arity == 1 ? "" : "s", ngeneric);
+                }
+                for (int gi = 0; gi < ngeneric; gi++)
+                {
+                    if (!is_class(R[base + 1 + gi]))
+                        RT_ERROR("'%s.%s': type argument %d is not a type", klass->name->chars, mname, gi + 1);
+                }
+                if (nat->arity >= 0 && nvalue != nat->arity)
+                {
+                    RT_ERROR("%s.%s() expects %d args but got %d", klass->name->chars, mname, nat->arity, nvalue);
+                }
+
+                Value *type_args = &R[base + 1];
+                Value *value_args = &R[base + 1 + ngeneric];
+                ObjFiber *cur = fiber;
+                Value *saved_top = cur->stack_top;
+                const bool paused = !(nat->flags & ZEN_NATIVE_GC_SAFE);
+                if (paused)
+                    gc_pause(&gc_);
+                int nret = nat->generic_fn(this, receiver, type_args, ngeneric, value_args, nvalue);
+                if (paused)
+                    gc_resume(&gc_);
+                cur->stack_top = saved_top;
+                if (had_error_)
+                    return;
+                copy_native_results(&R[base], value_args, nret, nresults);
+                NEXT();
+            }
+
+            if (!is_closure(mval))
+            {
+                RT_ERROR("cannot invoke generic method '%s' on this type", mname);
+            }
+
+            {
+                ObjClosure *cl = as_closure(mval);
+                ObjFunc *fn = cl->func;
+                if (fn->generic_arity == 0)
+                {
+                    RT_ERROR("'%s.%s' is not generic — called with <...> but takes no type arguments",
+                              klass->name->chars, mname);
+                }
+                if (ngeneric != fn->generic_arity)
+                {
+                    RT_ERROR("'%s.%s' expects %d type argument%s but got %d",
+                              klass->name->chars, mname, fn->generic_arity,
+                              fn->generic_arity == 1 ? "" : "s", ngeneric);
+                }
+                for (int gi = 0; gi < ngeneric; gi++)
+                {
+                    if (!is_class(R[base + 1 + gi]))
+                    {
+                        RT_ERROR("'%s.%s': type argument %d is not a type", klass->name->chars, mname, gi + 1);
+                    }
+                }
+
+                if (fn->arity < 0)
+                {
+                    int min_args = (-fn->arity) - 1;
+                    if (nvalue < min_args)
+                        RT_ERROR("%s.%s() expects at least %d args but got %d", klass->name->chars, mname, min_args, nvalue);
+                }
+                else if (fn->default_count > 0)
+                {
+                    int required = fn->arity - fn->default_count;
+                    if (nvalue < required)
+                        RT_ERROR("%s.%s() expects at least %d args but got %d", klass->name->chars, mname, required, nvalue);
+                    if (nvalue > fn->arity)
+                        RT_ERROR("%s.%s() expects at most %d args but got %d", klass->name->chars, mname, fn->arity, nvalue);
+                }
+                else if (nvalue != fn->arity)
+                {
+                    RT_ERROR("%s.%s() expects %d args but got %d", klass->name->chars, mname, fn->arity, nvalue);
+                }
+                if (fiber->frame_count >= kMaxFrames)
+                {
+                    RT_ERROR("stack overflow");
+                }
+                CHECK_STACK_SPACE(fiber, &R[base], fn->num_regs);
+                CallFrame *new_frame = &fiber->frames[fiber->frame_count++];
+                new_frame->closure = cl;
+                new_frame->func = fn;
+                new_frame->ip = fn->code;
+                /* base[0]=self, base[1..ngeneric]=types, base[1+ngeneric..]=values */
+                new_frame->base = &R[base];
+                new_frame->ret_reg = base;
+                new_frame->ret_count = nresults;
+                fiber->stack_top = new_frame->base + fn->num_regs;
+
+                if (fn->arity >= 0 && fn->default_count > 0 && nvalue < fn->arity)
+                {
+                    int required = fn->arity - fn->default_count;
+                    for (int di = nvalue; di < fn->arity; di++)
+                        new_frame->base[1 + ngeneric + di] = fn->defaults[di - required];
+                }
+
+                {
+                    int used_value = fn->arity >= 0 ? fn->arity : nvalue;
+                    int used = 1 + ngeneric + used_value;
+                    clear_new_regs(new_frame->base, used, fn->num_regs);
+                }
+
+                LOAD_STATE();
+                DISPATCH();
+            }
         }
 
         CASE(OP_INVOKE_VT)

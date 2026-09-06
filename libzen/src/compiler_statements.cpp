@@ -212,12 +212,14 @@ namespace zen
 
         /* Parameters */
         consume(TOK_LPAREN, "Expected '(' after function name.");
-        int arity = 0;
+        /* Type params occupy registers R[0..generic_count-1], ahead of the
+        ** value params — but count separately (ObjFunc::generic_arity), NOT
+        ** folded into `arity`. A generic call validates the two counts
+        ** independently (OP_CALL_GENERIC), unlike the old f<T>(x)==f(T,x)
+        ** sugar where they were indistinguishable. */
         for (int gi = 0; gi < generic_count; gi++)
-        {
             add_local(generic_params[gi]);
-            arity++;
-        }
+        int arity = 0;
         bool is_vararg = false;
         static const int kMaxDefaults = 32;
         Value default_vals[kMaxDefaults];
@@ -343,6 +345,7 @@ namespace zen
            e.g. def f(*args) -> arity=-1 (0 required)
                 def f(a, *args) -> arity=-2 (1 required) */
         fn->arity = is_vararg ? -(arity) : arity;
+        fn->generic_arity = generic_count;
 
         /* Store default values */
         fn->default_count = default_count;
@@ -561,12 +564,10 @@ namespace zen
 
                 /* Parameters */
                 consume(TOK_LPAREN, "Expected '(' after method name.");
-                int arity = 0;
+                /* Type params counted separately — see fun_declaration. */
                 for (int gi = 0; gi < generic_count; gi++)
-                {
                     add_local(generic_params[gi]);
-                    arity++;
-                }
+                int arity = 0;
                 /* Skip 'self' if user wrote it explicitly as first param */
                 if (check(TOK_SELF))
                 {
@@ -672,6 +673,7 @@ namespace zen
                 ObjFunc *fn = state_->emitter.end(state_->max_reg);
                 fn->is_generator = state_->is_generator;
                 fn->arity = is_vararg ? -(arity) : arity;
+                fn->generic_arity = generic_count;
 
                 /* Store default values */
                 fn->default_count = default_count;
@@ -1181,14 +1183,23 @@ namespace zen
                 if (check(TOK_COLON))
                 {
                     advance(); /* consume ':' */
-                    /* skip type expression: string literal, identifier (dotted/generic), etc. */
+                    /* Capture a simple (non-dotted, non-subscripted) type name
+                    ** so a class annotation — `c: Container = Container()` —
+                    ** can feed receiver_class() and let obj.method<T>(...) be
+                    ** recognised on `c` later. Dotted/bracketed/string hints
+                    ** (`list[int]`, 'quoted') are still just skipped: only a
+                    ** bare identifier can name a class. */
+                    bool has_simple_type = false;
+                    Token type_tok;
                     if (check(TOK_STRING) || check(TOK_FSTRING))
                     {
                         advance(); /* quoted type hint like 'list[int]' */
                     }
                     else if (check(TOK_IDENTIFIER))
                     {
+                        type_tok = current_;
                         advance();
+                        has_simple_type = !check(TOK_DOT) && !check(TOK_LBRACKET);
                         while (match(TOK_DOT)) consume(TOK_IDENTIFIER, "Expected type name.");
                         if (match(TOK_LBRACKET))
                         {
@@ -1207,18 +1218,32 @@ namespace zen
                         int local = resolve_local(state_, name_tok);
                         if (local >= 0)
                         {
+                            if (has_simple_type)
+                                set_local_type_hint(local, type_tok);
                             int val = expression(local);
                             if (val != local) emit_move(local, val);
                         }
                         else
                         {
                         int gidx = find_or_add_global(name_tok.start, name_tok.length);
+                            if (has_simple_type)
+                                set_global_type_hint(gidx, type_tok);
                             int val = expression(-1);
                             state_->emitter.emit_abx(OP_SETGLOBAL, val, gidx, name_tok.line);
                             free_reg(val);
                         }
                     }
-                    /* else: pure annotation — no code */
+                    /* else: pure annotation — no code, but still record the
+                    ** type for a bare `c: Container` followed by later
+                    ** `c = Container()` plain assignment. */
+                    else if (has_simple_type)
+                    {
+                        int local = resolve_local(state_, name_tok);
+                        if (local >= 0)
+                            set_local_type_hint(local, type_tok);
+                        else
+                            set_global_type_hint(find_or_add_global(name_tok.start, name_tok.length), type_tok);
+                    }
                     return;
                 }
                 else

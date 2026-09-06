@@ -70,18 +70,30 @@ namespace zen
         for (;;)
         {
             /* Generic call: fn<Type>(args).  Only treat '<' as generic syntax
-            ** when its complete shape is <Identifier[, Identifier]*>(.  This
-            ** keeps ordinary comparisons such as `a < b` unchanged. */
-            if (current_.type == TOK_LT && generic_call_ahead())
+            ** when (a) its complete shape is <Identifier[, Identifier]*>( and
+            ** (b) `fn` is a name the compiler already knows is a def/method —
+            ** never a plain variable.  (b) is what keeps `f<T, U>(h)` from
+            ** being read as a generic call when `f` merely happens to hold an
+            ** int: without it, punctuation alone can't tell a real generic
+            ** call apart from `f < T, U > (h)` (two chained comparisons in a
+            ** parenthesized tuple written without spaces by habit). */
+            if (current_.type == TOK_LT && bare_name)
             {
-                pending_callee_valid_ = bare_name;
+                pending_callee_valid_ = true;
                 pending_callee_ = token;
-                bare_name = false;
-                reg = generic_call_expr(reg, dest);
+                const FuncSig *maybe_sig = callee_signature();
                 pending_callee_valid_ = false;
-                if (had_error_)
-                    return reg;
-                continue;
+                if (generic_call_ahead(maybe_sig != nullptr))
+                {
+                    pending_callee_valid_ = true;
+                    pending_callee_ = token;
+                    bare_name = false;
+                    reg = generic_call_expr(reg, dest);
+                    pending_callee_valid_ = false;
+                    if (had_error_)
+                        return reg;
+                    continue;
+                }
             }
 
             int infix_prec = get_precedence(current_.type);
@@ -119,9 +131,16 @@ namespace zen
             Token op = previous_;
             pending_callee_valid_ = bare_name && op.type == TOK_LPAREN;
             pending_callee_ = token;
+            /* `name.field` — remember the bare name so dot_expr() can look
+            ** it up in the global class-type-hint table when it isn't a
+            ** local with a type hint (receiver_class() only knows locals).
+            ** Same idea as pending_callee_, one hop earlier. */
+            pending_receiver_valid_ = bare_name && op.type == TOK_DOT;
+            pending_receiver_ = token;
             bare_name = false;
             reg = infix_rule(op, reg, dest);
             pending_callee_valid_ = false;
+            pending_receiver_valid_ = false;
             if (had_error_)
                 return reg;
         }
@@ -933,8 +952,8 @@ namespace zen
     {
         const FuncSig *sig = callee_signature();
 
-        /* OP_CALL overwrites R[base] with the return value, just like a
-        ** normal call. */
+        /* OP_CALL_GENERIC overwrites R[base] with the return value, just
+        ** like a normal call. */
         int base = callee;
         int saved_next = state_->next_reg;
         if (base < saved_next)
@@ -943,8 +962,15 @@ namespace zen
             emit_move(base, callee);
         }
 
-        int nargs = generic_argument_list(base, sig);
-        state_->emitter.emit_abc(OP_CALL, base, nargs, 1, previous_.line);
+        int ngeneric = 0;
+        int nargs = generic_argument_list(base, sig, &ngeneric);
+        if (nargs & 0x80)
+        {
+            error("Cannot spread arguments into a generic call.");
+            nargs &= 0x7F;
+        }
+        state_->emitter.emit_abc(OP_CALL_GENERIC, base, nargs, 1, previous_.line);
+        state_->emitter.emit((uint32_t)(ngeneric & 0xFFFF), previous_.line);
 
         state_->next_reg = base + 1;
         if (state_->next_reg > state_->max_reg)
@@ -1104,23 +1130,28 @@ namespace zen
         return nargs;
     }
 
-    /* Parse <T, U>(args) after a callee.  Generic values are normal runtime
-    ** values (usually classes), placed before the explicit arguments. */
-    int Compiler::generic_argument_list(int base, const FuncSig *sig)
+    /* Parse <T, U>(args) after a callee.  Type arguments are normal runtime
+    ** values (classes, checked against at runtime by OP_CALL_GENERIC /
+    ** OP_INVOKE_GENERIC) placed before the explicit value arguments — but,
+    ** unlike the old f<T>(x) == f(T,x) sugar, they are counted separately
+    ** (ObjFunc::generic_arity) rather than folded into the same arity as
+    ** the value parameters. */
+    int Compiler::generic_argument_list(int base, const FuncSig *sig, int *out_ngeneric)
     {
         consume(TOK_LT, "Expected '<' before generic arguments.");
 
-        int nargs = 0;
+        int ngeneric = 0;
         do
         {
             consume(TOK_IDENTIFIER, "Expected generic type name.");
             Token type_name = previous_;
 
-            int arg_reg = base + 1 + nargs;
+            int arg_reg = base + 1 + ngeneric;
             if (arg_reg >= kMaxRegisters)
             {
                 error("Too many generic arguments.");
-                return nargs;
+                *out_ngeneric = ngeneric;
+                return ngeneric;
             }
             while (state_->next_reg <= arg_reg)
                 alloc_reg();
@@ -1128,25 +1159,69 @@ namespace zen
             int type_reg = named_variable(type_name, arg_reg, false);
             if (type_reg != arg_reg)
                 emit_move(arg_reg, type_reg);
-            nargs++;
+            ngeneric++;
         } while (match(TOK_COMMA));
 
         consume(TOK_GT, "Expected '>' after generic arguments.");
+
+        /* Compile-time check when the callee's signature is visible: catches
+        ** `def f<T>(x)` called as `f<T,U>()`, and (via sig->generic_count==0)
+        ** a non-generic function called with `<...>` — both used to silently
+        ** compile as extra/misplaced positional arguments. */
+        if (sig && sig->generic_count != ngeneric)
+        {
+            if (sig->generic_count == 0)
+                error("Function is not generic.");
+            else
+                error("Wrong number of type arguments for generic function.");
+        }
+
         consume(TOK_LPAREN, "Expected '(' after generic arguments.");
 
-        int total_nargs = argument_list(base, nargs, sig);
+        int nvalue = argument_list(base + ngeneric, 0, sig);
         consume(TOK_RPAREN, "Expected ')' after arguments.");
-        return total_nargs;
+
+        *out_ngeneric = ngeneric;
+        /* nvalue may carry the spread flag in bit 7 (see argument_list) —
+        ** preserve it untouched, only the low 7 bits are an actual count. */
+        return (ngeneric + (nvalue & 0x7F)) | (nvalue & 0x80);
     }
 
-    bool Compiler::generic_call_ahead()
+    /* Two tokens are "adjacent" when nothing (not even a space) separates
+    ** them in the source — comparing the raw pointers avoids needing a
+    ** whitespace-aware lexer mode just for this. */
+    static inline bool tokens_adjacent(const Token &a, const Token &b)
     {
+        return b.start == a.start + a.length;
+    }
+
+    /* `f<T>(...)` is generic call syntax ONLY when (a) `f` is already known
+    ** to be generic — a script def/method (FuncSig) or a native class
+    ** method (ObjNative::generic_arity > 0); `callee_is_generic=false` means
+    ** "no, it's a plain variable/expression" and this returns false without
+    ** even looking at the tokens — and (b) its complete shape is punctuation
+    ** that cannot also be a comparison: the opening '<' glued to the callee
+    ** and directly followed by an identifier with no space (`f<T` yes,
+    ** `f < T` no), and the closing '>' directly followed by '(' with no
+    ** space (`>(` yes, `> (` no). Both conditions are needed: adjacency
+    ** alone still reads `f<T, U>(h)` as generic syntax when `f` merely holds
+    ** an int — indistinguishable from `f < T, U > (h)` written without
+    ** spaces, two chained comparisons in a parenthesized tuple. Ordinary
+    ** whitespace is still allowed *inside* the type-argument list
+    ** (`f<T, U>(...)`, comma-space is normal style) — only the two boundary
+    ** tokens that actually collide with comparison syntax are held to
+    ** strict adjacency. */
+    bool Compiler::generic_call_ahead(bool callee_is_generic)
+    {
+        if (!callee_is_generic)
+            return false;
         if (!check(TOK_LT))
             return false;
+        Token lt = current_;
 
         LexerState saved = lexer_.save_state();
         Token token = lexer_.next_token();
-        if (token.type != TOK_IDENTIFIER)
+        if (token.type != TOK_IDENTIFIER || !tokens_adjacent(lt, token))
         {
             lexer_.restore_state(saved);
             return false;
@@ -1165,8 +1240,13 @@ namespace zen
             }
         }
 
-        bool is_generic_call = token.type == TOK_GT &&
-                               lexer_.next_token().type == TOK_LPAREN;
+        bool is_generic_call = false;
+        if (token.type == TOK_GT)
+        {
+            Token gt = token;
+            Token lparen = lexer_.next_token();
+            is_generic_call = lparen.type == TOK_LPAREN && tokens_adjacent(gt, lparen);
+        }
         lexer_.restore_state(saved);
         return is_generic_call;
     }
@@ -1181,6 +1261,25 @@ namespace zen
         Token field = previous_;
 
         int reg = (dest >= 0) ? dest : alloc_reg();
+
+        /* Resolved once, reused by both generic_call_ahead() checks below —
+        ** a null sig (method name not seen by the pre-scan, or `obj` isn't
+        ** provably an instance of a known class) means `<` after `field`
+        ** can never be read as a generic call, only as a comparison —
+        ** UNLESS the receiver's static class is a native class with this
+        ** name registered as a generic method (ClassBuilder::generic_method,
+        ** which script pre-scan knows nothing about). */
+        const FuncSig *method_sig = method_signature(obj, field);
+        int native_generic_arity = 0;
+        bool is_native_generic = false;
+        if (!method_sig)
+        {
+            const char *cls_name = nullptr;
+            int32_t cls_len = 0;
+            if (receiver_static_class(obj, cls_name, cls_len))
+                is_native_generic = native_generic_method_arity(cls_name, cls_len, field, native_generic_arity);
+        }
+        bool method_is_generic = method_sig || is_native_generic;
 
         /* --- Fast path: self.field inside a method → OP_GETFIELD_IDX / OP_SETFIELD_IDX --- */
         if (is_current_class_instance(obj))
@@ -1237,7 +1336,7 @@ namespace zen
                     return reg;
                 }
                 /* Method call: self.method(args) — fall through to normal path */
-                if (!check(TOK_LPAREN) && !generic_call_ahead())
+                if (!check(TOK_LPAREN) && !generic_call_ahead(method_is_generic))
                 {
                     /* Read field */
                     state_->emitter.emit_abc(OP_GETFIELD_IDX, reg, obj, fidx, field.line);
@@ -1261,7 +1360,7 @@ namespace zen
         }
 
         /* Method call: obj.method(args) */
-        if (check(TOK_LPAREN) || generic_call_ahead())
+        if (check(TOK_LPAREN) || generic_call_ahead(method_is_generic))
         {
             /* We need a contiguous [receiver, arg1, arg2, ...] block.
             ** The return value lands in R[base], so if obj is a local we
@@ -1269,24 +1368,43 @@ namespace zen
             int base = alloc_reg();
             if (base != obj)
                 emit_move(base, obj);
-            int nargs;
-            const FuncSig *sig = method_signature(obj, field);
+            const FuncSig *sig = method_sig;
+            int sel = vm_->intern_selector(field.start, field.length);
+            int name_ki = state_->emitter.add_string_constant(field.start, field.length);
+
             if (check(TOK_LPAREN))
             {
                 advance(); /* consume '(' */
-                nargs = argument_list(base, 0, sig);
+                int nargs = argument_list(base, 0, sig);
                 consume(TOK_RPAREN, "Expected ')' after arguments.");
+
+                /* 2-word instruction: OP_INVOKE + name constant */
+                state_->emitter.emit_abc(OP_INVOKE, base, nargs, 1, field.line);
+                state_->emitter.emit((uint32_t)((sel << 16) | (name_ki & 0xFFFF)), field.line);
             }
             else
             {
-                nargs = generic_argument_list(base, sig);
-            }
+                int ngeneric = 0;
+                int nargs = generic_argument_list(base, sig, &ngeneric);
+                if (nargs & 0x80)
+                {
+                    error("Cannot spread arguments into a generic call.");
+                    nargs &= 0x7F;
+                }
+                /* generic_argument_list only cross-checks ngeneric against a
+                ** script FuncSig (sig!=null); a native generic method has no
+                ** FuncSig, so check its ObjNative::generic_arity here — same
+                ** "wrong number of type arguments" error either way. */
+                if (is_native_generic && ngeneric != native_generic_arity)
+                {
+                    error("Wrong number of type arguments for generic function.");
+                }
 
-            /* 2-word instruction: OP_INVOKE + name constant */
-            int sel = vm_->intern_selector(field.start, field.length);
-            int name_ki = state_->emitter.add_string_constant(field.start, field.length);
-            state_->emitter.emit_abc(OP_INVOKE, base, nargs, 1, field.line);
-            state_->emitter.emit((uint32_t)((sel << 16) | (name_ki & 0xFFFF)), field.line);
+                /* 3-word instruction: OP_INVOKE_GENERIC + name constant + ngeneric */
+                state_->emitter.emit_abc(OP_INVOKE_GENERIC, base, nargs, 1, field.line);
+                state_->emitter.emit((uint32_t)((sel << 16) | (name_ki & 0xFFFF)), field.line);
+                state_->emitter.emit((uint32_t)ngeneric, field.line);
+            }
 
             state_->next_reg = base + 1;
             if (dest >= 0 && dest != base)

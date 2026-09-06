@@ -146,7 +146,10 @@ namespace zen
     struct ObjFunc
     {
         Obj obj;
-        int32_t arity;      /* número de params (total, inclui os com default) */
+        int32_t arity;      /* número de VALUE params (total, inclui os com default) — NÃO inclui type params */
+        int32_t generic_arity; /* número de type params: def f<T,U>(...) → 2. 0 = not generic.
+                                 ** Occupy registers R[0..generic_arity-1] (after 'self' for methods),
+                                 ** BEFORE the value params. See OP_CALL_GENERIC/OP_INVOKE_GENERIC. */
         int32_t num_regs;   /* registos necessários (calculado pelo compiler) */
         int32_t code_count; /* número de instruções */
         int32_t code_capacity;
@@ -174,12 +177,36 @@ namespace zen
 
     typedef int (*NativeFn)(VM *vm, Value *args, int nargs);
 
+    /* A native generic method/function: entity.get_component<Transform>().
+    ** Type arguments and value arguments arrive as two separate arrays —
+    ** unlike script generics (which share contiguous registers for a
+    ** zero-allocation call), a native binding gets the same clean split the
+    ** language exposes, so C++ never has to slice `Value*` itself to tell
+    ** "T" from "value" apart. `receiver` is nil for a free function, the
+    ** instance for a method (methods still don't get self folded into
+    ** `args` here, unlike the plain NativeFn convention — there is no
+    ** existing generic-method call site to stay compatible with). */
+    typedef int (*GenericNativeFn)(VM *vm, Value receiver,
+                                    Value *type_args, int ntype_args,
+                                    Value *args, int nargs);
+
     struct ObjNative
     {
         Obj obj;
-        NativeFn fn;
-        int32_t arity; /* -1 = variadic */
-        int32_t flags; /* NativeFlags (module.h) */
+        /* Exactly one of these two is live, selected by generic_arity:
+        ** generic_arity == 0 -> `fn`, generic_arity > 0 -> `generic_fn`.
+        ** Every call site that doesn't know about generics (OP_CALL,
+        ** OP_INVOKE, dot_expr's plain method path, call_native(), ...)
+        ** must check generic_arity == 0 before touching `fn` — reading the
+        ** union through the wrong member is UB, not just wrong results. */
+        union
+        {
+            NativeFn fn;
+            GenericNativeFn generic_fn;
+        };
+        int32_t arity;         /* -1 = variadic. Value-arity only, like ObjFunc::arity. */
+        int32_t generic_arity; /* 0 = not generic (uses `fn`); >0 = uses `generic_fn`. */
+        int32_t flags;         /* NativeFlags (module.h) */
         ObjString *name;
     };
 

@@ -172,6 +172,15 @@ namespace zen
         ** slot this pair reads and rewrites. */
         OP_GETGLOBAL_AUG,
         OP_SETGLOBAL_AUG,
+
+        /* --- Reified generics: f<T,U>(args) / obj.m<T>(args) ---
+        ** Type args and value args are counted separately (unlike the old
+        ** f<T>(x) == f(T,x) sugar). Registers are still contiguous, no
+        ** allocation: [T0,T1,...,arg0,arg1,...] right after the callee
+        ** (or after 'self' for a method). See ObjFunc::generic_arity. */
+        OP_CALL_GENERIC,   /* word1: R[A](gT..gT+B2-1 | args..) ABC=base,nargs,nresults (2-word)
+                            ** word2: ngeneric (16-bit, low half) — generic arg count */
+        OP_INVOKE_GENERIC, /* like OP_INVOKE, plus a 3rd word carrying ngeneric (3-word) */
     };
 
 /* Encode/Decode — ABC format */

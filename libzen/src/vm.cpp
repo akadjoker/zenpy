@@ -327,6 +327,12 @@ namespace zen
         if (is_native(callee))
         {
             ObjNative *nat = as_native(callee);
+            if (nat->generic_arity > 0)
+            {
+                runtime_error("'%s' is a generic native function and cannot be called this way",
+                              nat->name ? nat->name->chars : "?");
+                return val_nil();
+            }
             int nret = nat->fn(this, args, nargs);
             return (nret > 0) ? args[0] : val_nil();
         }
@@ -376,6 +382,12 @@ namespace zen
         if (is_native(callee))
         {
             ObjNative *nat = as_native(callee);
+            if (nat->generic_arity > 0)
+            {
+                runtime_error("'%s' is a generic native function and cannot be called this way",
+                              nat->name ? nat->name->chars : "?");
+                return val_nil();
+            }
             int nret = nat->fn(this, args, nargs);
             return nret > 0 ? args[0] : val_nil();
         }
@@ -1048,6 +1060,12 @@ namespace zen
             case OBJ_NATIVE:
             {
                 ObjNative *nat = as_native(callee);
+                if (nat->generic_arity > 0)
+                {
+                    runtime_error("'%s' is a generic native function and cannot be called this way",
+                                  nat->name ? nat->name->chars : "?");
+                    return false;
+                }
                 Value *args = fiber->stack_top - nargs;
                 /* GC-safe natives run with the collector live — anything they
                 ** vm->root() sits above stack_top and gets marked. Everyone
@@ -1219,6 +1237,36 @@ namespace zen
             sizeof(ObjString *) * (idx + 1));
         klass_->field_names[idx] = intern_string(&vm_->gc_, name, (int)strlen(name),
                                                  hash_string(name, (int)strlen(name)));
+        return *this;
+    }
+
+    VM::ClassBuilder &VM::ClassBuilder::generic_method(const char *name, GenericNativeFn fn, int generic_arity, int arity)
+    {
+        ObjString *s = intern_string(&vm_->gc_, name, (int)strlen(name),
+                                     hash_string(name, (int)strlen(name)));
+        ObjNative *nat = new_native_generic(&vm_->gc_, fn, generic_arity, arity, s);
+        map_set(&vm_->gc_, klass_->methods, val_obj((Obj *)s), val_obj((Obj *)nat));
+
+        /* Generic methods skip operator-slot registration on purpose: an
+        ** overload like __add__<T> has no calling convention (OP_ADD_OBJ
+        ** never carries type arguments) — only OP_INVOKE_GENERIC's plain
+        ** name+vtable path applies here. */
+        int name_len = (int)strlen(name);
+        int slot = vm_->intern_selector(name, name_len);
+        if (slot >= klass_->vtable_size)
+        {
+            int new_size = slot + 1;
+            Value *new_vt = (Value *)zen_alloc(&vm_->gc_, sizeof(Value) * new_size);
+            for (int i = 0; i < klass_->vtable_size; i++)
+                new_vt[i] = klass_->vtable[i];
+            for (int i = klass_->vtable_size; i < new_size; i++)
+                new_vt[i] = val_nil();
+            if (klass_->vtable)
+                zen_free(&vm_->gc_, klass_->vtable, sizeof(Value) * klass_->vtable_size);
+            klass_->vtable = new_vt;
+            klass_->vtable_size = new_size;
+        }
+        klass_->vtable[slot] = val_obj((Obj *)nat);
         return *this;
     }
 
@@ -1479,7 +1527,11 @@ namespace zen
             if (is_native(method))
             {
                 ObjNative *nat = as_native(method);
-                nat->fn(this, call_args, nargs + 1);
+                if (nat->generic_arity > 0)
+                    runtime_error("'%s.init' is a generic native method and cannot be constructed this way",
+                                  klass->name ? klass->name->chars : "?");
+                else
+                    nat->fn(this, call_args, nargs + 1);
             }
             else if (is_closure(method))
             {
@@ -1581,11 +1633,17 @@ namespace zen
                 }
                 if (is_native(method))
                 {
+                    ObjNative *nat = as_native(method);
+                    if (nat->generic_arity > 0)
+                    {
+                        runtime_error("'%s' is a generic native method and cannot be invoked this way",
+                                      method_name);
+                        return val_nil();
+                    }
                     Value call_args[17];
                     call_args[0] = instance;
                     for (int i = 0; i < nargs && i < 16; i++)
                         call_args[i + 1] = args[i];
-                    ObjNative *nat = as_native(method);
                     int nret = nat->fn(this, call_args, nargs + 1);
                     return nret > 0 ? call_args[0] : val_nil();
                 }
@@ -1612,11 +1670,17 @@ namespace zen
         /* Set up call args: [self, arg0, arg1, ...] */
         if (is_native(method))
         {
+            ObjNative *nat = as_native(method);
+            if (nat->generic_arity > 0)
+            {
+                runtime_error("'%s' is a generic native method and cannot be invoked this way",
+                              nat->name ? nat->name->chars : "?");
+                return val_nil();
+            }
             Value call_args[17];
             call_args[0] = instance;
             for (int i = 0; i < nargs && i < 16; i++)
                 call_args[i + 1] = args[i];
-            ObjNative *nat = as_native(method);
             int nret = nat->fn(this, call_args, nargs + 1);
             return nret > 0 ? call_args[0] : val_nil();
         }

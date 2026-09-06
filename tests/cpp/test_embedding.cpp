@@ -909,6 +909,157 @@ static void test_resume_fiber_error_handling()
 }
 
 /* =========================================================
+** TEST 13: ClassBuilder::generic_method() — native reified generics
+**
+** The motivating use case: entity.get_component<Transform>(), where
+** Entity/Transform are native C++ classes (ClassBuilder), not script
+** classes. Container stores at most one component per native_data slot
+** keyed by ObjClass* (a tiny fixed table is enough for the test); the
+** generic method reads its single type argument to pick which slot.
+** ========================================================= */
+static const int kMaxComponentSlots = 4;
+struct ContainerData {
+    ObjClass *slot_class[kMaxComponentSlots];
+    Value slot_value[kMaxComponentSlots];
+    int count;
+};
+
+static void *container_ctor(VM *vm, int argc, Value *args)
+{
+    (void)vm; (void)argc; (void)args;
+    ContainerData *c = (ContainerData *)malloc(sizeof(ContainerData));
+    c->count = 0;
+    return c;
+}
+
+static void container_dtor(VM *vm, void *data)
+{
+    (void)vm;
+    free(data);
+}
+
+/* container.add_component(instance) — files it under instance's own class. */
+static int container_add_component(VM *vm, Value *args, int nargs)
+{
+    (void)vm; (void)nargs;
+    ContainerData *c = zen_instance_data<ContainerData>(args[-1]);
+    Value comp = args[0];
+    if (!is_instance(comp) || c->count >= kMaxComponentSlots)
+    {
+        return 0;
+    }
+    ObjClass *klass = as_instance(comp)->klass;
+    for (int i = 0; i < c->count; i++)
+    {
+        if (c->slot_class[i] == klass)
+        {
+            c->slot_value[i] = comp; /* replace */
+            return 0;
+        }
+    }
+    c->slot_class[c->count] = klass;
+    c->slot_value[c->count] = comp;
+    c->count++;
+    return 0;
+}
+
+/* container.get_component<T>() — the reified-generics native entry point. */
+static int container_get_component(VM *vm, Value receiver, Value *type_args, int ntype_args,
+                                    Value *args, int nargs)
+{
+    (void)vm; (void)args; (void)nargs;
+    if (ntype_args != 1 || !is_class(type_args[0]))
+        return 0; /* the VM already validates this before calling us — belt and suspenders */
+    ObjClass *wanted = as_class(type_args[0]);
+    ContainerData *c = zen_instance_data<ContainerData>(receiver);
+    for (int i = 0; i < c->count; i++)
+    {
+        if (c->slot_class[i] == wanted)
+        {
+            args[0] = c->slot_value[i];
+            return 1;
+        }
+    }
+    args[0] = val_nil();
+    return 1;
+}
+
+static void test_generic_native_method()
+{
+    printf("\n[Test 13] ClassBuilder::generic_method() — entity.get_component<T>()\n");
+
+    VM vm;
+    vm.open_lib_globals(&zen_lib_base);
+
+    vm.def_class("Container")
+        .ctor(container_ctor)
+        .dtor(container_dtor)
+        .method("add_component", container_add_component, 1)
+        .generic_method("get_component", container_get_component, /*generic_arity=*/1, /*arity=*/0)
+        .end();
+
+    /* Note: `c: Container = Container()` — the explicit class annotation is
+    ** what lets the compiler know `c`'s static type at a call site with no
+    ** other source of type information (Container is a native class, so
+    ** there's no script `def` for the pre-scan to have seen). Without the
+    ** annotation, obj.method<T>(...) can never be told apart from chained
+    ** comparisons written without spaces — see generic_call_ahead(). */
+    TEST("Two different components on the same container round-trip by type");
+    run_source(vm, R"(
+class Transform:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
+class Sprite:
+    def __init__(self, path):
+        self.path = path
+
+c: Container = Container()
+c.add_component(Transform(1, 2))
+c.add_component(Sprite("hero.png"))
+
+t = c.get_component<Transform>()
+s = c.get_component<Sprite>()
+)");
+    Value tv = vm.get_global("t");
+    Value sv = vm.get_global("s");
+    CHECK(!vm.had_error() && is_instance(tv) && is_instance(sv) && tv.as.obj != sv.as.obj,
+          "expected two distinct component instances, no error");
+
+    /* Note: a class-type annotation (`c: Container`) is tracked per
+    ** Compiler instance, not persisted anywhere — each run_source() call
+    ** here uses a fresh Compiler, so `c`'s annotation from the previous
+    ** run_source() call above is gone. Re-annotating in the same script as
+    ** the call is the documented way to use this across a fresh
+    ** compilation (matches how any other compile-time-only fact in this
+    ** compiler works: signatures, class field tables, etc. are also
+    ** per-compilation, not persisted across separate compile() calls). */
+    TEST("get_component<T>() with no matching component returns nil");
+    run_source(vm, R"(
+class Nothing:
+    pass
+c: Container = c
+missing = c.get_component<Nothing>()
+)");
+    Value mv = vm.get_global("missing");
+    CHECK(!vm.had_error() && is_nil(mv), "expected nil for a component that was never added");
+
+    TEST("get_component<T>() called with wrong generic arity is a compile error");
+    bool bad_arity_compiled = run_source(vm, "bad = c.get_component<Transform, Sprite>()\n");
+    CHECK(!bad_arity_compiled || vm.had_error(), "expected a compile/runtime error, not silent success");
+
+    TEST("add_component (plain native method) is unaffected by generics support");
+    run_source(vm, R"(
+c2: Container = Container()
+c2.add_component(Transform(9, 9))
+t2 = c2.get_component<Transform>()
+)");
+    Value t2v = vm.get_global("t2");
+    CHECK(!vm.had_error() && is_instance(t2v), "expected plain native method + generic method to coexist");
+}
+
+/* =========================================================
 ** MAIN
 ** ========================================================= */
 int main()
@@ -927,6 +1078,7 @@ int main()
     test_class_builder_native_data();
     test_run_from_inside_script();
     test_resume_fiber_error_handling();
+    test_generic_native_method();
 
     printf("\n========================================\n");
     printf("Results: %d passed, %d failed\n", g_tests_passed, g_tests_failed);

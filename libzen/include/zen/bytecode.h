@@ -12,8 +12,11 @@ namespace zen
     static constexpr uint16_t ZEN_BYTECODE_VERSION_MAJOR = 2;
     /* minor 2: class field defaults (a class body's "name = literal").
     ** minor 3: operator slot table grew 15->16 (added __len__/SLOT_LEN) —
-    **          see kOperatorSlotCountV1 and read_class() in bytecode.cpp. */
-    static constexpr uint16_t ZEN_BYTECODE_VERSION_MINOR = 3;
+    **          see kOperatorSlotCountV1 and read_class() in bytecode.cpp.
+    ** minor 4: ObjFunc gained generic_arity (reified generics, f<T>(...)) —
+    **          written at the end of write_func(); read_func() defaults it
+    **          to 0 for minor < 4. See read_func()/write_func(). */
+    static constexpr uint16_t ZEN_BYTECODE_VERSION_MINOR = 4;
 
     struct BytecodeStats
     {

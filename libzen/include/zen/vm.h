@@ -147,6 +147,11 @@ namespace zen
             ClassBuilder &parent(const char *parent_name);
             ClassBuilder &field(const char *name);
             ClassBuilder &method(const char *name, NativeFn fn, int arity);
+            /* entity.get_component<Transform>(): a native method taking
+            ** `generic_arity` type arguments ahead of `arity` value
+            ** arguments. Variadic value arity (-1, like plain method()) is
+            ** not supported for generics yet — arity must be >= 0. */
+            ClassBuilder &generic_method(const char *name, GenericNativeFn fn, int generic_arity, int arity);
             ClassBuilder &ctor(NativeClassCtor fn);       /* native constructor (returns void*) */
             ClassBuilder &dtor(NativeClassDtor fn);       /* native destructor */
             ClassBuilder &persistent(bool p = true);      /* instances NOT managed by GC */

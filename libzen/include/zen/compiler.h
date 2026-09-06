@@ -129,7 +129,8 @@ namespace zen
         const char *name;
         int32_t name_len;
         int32_t param_start; /* first slot in the shared parameter pool */
-        int32_t param_count;
+        int32_t param_count;   /* VALUE params only — does NOT include generic_count */
+        int32_t generic_count; /* type params declared as def f<T,U>(...): 2. 0 = not generic. */
         bool takes_keywords; /* false for *args, overloads, oversized lists */
     };
 
@@ -281,8 +282,21 @@ namespace zen
 
         /* --- Argument list --- */
         int argument_list(int base, int initial_nargs = 0, const FuncSig *sig = nullptr);
-        int generic_argument_list(int base, const FuncSig *sig = nullptr);
-        bool generic_call_ahead();
+        /* Parses <T,U>(args) after `base`. Type args land at R[base+1..],
+        ** value args right after them. Returns total register count
+        ** (ngeneric + nvalue, same convention as argument_list/OP_CALL);
+        ** *out_ngeneric receives the type-arg count alone so the caller can
+        ** emit it as the generic opcode's extra operand. */
+        int generic_argument_list(int base, const FuncSig *sig, int *out_ngeneric);
+        /* `callee_is_generic` must already be known true — either a script
+        ** FuncSig was resolved (callee_signature()/method_signature()) or a
+        ** native class method's generic_arity was found
+        ** (native_generic_method_arity()). False always returns false, no
+        ** lookahead performed. This is what keeps a plain variable followed
+        ** by `<X>(y)` from ever being read as a generic call: punctuation
+        ** alone cannot tell it apart from chained comparisons written
+        ** without spaces. */
+        bool generic_call_ahead(bool callee_is_generic);
 
         /* --- Keyword arguments (compile-time, see FuncSig) --- */
         void prescan_signatures(const char *source, const char *filename);
@@ -298,6 +312,31 @@ namespace zen
         const FuncSig *unique_method_signature(const Token &method) const;
         const FuncSig *super_signature(const Token &method) const;
         bool receiver_class(int reg, const char *&name, int32_t &len) const;
+        /* Record a class annotation (`name: ClassName [= expr]`) so a later
+        ** obj.method<T>(...) on that variable can be recognised as a generic
+        ** call. Locals reuse Local::type_hint; globals get their own small
+        ** table since global slots carry no compile-time metadata otherwise.
+        ** This is annotation-only — there is no inference from `x = C()`
+        ** without the annotation, and no tracking of reassignment narrowing
+        ** the type away again (the hint is a promise the annotation makes,
+        ** same as any other type hint in this compiler). */
+        void set_local_type_hint(int reg, const Token &type_tok);
+        void set_global_type_hint(int gidx, const Token &type_tok);
+        bool global_type_hint(int gidx, const char *&name, int32_t &len) const;
+        /* receiver_class() plus the global-annotation table, via
+        ** pending_receiver_ — the one extra source of "the receiver's
+        ** static class name" a plain `obj.method(...)` dot_expr call has
+        ** available that receiver_class() alone (locals/self only) doesn't. */
+        bool receiver_static_class(int reg, const char *&name, int32_t &len) const;
+        /* True if `cls_name.method` is a NATIVE class method registered via
+        ** ClassBuilder::generic_method() (never a script def — those go
+        ** through FuncSig/method_signature instead). On true, out_arity
+        ** receives ObjNative::generic_arity. Looks the class up as a VM
+        ** global by name, so it only sees classes def_class()'d before this
+        ** script compiles — the same ordering embedding code already
+        ** requires for a native class to be usable from script at all. */
+        bool native_generic_method_arity(const char *cls_name, int32_t cls_len,
+                                          const Token &method, int &out_arity) const;
         int sig_param_index(const FuncSig *sig, const Token &name) const;
         void emit_sig_default(const SigParam &p, int reg);
         bool next_is_keyword_arg();
@@ -402,6 +441,14 @@ namespace zen
         ClassFieldRegistry class_registry_[kMaxClasses];
         int class_registry_count_;
 
+        /* Global class-type annotations: `name: ClassName = ...` at global
+        ** scope. Small fixed table — this is a rare, deliberate annotation,
+        ** not something every global carries. See set_global_type_hint(). */
+        static const int kMaxGlobalTypeHints = 64;
+        struct GlobalTypeHint { int gidx; Token type_tok; };
+        GlobalTypeHint global_type_hints_[kMaxGlobalTypeHints];
+        int global_type_hint_count_;
+
         /* Signature registry, heap-allocated: the Compiler already carries
         ** several kilobytes of fixed tables on the stack. Freed by compile(). */
         FuncSig *sigs_;
@@ -418,6 +465,12 @@ namespace zen
         ** the Pratt loop, the only place that still knows it. */
         Token pending_callee_;
         bool pending_callee_valid_;
+
+        /* The identifier a bare `name.field` was written with — same idea,
+        ** for dot_expr() to resolve a global class-type annotation when the
+        ** receiver isn't a local (see set_global_type_hint()). */
+        Token pending_receiver_;
+        bool pending_receiver_valid_;
 
         int lookup_class_field(ObjString *name) const;
         int add_class_field(ObjString *name);

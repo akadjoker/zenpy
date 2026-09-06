@@ -47,6 +47,7 @@ namespace zen
         "LE",
         "NOT",
         "CONTAINS",
+        "IS",
         "JMP",
         "JMPIF",
         "JMPIFNOT",
@@ -60,6 +61,7 @@ namespace zen
         "NEWFIBER",
         "RESUME",
         "YIELD",
+        "AWAIT",
         "FOR_ITER",
         "NEWARRAY",
         "NEWMAP",
@@ -99,6 +101,17 @@ namespace zen
         "ASSERT",
         "HALT",
         "IMPORT",
+        /* This table was missing OP_IS, OP_AWAIT, OP_CLASSFIELDDEF,
+        ** OP_GETGLOBAL_AUG and OP_SETGLOBAL_AUG (pre-existing drift vs. the
+        ** OpCode enum in opcodes.h — opcode_name() indexes this array
+        ** directly by (int)op, so every entry below IS was silently naming
+        ** the WRONG opcode). Filled in while adding the two generics
+        ** opcodes below, since both must land at their real enum index. */
+        "CLASSFIELDDEF",
+        "GETGLOBAL_AUG",
+        "SETGLOBAL_AUG",
+        "CALL_GENERIC",
+        "INVOKE_GENERIC",
     };
 
     const char *opcode_name(OpCode op)
@@ -315,6 +328,24 @@ namespace zen
                 printf("G[%d] = R[%d]", bx, a);
             break;
         }
+        case OP_GETGLOBAL_AUG:
+        {
+            const char *gn = global_name_safe(vm, bx);
+            if (gn)
+                printf("R[%d] = G[%d]  \t; '%s' (aug, unshared read)", a, bx, gn);
+            else
+                printf("R[%d] = G[%d]  \t; (aug, unshared read)", a, bx);
+            break;
+        }
+        case OP_SETGLOBAL_AUG:
+        {
+            const char *gn = global_name_safe(vm, bx);
+            if (gn)
+                printf("G[%d] = R[%d]  \t; '%s' (aug, unshared write)", bx, a, gn);
+            else
+                printf("G[%d] = R[%d]  \t; (aug, unshared write)", bx, a);
+            break;
+        }
 
         /* === Arithmetic === */
         case OP_ADD:  printf("R[%d] = R[%d] + R[%d]", a, b, c); break;
@@ -372,6 +403,17 @@ namespace zen
         case OP_CALL:
             printf("R[%d] = R[%d](%d args)  \t; %d results", a, a, b, c);
             break;
+        case OP_CALL_GENERIC:
+        {
+            /* 2-word: word2 = ngeneric (low 16 bits) */
+            uint32_t word2 = func->code[offset + 1];
+            int ngeneric = (int)(word2 & 0xFFFF);
+            printf("R[%d] = R[%d]<%d types>(%d args)  \t; %d results", a, a, ngeneric, b - ngeneric, c);
+            printf("\n");
+            printf("   |  %04d  %-16s", offset + 1, "(ngeneric)");
+            printf("%d", ngeneric);
+            return offset + 2;
+        }
         case OP_CALLGLOBAL:
         {
             /* 2-word: word2 has Bx=global index */
@@ -444,8 +486,15 @@ namespace zen
 
         /* === Iteration === */
         case OP_FOR_ITER:
-            printf("R[%d] = next(R[%d]); if done -> ???", a, b);
-            break;
+        {
+            /* 2-word: word2 = signed jump offset (full int32_t, not sBx) */
+            int32_t joff = (int32_t)func->code[offset + 1];
+            printf("R[%d] = next(R[%d]); if done: pc += %d  \t; -> %04d", a, b, joff, offset + 2 + joff);
+            printf("\n");
+            printf("   |  %04d  %-16s", offset + 1, "(jump-offset)");
+            printf("%d", joff);
+            return offset + 2;
+        }
         case OP_ITER_ELEM:
             printf("R[%d] = iter_elem(R[%d], %d)", a, b, c);
             break;
@@ -562,6 +611,27 @@ namespace zen
             printf("   |  %04d  %-16s", offset + 2, "(parent-gidx)");
             printf("G[%d]", pgidx);
             if (pname) printf("  \t; '%s'", pname);
+            return offset + 3;
+        }
+
+        case OP_INVOKE_GENERIC:
+        {
+            /* 3-word: word2=(sel_slot<<16|name_ki) like OP_INVOKE, word3=ngeneric */
+            uint32_t word2 = func->code[offset + 1];
+            uint32_t word3 = func->code[offset + 2];
+            int sel_slot = (int)(word2 >> 16);
+            int name_ki = (int)(word2 & 0xFFFF);
+            int ngeneric = (int)word3;
+            const char *mname = const_str(func, name_ki);
+            printf("R[%d] = R[%d].%s<%d types>(%d args)  \t; sel=%d",
+                   a, a, mname ? mname : "?", ngeneric, b - ngeneric, sel_slot);
+            printf("\n");
+            printf("   |  %04d  %-16s", offset + 1, "(invoke-data)");
+            printf("sel=%d name_ki=%d", sel_slot, name_ki);
+            if (mname) printf("  \t; \"%s\"", mname);
+            printf("\n");
+            printf("   |  %04d  %-16s", offset + 2, "(ngeneric)");
+            printf("%d", ngeneric);
             return offset + 3;
         }
 

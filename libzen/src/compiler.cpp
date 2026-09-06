@@ -43,7 +43,9 @@ namespace zen
         class_field_count_ = 0;
         class_field_default_count_ = 0;
         class_registry_count_ = 0;
+        global_type_hint_count_ = 0;
         pending_callee_valid_ = false;
+        pending_receiver_valid_ = false;
 
         sigs_ = nullptr; sig_count_ = 0; sig_cap_ = 0;
         sig_params_ = nullptr; sig_param_count_ = 0; sig_param_cap_ = 0;
@@ -116,6 +118,8 @@ namespace zen
         class_has_parent_ = false;
         pending_decorator_count_ = 0;
         pending_callee_valid_ = false;
+        pending_receiver_valid_ = false;
+        global_type_hint_count_ = 0;
 
         sigs_ = nullptr; sig_count_ = 0; sig_cap_ = 0;
         sig_params_ = nullptr; sig_param_count_ = 0; sig_param_cap_ = 0;
@@ -935,12 +939,15 @@ namespace zen
     {
         SigParam tmp[kMaxSigParams];
         int n = 0;
+        int generic_count = 0;
         bool usable = true;
 
         Token t = scan.next_token();
 
-        /* Generic parameters are hidden leading arguments, exactly as the
-        ** real parser treats them. */
+        /* Generic type params: def f<T, U>(...). Counted separately from
+        ** value params (generic_count), NOT stored in the value-param pool —
+        ** a type argument at a call site is validated against generic_count,
+        ** never mixed into keyword/positional value resolution. */
         if (t.type == TOK_LT)
         {
             for (;;)
@@ -951,14 +958,7 @@ namespace zen
                     usable = false;
                     break;
                 }
-                if (n < kMaxSigParams)
-                {
-                    tmp[n].name = t.start;
-                    tmp[n].name_len = t.length;
-                    tmp[n].has_default = false;
-                    tmp[n].default_negate = false;
-                }
-                n++;
+                generic_count++;
                 t = scan.next_token();
                 if (t.type != TOK_COMMA)
                     break;
@@ -1088,6 +1088,7 @@ namespace zen
         sig.name_len = name.length;
         sig.param_start = sig_param_count_;
         sig.param_count = keep;
+        sig.generic_count = generic_count;
         sig.takes_keywords = usable;
         for (int i = 0; i < keep; i++)
             sig_params_[sig_param_count_++] = tmp[i];
@@ -1218,6 +1219,121 @@ namespace zen
                 len = state_->locals[i].type_hint.length;
                 return true;
             }
+        }
+        return false;
+    }
+
+    void Compiler::set_local_type_hint(int reg, const Token &type_tok)
+    {
+        for (int i = state_->local_count - 1; i >= 0; i--)
+        {
+            if (state_->locals[i].reg == reg)
+            {
+                state_->locals[i].has_type_hint = true;
+                state_->locals[i].type_hint = type_tok;
+                return;
+            }
+        }
+    }
+
+    void Compiler::set_global_type_hint(int gidx, const Token &type_tok)
+    {
+        /* A second annotation for the same global (re-annotated, or a
+        ** second `def`-like redeclaration) replaces the first rather than
+        ** growing the table — the most recent annotation wins, same as
+        ** re-assigning any other compile-time fact about a name. */
+        for (int i = 0; i < global_type_hint_count_; i++)
+        {
+            if (global_type_hints_[i].gidx == gidx)
+            {
+                global_type_hints_[i].type_tok = type_tok;
+                return;
+            }
+        }
+        if (global_type_hint_count_ < kMaxGlobalTypeHints)
+        {
+            global_type_hints_[global_type_hint_count_].gidx = gidx;
+            global_type_hints_[global_type_hint_count_].type_tok = type_tok;
+            global_type_hint_count_++;
+        }
+        /* Table full: silently not tracked — worst case obj.method<T>(...)
+        ** on this particular global falls back to being read as a plain
+        ** comparison, same as any other receiver with no known type. */
+    }
+
+    bool Compiler::global_type_hint(int gidx, const char *&name, int32_t &len) const
+    {
+        for (int i = 0; i < global_type_hint_count_; i++)
+        {
+            if (global_type_hints_[i].gidx == gidx)
+            {
+                name = global_type_hints_[i].type_tok.start;
+                len = global_type_hints_[i].type_tok.length;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool Compiler::receiver_static_class(int reg, const char *&name, int32_t &len) const
+    {
+        if (receiver_class(reg, name, len))
+            return true;
+        /* Fall back to a global's class-type annotation, ONLY when this
+        ** dot_expr's receiver is literally the bare name the Pratt loop
+        ** just saw (pending_receiver_) — a temporary/expression result in
+        ** the same register has no such name and must not borrow one. */
+        if (!pending_receiver_valid_)
+            return false;
+        for (int i = state_->local_count - 1; i >= 0; i--)
+        {
+            if (identifiers_equal(state_->locals[i].name, pending_receiver_))
+                return false; /* it's a local — receiver_class() already covered it */
+        }
+        char buf[256];
+        int n = pending_receiver_.length < 255 ? pending_receiver_.length : 255;
+        memcpy(buf, pending_receiver_.start, n);
+        buf[n] = '\0';
+        int gidx = vm_->find_global(buf);
+        if (gidx < 0)
+            return false;
+        return global_type_hint(gidx, name, len);
+    }
+
+    bool Compiler::native_generic_method_arity(const char *cls_name, int32_t cls_len,
+                                               const Token &method, int &out_arity) const
+    {
+        char buf[256];
+        int n = cls_len < 255 ? cls_len : 255;
+        memcpy(buf, cls_name, n);
+        buf[n] = '\0';
+
+        int gidx = vm_->find_global(buf);
+        if (gidx < 0)
+            return false;
+        Value cls_val = vm_->get_global(gidx);
+        if (!is_class(cls_val))
+            return false;
+        ObjClass *klass = as_class(cls_val);
+
+        int slot = vm_->find_selector(method.start, method.length);
+        if (slot < 0)
+            return false;
+
+        for (ObjClass *search = klass; search != nullptr; search = search->parent)
+        {
+            if (slot >= search->vtable_size)
+                continue;
+            Value mval = search->vtable[slot];
+            if (is_nil(mval))
+                continue;
+            if (!is_native(mval))
+                return false; /* a script method shadows/overrides — not this path */
+            ObjNative *nat = as_native(mval);
+            if (nat->generic_arity <= 0)
+                return false;
+            out_arity = nat->generic_arity;
+            return true;
         }
         return false;
     }

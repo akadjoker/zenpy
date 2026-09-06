@@ -57,7 +57,7 @@ namespace zen
         case OP_LTJMPIFNOT: case OP_LEJMPIFNOT:
         case OP_LTIJMPIFNOT: case OP_LEIJMPIFNOT: case OP_GTIJMPIFNOT: case OP_GEIJMPIFNOT:
         case OP_JMPIFNIL: case OP_JMPIFNOTNIL: case OP_JMPIFEQNIL: case OP_JMPIFNEQNIL:
-        case OP_FOR_ITER: case OP_FORPREP: case OP_FORLOOP:
+        case OP_FOR_ITER: case OP_FOR_NEXT: case OP_FORPREP: case OP_FORLOOP:
             jump_count_++; /* a data word that happens to look like one only makes callers more conservative */
             break;
         default:
@@ -423,6 +423,13 @@ namespace zen
         int word2_offset = func_->code_count;
         emit(0, line); /* placeholder word2: jump offset */
         return word2_offset;
+    }
+
+    void Emitter::emit_for_next(int a, int b, int body_start, int line)
+    {
+        last_op_start_ = emit(ZEN_ENCODE(OP_FOR_NEXT, a, b, 0), line);
+        int word2_offset = func_->code_count;
+        emit((uint32_t)(int32_t)(body_start - (word2_offset + 1)), line);
     }
 
     void Emitter::patch_for_iter(int word2_offset)

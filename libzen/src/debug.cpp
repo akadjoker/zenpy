@@ -124,6 +124,7 @@ namespace zen
         "JMPIFNOTNIL",
         "JMPIFEQNIL",
         "JMPIFNEQNIL",
+        "FOR_NEXT",
     };
 
     const char *opcode_name(OpCode op)
@@ -523,6 +524,15 @@ namespace zen
             break;
 
         /* === Iteration === */
+        case OP_FOR_NEXT:
+        {
+            int32_t joff = (int32_t)func->code[offset + 1];
+            printf("if next(R[%d]) -> R[%d]: -> %04d", b, a, offset + 2 + joff);
+            printf("\n");
+            printf("   |  %04d  %-16s", offset + 1, "(jump-offset)");
+            printf("%d", joff);
+            return offset + 2;
+        }
         case OP_FOR_ITER:
         {
             /* 2-word: word2 = signed jump offset (full int32_t, not sBx) */

@@ -57,8 +57,15 @@ namespace zen
         advance();
         Token token = previous_;
 
-        /* Prefix */
-        int reg = prefix_rule(token, dest);
+        /* Prefix. A local that is the left operand of an operator, or the
+        ** object of a field/subscript access, is read where it lives: the
+        ** operator or access that follows writes `dest` itself, so copying
+        ** the local into `dest` first would only add a MOVE (and lose the
+        ** local's static type on the way). */
+        int prefix_dest = dest;
+        if (dest >= 0 && token.type == TOK_IDENTIFIER && local_operand_reads_in_place(token))
+            prefix_dest = -1;
+        int reg = prefix_rule(token, prefix_dest);
         if (had_error_)
             return reg;
         last_expr_ctor_valid_ = false;
@@ -1027,6 +1034,39 @@ namespace zen
     ** postfix chain never lets anything else observe the intermediate
     ** register by name in between: each link hands its result straight to
     ** the next as an explicit operand, instruction after instruction. */
+    bool Compiler::local_operand_reads_in_place(const Token &name) const
+    {
+        int reg = -1;
+        for (int i = state_->local_count - 1; i >= 0; i--)
+        {
+            if (identifiers_equal(state_->locals[i].name, name))
+            {
+                /* A captured local can be rebound by a call made while
+                ** evaluating the right operand; Python's left-to-right
+                ** evaluation must then see the earlier value, so that one
+                ** keeps its copy. */
+                if (state_->locals[i].captured)
+                    return false;
+                reg = state_->locals[i].reg;
+                break;
+            }
+        }
+        if (reg < 0)
+            return false;
+        switch (current_.type)
+        {
+        case TOK_PLUS: case TOK_MINUS: case TOK_STAR: case TOK_SLASH: case TOK_DSLASH:
+        case TOK_PERCENT: case TOK_DSTAR:
+        case TOK_LT: case TOK_GT: case TOK_LTEQ: case TOK_GTEQ: case TOK_EQEQ: case TOK_BANGEQ:
+        case TOK_AMP: case TOK_PIPE: case TOK_CARET: case TOK_LSHIFT: case TOK_RSHIFT:
+        case TOK_IS: case TOK_IN:
+        case TOK_DOT: case TOK_LBRACKET:
+            return true;
+        default:
+            return false;
+        }
+    }
+
     bool Compiler::chain_continues() const
     {
         return current_.type == TOK_DOT || current_.type == TOK_LPAREN ||

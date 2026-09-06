@@ -68,6 +68,7 @@ namespace zen
 
         /* --- FOR_ITER (2-word: word1=ABC, word2=jump offset) --- */
         int emit_for_iter(int a, int b, int line); /* returns offset of word2 for patching */
+        void emit_for_next(int a, int b, int body_start, int line); /* word2 = back offset */
         void patch_for_iter(int word2_offset);     /* patches word2 with jump distance */
 
         /* --- Fused global call (2-word: CALLGLOBAL + global_idx) --- */

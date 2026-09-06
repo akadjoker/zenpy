@@ -584,7 +584,7 @@ namespace zen
     ip = frame->ip;                                 \
     R = frame->base;                                \
     K = frame->func->constants;                     \
-    UV = frame->closure ? frame->closure->upvalues : nullptr
+    UV = frame->closure->upvalues /* every frame the VM pushes carries its closure */
 
 #define SAVE_IP() frame->ip = ip
 
@@ -735,6 +735,7 @@ namespace zen
             &&lbl_OP_JMPIFNOTNIL,
             &&lbl_OP_JMPIFEQNIL,
             &&lbl_OP_JMPIFNEQNIL,
+            &&lbl_OP_FOR_NEXT,
         };
 
 #ifdef ZEN_OPCODE_PROFILE
@@ -2791,6 +2792,131 @@ namespace zen
             {
                 RT_ERROR("'for' requires an iterable (array, string, or generator)");
             }
+            DISPATCH();
+        }
+
+        CASE(OP_FOR_NEXT)
+        {
+            uint32_t i = *ip;
+            int32_t offset = (int32_t)ip[1]; /* word2 = signed jump */
+            ip += 2;
+
+            int a = ZEN_A(i);
+            int b = ZEN_B(i);
+            Value iterable = R[b];
+
+            /* Arrays first: what nearly every `for x in ...` walks. */
+            if (__builtin_expect(is_array(iterable), 1))
+            {
+                ObjArray *arr = as_array(iterable);
+                int32_t idx = R[b + 1].as.integer;
+                if (idx < arr_count(arr))
+                {
+                    R[a] = arr->data[idx];
+                    R[b + 1] = val_int(idx + 1);
+                    ip += offset;
+                }
+                DISPATCH();
+            }
+
+            if (is_fiber(iterable))
+            {
+                ObjFiber *target = as_fiber(iterable);
+                if (target->state == FIBER_DONE)
+                {
+                    DISPATCH(); /* done: fall through to the code after the loop */
+                }
+                if (target->state == FIBER_RUNNING)
+                {
+                    RT_ERROR("cannot iterate running fiber");
+                }
+
+                /* Resume the fiber */
+                target->transfer_value = val_nil();
+                target->caller = fiber;
+                target->state = FIBER_RUNNING;
+                fiber->state = FIBER_SUSPENDED;
+                current_fiber_ = target;
+
+                if (target->yield_dest >= 0)
+                {
+                    CallFrame &tf = target->frames[target->frame_count - 1];
+                    Value *target_regs = tf.base;
+                    target_regs[target->yield_dest] = val_nil();
+                    target->yield_dest = -1;
+                }
+
+                ++fiber_depth_;
+                SAVE_IP();
+                execute(target);
+                --fiber_depth_;
+
+                fiber->state = FIBER_RUNNING;
+                current_fiber_ = fiber;
+
+                if (had_error_ || target->state == FIBER_ERROR)
+                {
+                    return;
+                }
+
+                LOAD_STATE();
+
+                if (target->state == FIBER_DONE)
+                {
+                    DISPATCH(); /* done: fall through to the code after the loop */
+                }
+                R[a] = target->transfer_value;
+            }
+            else if (is_array(iterable))
+            {
+                ObjArray *arr = as_array(iterable);
+                int32_t idx = R[b + 1].as.integer;
+                if (idx >= arr_count(arr))
+                {
+                    DISPATCH(); /* done: fall through to the code after the loop */
+                }
+                R[a] = arr->data[idx];
+                R[b + 1] = val_int(idx + 1);
+            }
+            else if (is_range(iterable))
+            {
+                ObjRange *rng = as_range(iterable);
+                int64_t idx = R[b + 1].as.integer;
+                int64_t cur = rng->start + idx * rng->step;
+                if (rng->step > 0 ? cur >= rng->stop : cur <= rng->stop)
+                {
+                    DISPATCH(); /* done: fall through to the code after the loop */
+                }
+                R[a] = val_int(cur);
+                R[b + 1] = val_int(idx + 1);
+            }
+            else if (is_string(iterable))
+            {
+                /* String iteration: yield each character as a 1-char string */
+                const char *chars = safe_string_chars(iterable);
+                int len = safe_string_len(iterable);
+                int32_t idx = R[b + 1].as.integer;
+                
+                if (idx >= len)
+                {
+                    DISPATCH(); /* done: fall through to the code after the loop */
+                }
+                
+                /* Create a single-character string */
+                ObjString *char_str = new_string(&gc_, chars + idx, 1);
+                R[a] = val_obj((Obj *)char_str);
+                R[b + 1] = val_int(idx + 1);
+            }
+            else if (is_map(iterable))
+            {
+                /* Map/dict iteration not yet implemented */
+                RT_ERROR("'for' on dicts requires calling .items(), .keys(), or .values()");
+            }
+            else
+            {
+                RT_ERROR("'for' requires an iterable (array, string, or generator)");
+            }
+            ip += offset; /* next element in R[a]: back to the body */
             DISPATCH();
         }
 

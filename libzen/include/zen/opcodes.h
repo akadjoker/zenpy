@@ -225,6 +225,14 @@ namespace zen
         OP_JMPIFNOTNIL, /* if R[A] is not None:  pc += sBx  (`x is None:`)     */
         OP_JMPIFEQNIL,  /* if R[A] == None:      pc += sBx  (`x != None:`)     */
         OP_JMPIFNEQNIL, /* if R[A] != None:      pc += sBx  (`x == None:`)     */
+
+        /* --- for-each step at the bottom of the loop (2-word) ---
+        ** word1: A = loop variable, B = iterable (R[B+1] is the cursor);
+        ** word2: signed offset back to the body. If R[B] has a next element
+        ** it goes to R[A] and pc += offset; otherwise fall through. The loop
+        ** is entered by a JMP to this instruction, so one dispatch per
+        ** iteration replaces FOR_ITER + JMP. */
+        OP_FOR_NEXT,
     };
 
 /* Encode/Decode — ABC format */

@@ -1802,11 +1802,13 @@ namespace zen
         loop.continue_forward = false;
         loop.scope_depth = state_->scope_depth;
 
+        /* The step lives at the bottom (OP_FOR_NEXT): enter through a jump
+        ** to it, which yields the first element or leaves at once. One
+        ** dispatch per iteration instead of FOR_ITER + JMP. */
+        loop.continue_forward = true;
+        int entry_jump = state_->emitter.emit_jump(OP_JMP, 0, previous_.line);
         int loop_start = state_->emitter.current_offset();
         loop.start_offset = loop_start;
-
-        /* FOR_ITER: R[var_reg] = next(R[iter_reg]); if done → exit */
-        int exit_jump = state_->emitter.emit_for_iter(var_reg, iter_reg, previous_.line);
 
         /* Tuple unpack: R[var_reg] is an array — extract into individual locals */
         if (var_count > 1)
@@ -1826,11 +1828,11 @@ namespace zen
         /* Body */
         colon_block();
 
-        /* Loop back */
-        state_->emitter.emit_loop(loop_start, 0, previous_.line);
-
-        /* Patch exit */
-        state_->emitter.patch_for_iter(exit_jump);
+        /* `continue` and the loop entry both land on the step. */
+        for (int i = 0; i < loop.continue_count; i++)
+            state_->emitter.patch_jump(loop.continues[i]);
+        state_->emitter.patch_jump(entry_jump);
+        state_->emitter.emit_for_next(var_reg, iter_reg, loop_start, previous_.line);
 
         /* Patch breaks */
         for (int i = 0; i < loop.break_count; i++)

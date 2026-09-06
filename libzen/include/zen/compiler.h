@@ -294,6 +294,11 @@ namespace zen
         ** why this lets a call adjourn its own move-into-dest to whichever
         ** link in the chain turns out to be the last one. */
         bool chain_continues() const;
+        /* True when the identifier about to be read is an uncaptured local
+        ** and the token after it is a binary operator, `.` or `[`: the
+        ** operator/access writes `dest` itself and may read the local in
+        ** place, so no copy into `dest` is needed first. */
+        bool local_operand_reads_in_place(const Token &name) const;
         int call_expr(int callee, int dest);
         int generic_call_expr(int callee, int dest);
         int dot_expr(int obj, int dest, bool can_assign);

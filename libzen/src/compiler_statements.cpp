@@ -792,6 +792,11 @@ namespace zen
         if (class_has_parent_)
             state_->emitter.emit_abc(OP_CLASSFLATTEN, class_reg, 0, 0, previous_.line);
 
+        /* Game-facing classes are closed after their declaration. This
+        ** prevents runtime method replacement from invalidating the static
+        ** assumptions used by OP_INVOKE_VT. */
+        state_->emitter.emit_abc(OP_CLASSSEAL, class_reg, 0, 0, previous_.line);
+
         free_reg(class_reg);
 
         /* Save the completed class field table for potential subclasses */
@@ -1231,9 +1236,23 @@ namespace zen
                             int val = expression(local);
                             if (val != local) emit_move(local, val);
                         }
+                        else if (state_->parent != nullptr && !is_declared_global(name_tok))
+                        {
+                            /* An annotation does not change Python's local
+                            ** binding rule. `x: Type = expr` inside a
+                            ** function must create the same function-local
+                            ** x as `x = expr`, not write a global every time
+                            ** through a hot loop. */
+                            int local_reg = add_local(name_tok);
+                            state_->locals[state_->local_count - 1].depth = 1;
+                            if (has_simple_type)
+                                set_local_type_hint(local_reg, type_tok);
+                            int val = expression(local_reg);
+                            if (val != local_reg) emit_move(local_reg, val);
+                        }
                         else
                         {
-                        int gidx = find_or_add_global(name_tok.start, name_tok.length);
+                            int gidx = find_or_add_global(name_tok.start, name_tok.length);
                             if (has_simple_type)
                                 set_global_type_hint(gidx, type_tok);
                             int val = expression(-1);

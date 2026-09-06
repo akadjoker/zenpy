@@ -1400,12 +1400,15 @@ namespace zen
         const FuncSig *method_sig = method_signature(obj, field);
         int native_generic_arity = 0;
         bool is_native_generic = false;
+        const char *receiver_class_name = nullptr;
+        int32_t receiver_class_len = 0;
+        const bool receiver_has_static_class =
+            receiver_static_class(obj, receiver_class_name, receiver_class_len);
         if (!method_sig)
         {
-            const char *cls_name = nullptr;
-            int32_t cls_len = 0;
-            if (receiver_static_class(obj, cls_name, cls_len))
-                is_native_generic = native_generic_method_arity(cls_name, cls_len, field, native_generic_arity);
+            if (receiver_has_static_class)
+                is_native_generic = native_generic_method_arity(receiver_class_name, receiver_class_len,
+                                                                  field, native_generic_arity);
         }
         bool method_is_generic = method_sig || is_native_generic;
 
@@ -1535,9 +1538,25 @@ namespace zen
                 int nargs = argument_list(base, 0, sig);
                 consume(TOK_RPAREN, "Expected ')' after arguments.");
 
-                /* 2-word instruction: OP_INVOKE + name constant */
-                state_->emitter.emit_abc(OP_INVOKE, base, nargs, 1, field.line);
-                state_->emitter.emit((uint32_t)((sel << 16) | (name_ki & 0xFFFF)), field.line);
+                /* A call whose receiver has a declared class (including
+                   `self`) can use its selector slot directly. Classes are
+                   closed after their definition, so this is stable; retain
+                   OP_INVOKE for arrays, maps and unknown values. */
+                /* `method_sig` exists for ordinary methods too: it is also
+                ** used to parse keyword arguments. Only a declaration with
+                ** actual type parameters needs OP_INVOKE_GENERIC; those are
+                ** the calls OP_INVOKE_VT cannot represent. */
+                const bool method_has_type_params =
+                    (method_sig && method_sig->generic_count > 0) || is_native_generic;
+                if (receiver_has_static_class && !method_has_type_params && sel <= 255)
+                {
+                    state_->emitter.emit_abc(OP_INVOKE_VT, base, nargs, sel, field.line);
+                }
+                else
+                {
+                    state_->emitter.emit_abc(OP_INVOKE, base, nargs, 1, field.line);
+                    state_->emitter.emit((uint32_t)((sel << 16) | (name_ki & 0xFFFF)), field.line);
+                }
             }
             else
             {

@@ -656,6 +656,7 @@ namespace zen
             &&lbl_OP_CALL_GENERIC,
             &&lbl_OP_INVOKE_GENERIC,
             &&lbl_OP_CLASSFLATTEN,
+            &&lbl_OP_CLASSSEAL,
         };
 
 #define DISPATCH() goto *dispatch_table[ZEN_OP(*ip)]
@@ -2909,6 +2910,8 @@ namespace zen
             {
                 /* Setting a method on a class object */
                 ObjClass *klass = as_class(receiver);
+                if (klass->sealed)
+                    RT_ERROR("class '%s' is closed; methods cannot be changed at runtime", klass->name->chars);
                 map_set(&gc_, klass->methods, val_obj((Obj *)name), val);
                 /* Fill operator_slots for dunder methods (__add__, __eq__, etc.) */
                 {
@@ -3868,9 +3871,14 @@ namespace zen
             uint8_t arg_count = ZEN_B(i);
             uint8_t slot = ZEN_C(i);
 
-            ObjInstance *inst = as_instance(R[base]);
+            Value receiver = R[base];
+            if (!is_instance(receiver))
+                RT_ERROR("cannot invoke statically-resolved method on %s", val_type_str(receiver));
+            ObjInstance *inst = as_instance(receiver);
             ObjClass *klass = inst->klass;
-            Value mval = klass->vtable[slot];
+            Value mval = slot < klass->vtable_size ? klass->vtable[slot] : val_nil();
+            if (is_nil(mval))
+                RT_ERROR("'%s' has no method in vtable slot %d", klass->name->chars, slot);
 
             /* Mark string args as shared — matches OP_CALL behaviour */
             for (int ai = 0; ai < arg_count; ai++) {
@@ -3883,6 +3891,24 @@ namespace zen
             {
                 ObjClosure *cl = as_closure(mval);
                 ObjFunc *fn = cl->func;
+                if (fn->generic_arity > 0)
+                    RT_ERROR("'%s' generic method requires type arguments", klass->name->chars);
+                if (fn->arity < 0)
+                {
+                    int min_args = (-fn->arity) - 1;
+                    if (arg_count < min_args)
+                        RT_ERROR("%s method expects at least %d args but got %d", klass->name->chars, min_args, arg_count);
+                }
+                else if (fn->default_count > 0)
+                {
+                    int required = fn->arity - fn->default_count;
+                    if (arg_count < required || arg_count > fn->arity)
+                        RT_ERROR("%s method expects %d..%d args but got %d", klass->name->chars, required, fn->arity, arg_count);
+                }
+                else if (arg_count != fn->arity)
+                {
+                    RT_ERROR("%s method expects %d args but got %d", klass->name->chars, fn->arity, arg_count);
+                }
                 if (fiber->frame_count >= kMaxFrames)
                 {
                     RT_ERROR("stack overflow");
@@ -3898,21 +3924,41 @@ namespace zen
                 new_frame->ret_reg = base;
                 new_frame->ret_count = 1;
                 fiber->stack_top = new_frame->base + fn->num_regs;
-                clear_new_regs(new_frame->base, 1 + arg_count, fn->num_regs);
+
+                if (fn->arity < 0)
+                {
+                    int min_args = (-fn->arity) - 1;
+                    int extra = arg_count - min_args;
+                    gc_pause(&gc_);
+                    ObjArray *arr = new_array(&gc_);
+                    if (extra > 0)
+                        array_push_n(&gc_, arr, new_frame->base + 1 + min_args, extra);
+                    new_frame->base[1 + min_args] = val_obj((Obj *)arr);
+                    gc_resume(&gc_);
+                    fiber->stack_top = new_frame->base + fn->num_regs;
+                }
+                else if (fn->default_count > 0 && arg_count < fn->arity)
+                {
+                    int required = fn->arity - fn->default_count;
+                    for (int di = arg_count; di < fn->arity; di++)
+                        new_frame->base[1 + di] = fn->defaults[di - required];
+                }
+
+                int used = 1 + (fn->arity < 0 ? -fn->arity : fn->arity);
+                clear_new_regs(new_frame->base, used, fn->num_regs);
                 LOAD_STATE();
                 DISPATCH();
             }
             else if (is_native(mval))
             {
                 ObjNative *nat = as_native(mval);
+                if (nat->generic_arity > 0)
+                    RT_ERROR("'%s' generic method requires type arguments", klass->name->chars);
                 /* ClassBuilder convention: args[-1]=self, args[0..n-1]=arguments */
                 int nret = call_native(this, nat, &R[base + 1], arg_count);
-                if (nret > 0)
-                    R[base] = R[base + 1];
-                else if (nret == 0)
-                    R[base] = val_nil();
-                else
+                if (nret < 0)
                     RT_ERROR("native method returned error");
+                copy_native_results(&R[base], &R[base + 1], nret, 1);
             }
             else
             {
@@ -4224,6 +4270,13 @@ namespace zen
                         klass->vtable[si] = p->vtable[si];
                 }
             }
+            NEXT();
+        }
+
+        CASE(OP_CLASSSEAL)
+        {
+            uint32_t i = *ip;
+            as_class(R[ZEN_A(i)])->sealed = true;
             NEXT();
         }
 

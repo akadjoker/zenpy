@@ -1377,6 +1377,7 @@ namespace zen
             }
         }
         vm_->def_global(klass_->name->chars, val_obj((Obj *)klass_));
+        klass_->sealed = true;
         gc_resume(&vm_->gc_);
         return klass_;
     }

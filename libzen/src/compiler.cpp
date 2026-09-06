@@ -1285,22 +1285,23 @@ namespace zen
         ** the same register has no such name and must not borrow one. */
         if (!pending_receiver_valid_)
             return false;
-        /* Exclude anything that's a local OR an upvalue (a local captured
-        ** from an enclosing function) in ANY enclosing scope — not just the
-        ** current one. Without the upvalue check, a closure reading a
-        ** captured outer local named e.g. `c` would fall through to the
-        ** GLOBAL type-hint table, and an unrelated global also named `c`
-        ** (with its own annotation) would be misattributed to this upvalue,
-        ** since resolve_upvalue()/add_upvalue() are side-effecting (they'd
-        ** register a real capture) and this is a read-only "does this name
-        ** exist as a local anywhere up the chain" query — walking
-        ** CompilerState::locals[] by hand instead. */
+        /* A bare receiver can be an upvalue. Find the nearest matching local
+        ** in the lexical chain without calling resolve_upvalue() (which has
+        ** side effects). Its annotation remains true after the closure has
+        ** captured it; importantly, an unannotated nearer local still
+        ** shadows a similarly named annotated global. */
         for (CompilerState *s = state_; s != nullptr; s = s->parent)
         {
             for (int i = s->local_count - 1; i >= 0; i--)
             {
                 if (identifiers_equal(s->locals[i].name, pending_receiver_))
-                    return false; /* local or captured upvalue — not a global */
+                {
+                    if (!s->locals[i].has_type_hint)
+                        return false;
+                    name = s->locals[i].type_hint.start;
+                    len = s->locals[i].type_hint.length;
+                    return true;
+                }
             }
         }
         char buf[256];

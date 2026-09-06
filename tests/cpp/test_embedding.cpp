@@ -1106,6 +1106,30 @@ upvalue_result = outer()
 }
 
 /* =========================================================
+** TEST 14: Script classes are closed after their declaration
+** ========================================================= */
+static void test_closed_script_class()
+{
+    printf("\n[Test 14] Closed script classes\n");
+
+    VM vm;
+    vm.open_lib_globals(&zen_lib_base);
+
+    TEST("runtime method replacement is rejected after class declaration");
+    bool compiled = run_source(vm, R"(
+class Locked:
+    def value(self):
+        return 1
+
+def replacement(x):
+    return 2
+
+Locked.value = replacement
+)");
+    CHECK(compiled && vm.had_error(), "expected a closed-class runtime error");
+}
+
+/* =========================================================
 ** MAIN
 ** ========================================================= */
 int main()
@@ -1125,6 +1149,7 @@ int main()
     test_run_from_inside_script();
     test_resume_fiber_error_handling();
     test_generic_native_method();
+    test_closed_script_class();
 
     printf("\n========================================\n");
     printf("Results: %d passed, %d failed\n", g_tests_passed, g_tests_failed);

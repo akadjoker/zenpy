@@ -113,6 +113,7 @@ namespace zen
         "CALL_GENERIC",
         "INVOKE_GENERIC",
         "CLASSFLATTEN",
+        "CLASSSEAL",
     };
 
     const char *opcode_name(OpCode op)
@@ -694,6 +695,11 @@ namespace zen
         case OP_CLASSFLATTEN:
         {
             printf("R[%d].flatten_vtable_from_parent()", a);
+            break;
+        }
+        case OP_CLASSSEAL:
+        {
+            printf("R[%d].seal()", a);
             break;
         }
 

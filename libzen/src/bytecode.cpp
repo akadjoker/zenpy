@@ -1165,6 +1165,9 @@ namespace
         }
         klass->persistent = persistent != 0;
         klass->constructable = constructable != 0;
+        /* Bytecode stores an already completed class definition. Keep the
+        ** same fixed-layout contract as a source declaration. */
+        klass->sealed = true;
         return klass;
     }
 

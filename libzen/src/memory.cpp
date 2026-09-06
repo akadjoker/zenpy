@@ -1374,6 +1374,7 @@ namespace zen
         cls->native_dtor = nullptr;
         cls->persistent = parent ? parent->persistent : false;
         cls->constructable = true;
+        cls->sealed = false;
         /* Allocate methods map AFTER all fields are safe for GC traversal */
         cls->methods = new_map(gc);
         return cls;

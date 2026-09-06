@@ -572,6 +572,10 @@ namespace zen
         NativeClassDtor native_dtor; /* called on GC free or explicit destroy (NULL = nop) */
         bool persistent;             /* true = instances never collected by GC */
         bool constructable;          /* false = script cannot call ClassName(), only C++ can */
+        /* A class becomes immutable once its declaration/builder finishes.
+        ** This is a deliberate engine-VM contract: method layout is fixed
+        ** before gameplay starts, which lets compiled call sites use slots. */
+        bool sealed;
     };
 
     struct ObjInstance

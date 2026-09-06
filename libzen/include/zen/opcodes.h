@@ -193,6 +193,10 @@ namespace zen
         ** equivalent native-class path this mirrors. No-op if R[A] has no
         ** parent or the parent's vtable is empty. */
         OP_CLASSFLATTEN,
+
+        /* Marks a completed class immutable. Emitted once at the end of a
+        ** script class body; ClassBuilder::end() does the native equivalent. */
+        OP_CLASSSEAL,
     };
 
 /* Encode/Decode — ABC format */

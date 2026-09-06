@@ -79,6 +79,20 @@ namespace zen
         void shrink_to(int offset) { if (offset < func_->code_count) func_->code_count = offset; }
         int last_line() const { return last_line_; }
         Instruction instruction_at(int offset) const { return func_->code[offset]; }
+        int line_at(int offset) const { return func_->lines[offset]; }
+        /* Offset of the first word of the most recently emitted instruction
+        ** (multi-word instructions add their data words through emit()
+        ** itself, which leaves this on the head word). So the last emitted
+        ** instruction is single-word iff last_op_start() == current_offset()-1. */
+        int last_op_start() const { return last_op_start_; }
+        /* Number of jump-family instructions emitted so far in this
+        ** function; unchanged across a stretch of code means it is
+        ** straight-line (no branch lands inside or right after it). */
+        int jump_count() const { return jump_count_; }
+        void patch_a_at(int offset, int a)
+        {
+            func_->code[offset] = (func_->code[offset] & 0xFF00FFFFu) | ((uint32_t)(a & 0xFF) << 16);
+        }
         void rewrite_opcode_at(int offset, OpCode new_op)
         {
             func_->code[offset] = (func_->code[offset] & 0x00FFFFFF) | ((uint32_t)new_op << 24);
@@ -100,6 +114,8 @@ namespace zen
         GC *gc_;
         ObjFunc *func_; /* func em construção */
         int last_line_;
+        int last_op_start_;
+        int jump_count_;
         char escape_error_[128] = {};
     };
 

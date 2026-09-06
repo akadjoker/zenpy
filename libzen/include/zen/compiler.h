@@ -406,6 +406,19 @@ namespace zen
         int alloc_reg();
         void free_reg(int reg);
         void emit_move(int dst, int src);
+        bool is_local_reg(int reg) const;
+        /* `dst = <expr>` where the expression's value sits in temporary
+        ** `src`: instead of a MOVE, make the instruction that produced the
+        ** value write `dst` directly. Only when that instruction is the
+        ** single-word last one of a straight-line RHS (no branch can reach
+        ** past it with the value elsewhere) and is a pure producer that
+        ** reads its operands before writing A. Returns true if done. */
+        bool retarget_last_producer(int rhs_start, int jumps_before, int src, int dst);
+        /* Branch-on-condition for if/while: fuses a trailing LT/LE into the
+        ** two-word compare-and-jump. Returns the offset to patch; `fused`
+        ** says which patch routine to use. */
+        int emit_cond_jump(int cond, bool &fused);
+        void patch_cond_jump(int offset, bool fused);
 
         /* --- Global resolution (compile-time lookup) --- */
         int require_global_slot(const char *name, int len);

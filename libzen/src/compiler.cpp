@@ -335,6 +335,87 @@ namespace zen
             state_->emitter.emit_abc(OP_MOVE, dst, src, 0, previous_.line);
     }
 
+    bool Compiler::is_local_reg(int reg) const
+    {
+        for (int i = 0; i < state_->local_count; i++)
+            if (state_->locals[i].reg == reg)
+                return true;
+        return false;
+    }
+
+    bool Compiler::retarget_last_producer(int rhs_start, int jumps_before, int src, int dst)
+    {
+        if (src == dst)
+            return true;
+        Emitter &e = state_->emitter;
+        int off = e.current_offset() - 1;
+        if (off < rhs_start)
+            return false; /* the RHS emitted nothing (a bare local) */
+        if (e.last_op_start() != off)
+            return false; /* last instruction is multi-word: its tail is data */
+        if (e.jump_count() != jumps_before)
+            return false; /* control flow inside the RHS */
+        if (is_local_reg(src))
+            return false; /* the value lives in a variable, not a temporary */
+        Instruction ins = e.instruction_at(off);
+        if (ZEN_A(ins) != src)
+            return false;
+        switch (ZEN_OP(ins))
+        {
+        /* Every one of these reads its operands, then stores R[A] once. */
+        case OP_MOVE: case OP_LOADK: case OP_LOADI:
+        case OP_GETGLOBAL: case OP_GETUPVAL:
+        case OP_ADD: case OP_SUB: case OP_MUL: case OP_DIV: case OP_IDIV: case OP_MOD: case OP_POW:
+        case OP_ADDI: case OP_SUBI: case OP_NEG:
+        case OP_BAND: case OP_BOR: case OP_BXOR: case OP_BNOT: case OP_SHL: case OP_SHR:
+        case OP_EQ: case OP_LT: case OP_LE: case OP_NOT:
+        case OP_GETFIELD_IDX: case OP_GETINDEX: case OP_CONCAT: case OP_LEN:
+            break;
+        default:
+            return false;
+        }
+        e.patch_a_at(off, dst);
+        if (typed_subscript_reg_ == src)
+            typed_subscript_reg_ = -1;
+        if (typed_call_reg_ == src)
+            typed_call_reg_ = -1;
+        return true;
+    }
+
+    int Compiler::emit_cond_jump(int cond, bool &fused)
+    {
+        Emitter &e = state_->emitter;
+        fused = false;
+        int off = e.current_offset() - 1;
+        if (off >= 0 && e.last_op_start() == off)
+        {
+            Instruction cmp = e.instruction_at(off);
+            if (ZEN_A(cmp) == cond && (ZEN_OP(cmp) == OP_LT || ZEN_OP(cmp) == OP_LE) &&
+                !is_local_reg(cond))
+            {
+                /* The comparison's boolean was only ever going to be
+                ** branched on: drop it for the fused compare-and-jump,
+                ** whose handler keeps string and overloaded-operator
+                ** semantics. */
+                bool le = ZEN_OP(cmp) == OP_LE;
+                int b = ZEN_B(cmp), c = ZEN_C(cmp);
+                int line = e.line_at(off);
+                e.shrink_to(off);
+                fused = true;
+                return le ? e.emit_le_jmpifnot(b, c, line) : e.emit_lt_jmpifnot(b, c, line);
+            }
+        }
+        return e.emit_jump(OP_JMPIFNOT, cond, previous_.line);
+    }
+
+    void Compiler::patch_cond_jump(int offset, bool fused)
+    {
+        if (fused)
+            state_->emitter.patch_fused_jump(offset);
+        else
+            state_->emitter.patch_jump(offset);
+    }
+
     /* =========================================================
     ** Scope management
     ** ========================================================= */

@@ -1374,8 +1374,11 @@ namespace zen
                         ** Use dest=-1 because the RHS may reference this same local
                         ** (e.g. `a = a + 1` or `b = temp + b`). Using dest=local would
                         ** overwrite the local before the RHS finishes reading it. */
+                        int rhs_start = state_->emitter.current_offset();
+                        int jumps_before = state_->emitter.jump_count();
                         int val = expression(-1);
-                        if (val != local) emit_move(local, val);
+                        if (!retarget_last_producer(rhs_start, jumps_before, val, local))
+                            emit_move(local, val);
                         free_reg(val);
                         infer_assigned_class_local(local);
                     }
@@ -1421,7 +1424,8 @@ namespace zen
     {
         /* Condition */
         int cond = expression(-1);
-        int then_jump = state_->emitter.emit_jump(OP_JMPIFNOT, cond, previous_.line);
+        bool then_fused = false;
+        int then_jump = emit_cond_jump(cond, then_fused);
         free_reg(cond);
 
         /* Then block */
@@ -1429,13 +1433,14 @@ namespace zen
 
         /* Jump over else/elif */
         int else_jump = state_->emitter.emit_jump(OP_JMP, 0, previous_.line);
-        state_->emitter.patch_jump(then_jump);
+        patch_cond_jump(then_jump, then_fused);
 
         /* elif chains */
         while (match(TOK_ELIF))
         {
             int elif_cond = expression(-1);
-            int elif_jump = state_->emitter.emit_jump(OP_JMPIFNOT, elif_cond, previous_.line);
+            bool elif_fused = false;
+            int elif_jump = emit_cond_jump(elif_cond, elif_fused);
             free_reg(elif_cond);
 
             colon_block();
@@ -1443,7 +1448,7 @@ namespace zen
             /* Patch previous else_jump to here, set new one */
             state_->emitter.patch_jump(else_jump);
             else_jump = state_->emitter.emit_jump(OP_JMP, 0, previous_.line);
-            state_->emitter.patch_jump(elif_jump);
+            patch_cond_jump(elif_jump, elif_fused);
         }
 
         /* else */
@@ -1555,41 +1560,67 @@ namespace zen
 
         int loop_start = state_->emitter.current_offset();
         loop.start_offset = loop_start;
+        int jumps_at_start = state_->emitter.jump_count();
+        int regs_at_start = state_->next_reg;
 
         /* Condition */
         int cond = expression(-1);
-        /* A comparison used solely as a while condition need not materialise
-        ** its boolean just to branch on it. This is a general lowering of
-        ** `while a < b` / `while a <= b`; the fused VM handler preserves
-        ** string and overloaded-comparison behavior as well. */
-        int exit_jump;
+
+        /* Loop-invariant literal: `while i < 5000000` reloads the constant
+        ** on every iteration. When the condition is exactly
+        **     [one single-word load of the left operand, or nothing]
+        **     LOADK/LOADI  tmp
+        **     LT/LE/EQ     cond, left, tmp
+        ** load the literal once before the loop instead and keep its
+        ** register reserved for the body. Same code, one dispatch fewer
+        ** per iteration. */
+        int hoisted_reg = -1;
+        {
+            Emitter &e = state_->emitter;
+            int off = e.current_offset() - 1;
+            int ncond = e.current_offset() - loop_start;
+            if ((ncond == 2 || ncond == 3) && e.jump_count() == jumps_at_start && e.last_op_start() == off)
+            {
+                Instruction cmp = e.instruction_at(off);
+                Instruction ld = e.instruction_at(off - 1);
+                OpCode cop = (OpCode)ZEN_OP(cmp);
+                OpCode lop = (OpCode)ZEN_OP(ld);
+                bool left_ok = true;
+                if (ncond == 3)
+                {
+                    OpCode fop = (OpCode)ZEN_OP(e.instruction_at(loop_start));
+                    left_ok = fop == OP_GETGLOBAL || fop == OP_GETUPVAL || fop == OP_MOVE ||
+                              fop == OP_GETFIELD_IDX || fop == OP_LEN;
+                }
+                if (left_ok && (cop == OP_LT || cop == OP_LE || cop == OP_EQ) && ZEN_A(cmp) == cond &&
+                    (lop == OP_LOADK || lop == OP_LOADI) &&
+                    ZEN_A(ld) == ZEN_C(cmp) && ZEN_B(cmp) != ZEN_C(cmp) && !is_local_reg(ZEN_C(cmp)))
+                {
+                    Instruction first = e.instruction_at(loop_start);
+                    int first_line = e.line_at(loop_start);
+                    int ld_line = e.line_at(off - 1);
+                    int cmp_line = e.line_at(off);
+                    e.shrink_to(loop_start);
+                    if (lop == OP_LOADK)
+                        e.emit_abx(OP_LOADK, ZEN_A(ld), (int)(ld & 0xFFFF), ld_line);
+                    else
+                        e.emit_asbx(OP_LOADI, ZEN_A(ld), ZEN_SBX(ld), ld_line);
+                    loop_start = e.current_offset();
+                    loop.start_offset = loop_start;
+                    if (ncond == 3)
+                        e.emit_abc((OpCode)ZEN_OP(first), ZEN_A(first), ZEN_B(first), ZEN_C(first), first_line);
+                    e.emit_abc(cop, ZEN_A(cmp), ZEN_B(cmp), ZEN_C(cmp), cmp_line);
+                    hoisted_reg = ZEN_C(cmp);
+                }
+            }
+        }
+
         bool fused_compare = false;
-        int compare_offset = state_->emitter.current_offset() - 1;
-        if (compare_offset >= 0)
-        {
-            Instruction compare = state_->emitter.instruction_at(compare_offset);
-            if (ZEN_A(compare) == cond && ZEN_OP(compare) == OP_LT)
-            {
-                state_->emitter.shrink_to(compare_offset);
-                exit_jump = state_->emitter.emit_lt_jmpifnot(ZEN_B(compare), ZEN_C(compare), previous_.line);
-                fused_compare = true;
-            }
-            else if (ZEN_A(compare) == cond && ZEN_OP(compare) == OP_LE)
-            {
-                state_->emitter.shrink_to(compare_offset);
-                exit_jump = state_->emitter.emit_le_jmpifnot(ZEN_B(compare), ZEN_C(compare), previous_.line);
-                fused_compare = true;
-            }
-            else
-            {
-                exit_jump = state_->emitter.emit_jump(OP_JMPIFNOT, cond, previous_.line);
-            }
-        }
-        else
-        {
-            exit_jump = state_->emitter.emit_jump(OP_JMPIFNOT, cond, previous_.line);
-        }
+        int exit_jump = emit_cond_jump(cond, fused_compare);
         free_reg(cond);
+        /* Keep the hoisted literal's register out of the body's reach. */
+        if (hoisted_reg >= 0 && state_->next_reg <= hoisted_reg)
+            state_->next_reg = hoisted_reg + 1;
 
         /* Body */
         colon_block();
@@ -1598,10 +1629,9 @@ namespace zen
         state_->emitter.emit_loop(loop_start, 0, previous_.line);
 
         /* Patch exit */
-        if (fused_compare)
-            state_->emitter.patch_fused_jump(exit_jump);
-        else
-            state_->emitter.patch_jump(exit_jump);
+        patch_cond_jump(exit_jump, fused_compare);
+        if (hoisted_reg >= 0 && state_->next_reg == hoisted_reg + 1)
+            state_->next_reg = regs_at_start;
 
         /* Patch breaks */
         for (int i = 0; i < loop.break_count; i++)
@@ -1821,6 +1851,8 @@ namespace zen
         }
         else
         {
+            int ret_rhs_start = state_->emitter.current_offset();
+            int ret_jumps_before = state_->emitter.jump_count();
             int reg = expression(-1);
 
             /* Tuple return: return a, b, c
@@ -1912,8 +1944,16 @@ namespace zen
             }
             else
             {
+                /* Write the value into R[0] from its producer instead of a
+                ** MOVE — but never ahead of an OP_CLOSE: a captured R[0]
+                ** must be closed over with its own value, not the result. */
+                bool any_captured = false;
+                for (int i = 0; i < state_->local_count; i++)
+                    if (state_->locals[i].captured) any_captured = true;
+                bool placed = !any_captured &&
+                              retarget_last_producer(ret_rhs_start, ret_jumps_before, reg, 0);
                 close_captured_locals();
-                if (reg != 0) emit_move(0, reg);
+                if (!placed && reg != 0) emit_move(0, reg);
                 state_->emitter.emit_abc(OP_RETURN, 0, 1, 0, previous_.line);
             }
         }

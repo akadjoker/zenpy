@@ -1374,10 +1374,30 @@ namespace zen
         /* Method call: obj.method(args) */
         if (check(TOK_LPAREN) || generic_call_ahead(method_is_generic))
         {
-            /* We need a contiguous [receiver, arg1, arg2, ...] block.
-            ** The return value lands in R[base], so if obj is a local we
-            ** must copy it to a fresh register to avoid clobbering the local. */
-            int base = alloc_reg();
+            /* We need a contiguous [receiver, arg1, arg2, ...] block, with
+            ** arguments landing at base+1, base+2, ... — so reusing obj as
+            ** base is only safe when obj is BOTH (a) not a local (the call
+            ** result would clobber it) AND (b) the top of the register
+            ** stack (anything below the top between obj and next_reg is
+            ** still-live state argument placement would overwrite). Case
+            ** (b) is exactly the unnamed temporary a previous call/
+            ** sub-expression just produced with nothing allocated after it
+            ** — the common shape of a chained `x.a().b()` — where reusing
+            ** it in place skips both the MOVE in (obj -> base) and,
+            ** correspondingly, the MOVE out below. Same trick already used
+            ** by logical_and()/logical_or() for their left operand, plus
+            ** the top-of-stack check free_reg() itself relies on. */
+            bool obj_is_local = false;
+            for (int i = 0; i < state_->local_count; i++)
+            {
+                if (state_->locals[i].reg == obj)
+                {
+                    obj_is_local = true;
+                    break;
+                }
+            }
+            bool obj_is_top = (obj == state_->next_reg - 1);
+            int base = (!obj_is_local && obj_is_top) ? obj : alloc_reg();
             if (base != obj)
                 emit_move(base, obj);
             const FuncSig *sig = method_sig;

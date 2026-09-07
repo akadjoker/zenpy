@@ -431,7 +431,7 @@ namespace zen
                 {
                 case TOK_EQEQ:   op = OP_JMPIFNEQNIL; break; /* `if x == None:` skips when x is not None */
                 case TOK_BANGEQ: op = OP_JMPIFEQNIL;  break;
-                case TOK_IS:     op = OP_JMPIFNOTNIL; break;
+                case TOK_IS:     op = c.negated ? OP_JMPIFNIL : OP_JMPIFNOTNIL; break;
                 default: ok = false; break;
                 }
                 if (ok)
@@ -1550,6 +1550,17 @@ namespace zen
         return false;
     }
 
+    void Compiler::skip_nullable_suffix()
+    {
+        if (match(TOK_QMARK))
+            return;
+        if (check(TOK_PIPE))
+        {
+            advance();
+            consume(TOK_NONE, "Expected 'None' after '|' in a type annotation.");
+        }
+    }
+
     void Compiler::set_local_type_hint(int reg, const Token &type_tok)
     {
         for (int i = state_->local_count - 1; i >= 0; i--)
@@ -1724,6 +1735,8 @@ namespace zen
         if (fidx < 0 || fidx >= kMaxClassFields)
             return;
         uint8_t &st = class_field_class_state_[fidx];
+        if (st == 3)
+            return; /* declared in the class body: the annotation wins */
         if (last_expr_ctor_valid_)
         {
             if (st == 0)
@@ -1744,7 +1757,8 @@ namespace zen
             return false;
         if (in_class_ && name_eq(current_class_.start, current_class_.length, cls, cls_len))
         {
-            if (fidx >= class_field_count_ || class_field_class_state_[fidx] != 1)
+            if (fidx >= class_field_count_ ||
+                (class_field_class_state_[fidx] != 1 && class_field_class_state_[fidx] != 3))
                 return false;
             out = class_field_class_[fidx];
             return true;
@@ -1754,7 +1768,7 @@ namespace zen
             const ClassFieldRegistry &r = class_registry_[i];
             if (!name_eq(r.name.start, r.name.length, cls, cls_len))
                 continue;
-            if (fidx >= r.count || r.field_class_state[fidx] != 1)
+            if (fidx >= r.count || (r.field_class_state[fidx] != 1 && r.field_class_state[fidx] != 3))
                 return false;
             out = r.field_class[fidx];
             return true;

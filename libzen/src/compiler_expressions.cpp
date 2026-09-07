@@ -756,6 +756,10 @@ namespace zen
             return reg;
         }
 
+        /* `x is not y`: the `not` belongs to the operator, not to y
+        ** (otherwise it would read as `x is (not y)` and always be False). */
+        const bool is_not = (op.type == TOK_IS) && match(TOK_NOT);
+
         int right_start = state_->emitter.current_offset();
         int right = parse_precedence(get_precedence(op.type) + 1, -1);
         int reg = (dest >= 0) ? dest : alloc_reg();
@@ -807,6 +811,8 @@ namespace zen
                 break;
             case TOK_IS:
                 state_->emitter.emit_abc(OP_IS, reg, lhs, rhs, op.line);
+                if (is_not)
+                    state_->emitter.emit_abc(OP_NOT, reg, reg, 0, op.line);
                 break;
             case TOK_IN:
                 state_->emitter.emit_abc(OP_CONTAINS, reg, lhs, rhs, op.line);
@@ -826,6 +832,7 @@ namespace zen
             last_cmp_.lhs = left;
             last_cmp_.rhs = right;
             last_cmp_.op = op.type;
+            last_cmp_.negated = is_not;
             last_cmp_.imm_kind = lit_kind;
             last_cmp_.imm = lit_imm;
         }
@@ -2254,29 +2261,27 @@ namespace zen
                     if (iter_result != iter_reg)
                         emit_move(iter_reg, iter_result);
 
-                    int idx_reg = alloc_reg();
+                    /* Same loop shape as for_statement: the iterator's index
+                    ** in R[iter_reg+1], OP_FOR_NEXT at the bottom entered by
+                    ** a jump — one dispatch per element instead of LT +
+                    ** JMPIFNOT + GETINDEX + ADDI + JMP, and every iterable
+                    ** FOR_NEXT knows (ranges, strings, generators), not only
+                    ** the indexable ones. */
+                    int idx_reg = alloc_reg(); /* must be iter_reg + 1 */
                     state_->emitter.emit_asbx(OP_LOADI, idx_reg, 0, line);
-
-                    int len_reg = alloc_reg();
-                    state_->emitter.emit_abc(OP_LEN, len_reg, iter_reg, 1, line);
 
                     int var_reg = add_local(var_name);
 
+                    int entry_jump = state_->emitter.emit_jump(OP_JMP, 0, line);
                     int loop_start = state_->emitter.current_offset();
-
-                    int cmp_reg = alloc_reg();
-                    state_->emitter.emit_abc(OP_LT, cmp_reg, idx_reg, len_reg, line);
-                    int exit_jump = state_->emitter.emit_jump(OP_JMPIFNOT, cmp_reg, line);
-                    free_reg(cmp_reg);
-
-                    state_->emitter.emit_abc(OP_GETINDEX, var_reg, iter_reg, idx_reg, line);
 
                     /* Optional `if cond` filter */
                     int filter_jump = -1;
                     if (match(TOK_IF))
                     {
                         int cond = expression(-1);
-                        filter_jump = state_->emitter.emit_jump(OP_JMPIFNOT, cond, line);
+                        bool fused = false;
+                        filter_jump = emit_cond_jump(cond, fused); /* `if x > 0` as one branch */
                         free_reg(cond);
                     }
 
@@ -2303,9 +2308,8 @@ namespace zen
                     if (filter_jump >= 0)
                         state_->emitter.patch_jump(filter_jump);
 
-                    state_->emitter.emit_abc(OP_ADDI, idx_reg, idx_reg, 1, line);
-                    state_->emitter.emit_loop(loop_start, 0, line);
-                    state_->emitter.patch_jump(exit_jump);
+                    state_->emitter.patch_jump(entry_jump);
+                    state_->emitter.emit_for_next(var_reg, iter_reg, loop_start, line);
 
                     end_scope();
                     /* Restore next_reg to just above the result array reg */
@@ -2410,24 +2414,19 @@ namespace zen
                 int ir = parse_precedence(PREC_OR, iter_reg);
                 if (ir != iter_reg)
                     emit_move(iter_reg, ir);
-                int idx_reg = alloc_reg();
+                int idx_reg = alloc_reg(); /* must be iter_reg + 1 (OP_FOR_NEXT) */
                 state_->emitter.emit_asbx(OP_LOADI, idx_reg, 0, line);
-                int len_reg = alloc_reg();
-                state_->emitter.emit_abc(OP_LEN, len_reg, iter_reg, 1, line);
                 int var_reg = add_local(var_name);
 
+                int entry_jump = state_->emitter.emit_jump(OP_JMP, 0, line);
                 int loop_start = state_->emitter.current_offset();
-                int cmp_reg = alloc_reg();
-                state_->emitter.emit_abc(OP_LT, cmp_reg, idx_reg, len_reg, line);
-                int exit_jump = state_->emitter.emit_jump(OP_JMPIFNOT, cmp_reg, line);
-                free_reg(cmp_reg);
-                state_->emitter.emit_abc(OP_GETINDEX, var_reg, iter_reg, idx_reg, line);
 
                 int filter_jump = -1;
                 if (match(TOK_IF))
                 {
                     int cond = expression(-1);
-                    filter_jump = state_->emitter.emit_jump(OP_JMPIFNOT, cond, line);
+                    bool fused = false;
+                    filter_jump = emit_cond_jump(cond, fused);
                     free_reg(cond);
                 }
 
@@ -2454,9 +2453,8 @@ namespace zen
 
                 if (filter_jump >= 0)
                     state_->emitter.patch_jump(filter_jump);
-                state_->emitter.emit_abc(OP_ADDI, idx_reg, idx_reg, 1, line);
-                state_->emitter.emit_loop(loop_start, 0, line);
-                state_->emitter.patch_jump(exit_jump);
+                state_->emitter.patch_jump(entry_jump);
+                state_->emitter.emit_for_next(var_reg, iter_reg, loop_start, line);
                 end_scope();
                 while (match(TOK_NEWLINE))
                 {
@@ -2525,24 +2523,19 @@ namespace zen
             int ir = parse_precedence(PREC_OR, iter_reg);
             if (ir != iter_reg)
                 emit_move(iter_reg, ir);
-            int idx_reg = alloc_reg();
+            int idx_reg = alloc_reg(); /* must be iter_reg + 1 (OP_FOR_NEXT) */
             state_->emitter.emit_asbx(OP_LOADI, idx_reg, 0, line);
-            int len_reg = alloc_reg();
-            state_->emitter.emit_abc(OP_LEN, len_reg, iter_reg, 1, line);
             int var_reg = add_local(var_name);
 
+            int entry_jump = state_->emitter.emit_jump(OP_JMP, 0, line);
             int loop_start = state_->emitter.current_offset();
-            int cmp_reg = alloc_reg();
-            state_->emitter.emit_abc(OP_LT, cmp_reg, idx_reg, len_reg, line);
-            int exit_jump = state_->emitter.emit_jump(OP_JMPIFNOT, cmp_reg, line);
-            free_reg(cmp_reg);
-            state_->emitter.emit_abc(OP_GETINDEX, var_reg, iter_reg, idx_reg, line);
 
             int filter_jump = -1;
             if (match(TOK_IF))
             {
                 int cond = expression(-1);
-                filter_jump = state_->emitter.emit_jump(OP_JMPIFNOT, cond, line);
+                bool fused = false;
+                filter_jump = emit_cond_jump(cond, fused);
                 free_reg(cond);
             }
 
@@ -2564,9 +2557,8 @@ namespace zen
 
             if (filter_jump >= 0)
                 state_->emitter.patch_jump(filter_jump);
-            state_->emitter.emit_abc(OP_ADDI, idx_reg, idx_reg, 1, line);
-            state_->emitter.emit_loop(loop_start, 0, line);
-            state_->emitter.patch_jump(exit_jump);
+            state_->emitter.patch_jump(entry_jump);
+            state_->emitter.emit_for_next(var_reg, iter_reg, loop_start, line);
             end_scope();
             while (match(TOK_NEWLINE))
             {

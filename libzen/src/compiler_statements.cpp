@@ -169,6 +169,8 @@ namespace zen
         Token type_tok = previous_;
         bool simple = !check(TOK_DOT) && !check(TOK_LBRACKET);
         while (match(TOK_DOT)) consume(TOK_IDENTIFIER, "Expected type name.");
+        if (simple)
+            skip_nullable_suffix();
         if (match(TOK_LBRACKET))
         {
             const bool is_array = type_tok.length == 5 && memcmp(type_tok.start, "Array", 5) == 0;
@@ -754,12 +756,59 @@ namespace zen
                 ** place to run code. */
                 advance();
                 Token field_name = previous_;
-                consume(TOK_EQ, "Expected '=' after field name in class body.");
+
+                /* `name: Class`, `name: Class?`, `name: Class | None`, each
+                ** with an optional `= literal`. A class annotation is the
+                ** explicit form of what note_field_class() infers from
+                ** constructors: `self.left.check()` dispatches through the
+                ** vtable and `self.left.item` uses the checked index. Still
+                ** only a hint — a wrong one costs speed, never behaviour. */
+                bool has_field_class = false;
+                Token field_class_tok;
+                if (match(TOK_COLON))
+                {
+                    if (check(TOK_STRING) || check(TOK_FSTRING))
+                    {
+                        advance();
+                    }
+                    else
+                    {
+                        consume(TOK_IDENTIFIER, "Expected type name after ':'.");
+                        field_class_tok = previous_;
+                        has_field_class = !check(TOK_DOT) && !check(TOK_LBRACKET);
+                        while (match(TOK_DOT)) consume(TOK_IDENTIFIER, "Expected type name.");
+                        if (has_field_class)
+                            skip_nullable_suffix();
+                        if (match(TOK_LBRACKET))
+                        {
+                            int depth = 1;
+                            while (depth > 0 && !check(TOK_EOF))
+                            {
+                                if (match(TOK_LBRACKET)) depth++;
+                                else if (match(TOK_RBRACKET)) depth--;
+                                else advance();
+                            }
+                        }
+                    }
+                }
 
                 int literal_ki = -1;
-                if (!class_field_literal(literal_ki))
+                bool has_default = false;
+                if (match(TOK_EQ))
                 {
-                    error("A class body field must be a number, string, True, False or None.");
+                    if (!class_field_literal(literal_ki))
+                    {
+                        error("A class body field must be a number, string, True, False or None.");
+                        while (!check(TOK_NEWLINE) && !check(TOK_DEDENT) && !check(TOK_EOF))
+                            advance();
+                        match(TOK_NEWLINE);
+                        continue;
+                    }
+                    has_default = true;
+                }
+                else if (!has_field_class && !check(TOK_NEWLINE) && !check(TOK_DEDENT))
+                {
+                    error("Expected '=' after field name in class body.");
                     while (!check(TOK_NEWLINE) && !check(TOK_DEDENT) && !check(TOK_EOF))
                         advance();
                     match(TOK_NEWLINE);
@@ -769,11 +818,19 @@ namespace zen
                 const int field_idx = add_class_field(token_string(field_name));
                 if (field_idx < 0)
                     error("Too many fields in class body.");
-                else if (class_field_default_count_ < kMaxClassFields)
+                else
                 {
-                    class_field_defaults_[class_field_default_count_].field_index = field_idx;
-                    class_field_defaults_[class_field_default_count_].const_index = literal_ki;
-                    class_field_default_count_++;
+                    if (has_default && class_field_default_count_ < kMaxClassFields)
+                    {
+                        class_field_defaults_[class_field_default_count_].field_index = field_idx;
+                        class_field_defaults_[class_field_default_count_].const_index = literal_ki;
+                        class_field_default_count_++;
+                    }
+                    if (has_field_class)
+                    {
+                        class_field_class_[field_idx] = field_class_tok;
+                        class_field_class_state_[field_idx] = 3; /* annotated: fixed */
+                    }
                 }
 
                 match(TOK_NEWLINE);
@@ -1240,6 +1297,8 @@ namespace zen
                         advance();
                         has_simple_type = !check(TOK_DOT) && !check(TOK_LBRACKET);
                         while (match(TOK_DOT)) consume(TOK_IDENTIFIER, "Expected type name.");
+                        if (has_simple_type)
+                            skip_nullable_suffix();
                         if (match(TOK_LBRACKET))
                         {
                             /* Only Array[Class] is a VM performance hint.

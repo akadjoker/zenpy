@@ -355,6 +355,11 @@ namespace zen
         ** the type away again (the hint is a promise the annotation makes,
         ** same as any other type hint in this compiler). */
         void set_local_type_hint(int reg, const Token &type_tok);
+        /* After a type name: consume an optional `?` or `| None`. The hint
+        ** stays a plain class hint — checked field/method forms already
+        ** fall back on a None receiver, so nullable adds nothing at run
+        ** time; the annotation is for the reader. */
+        void skip_nullable_suffix();
         void set_global_type_hint(int gidx, const Token &type_tok);
         void set_local_array_element_type(int reg, const Token &type_tok);
         void set_global_array_element_type(int gidx, const Token &type_tok);
@@ -497,7 +502,7 @@ namespace zen
         ** every non-None assignment seen so far agreed. A hint only — its
         ** users (OP_INVOKE_VT, OP_GETFIELD_IDXC) fall back when wrong. */
         Token class_field_class_[kMaxClassFields];
-        uint8_t class_field_class_state_[kMaxClassFields]; /* 0 unknown, 1 known, 2 conflicting */
+        uint8_t class_field_class_state_[kMaxClassFields]; /* 0 unknown, 1 inferred, 2 conflicting, 3 annotated */
 
         /* Values a class body gave its fields ("class A:" then "speed = 5.0").
         ** Held until the body closes so they can be emitted after the run of
@@ -594,6 +599,7 @@ namespace zen
             int lhs;          /* the non-literal operand's register        */
             int rhs;          /* the literal's temporary                   */
             TokenType op;     /* TOK_LT/GT/LTEQ/GTEQ/EQEQ/BANGEQ/IS          */
+            bool negated;     /* `is not` (op == TOK_IS only)               */
             int imm_kind;     /* 1 = int8 literal, 2 = None                 */
             int imm;
         };

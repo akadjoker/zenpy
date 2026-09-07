@@ -25,10 +25,13 @@ sprites = []
 max_x = native.screen_width() - wabbit.width()
 max_y = native.screen_height() - wabbit.height()
 
-def add_sprites(n):
+def add_sprites(n, x, y):
     rand = native.rand
     for _ in range(n):
-        sprites.append(Sprite(wabbit, rand(0, max_x), rand(0, max_y), rand(-250, 250), rand(-250, 250)))
+        if x < 0:
+            sprites.append(Sprite(wabbit, rand(0, max_x), rand(0, max_y), rand(-250, 250), rand(-250, 250)))
+        else:
+            sprites.append(Sprite(wabbit, x, y, rand(-250, 250), rand(-250, 250)))
 
 def update_all(dt):
     for s in sprites:

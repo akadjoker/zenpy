@@ -84,7 +84,7 @@ static bool wren_boot(WrenBoot *b)
     wrenEnsureSlots(b->vm, 1);
     wrenGetVariable(b->vm, "main", "Game", 0);
     b->game = wrenGetSlotHandle(b->vm, 0);
-    b->add = wrenMakeCallHandle(b->vm, "addSprites(_)");
+    b->add = wrenMakeCallHandle(b->vm, "addSprites(_,_,_)");
     b->update = wrenMakeCallHandle(b->vm, "updateAll(_)");
     return true;
 }
@@ -94,6 +94,16 @@ static bool wren_call(WrenBoot *b, WrenHandle *method, double arg)
     wrenEnsureSlots(b->vm, 2);
     wrenSetSlotHandle(b->vm, 0, b->game);
     wrenSetSlotDouble(b->vm, 1, arg);
+    return wrenCall(b->vm, method) == WREN_RESULT_SUCCESS;
+}
+
+static bool wren_call3(WrenBoot *b, WrenHandle *method, double a, double x, double y)
+{
+    wrenEnsureSlots(b->vm, 4);
+    wrenSetSlotHandle(b->vm, 0, b->game);
+    wrenSetSlotDouble(b->vm, 1, a);
+    wrenSetSlotDouble(b->vm, 2, x);
+    wrenSetSlotDouble(b->vm, 3, y);
     return wrenCall(b->vm, method) == WREN_RESULT_SUCCESS;
 }
 
@@ -114,7 +124,7 @@ int main(int argc, char **argv)
     WrenBoot boot = { vm, source, false, nullptr, nullptr, nullptr };
     TexHost host;
     host.ud = &boot;
-    host.add_sprites = [](void *ud, int n) -> bool {
+    host.add_sprites = [](void *ud, int n, double x, double y) -> bool {
         WrenBoot *b = (WrenBoot *)ud;
         if (!b->booted)
         {
@@ -122,7 +132,7 @@ int main(int argc, char **argv)
                 return false;
             b->booted = true;
         }
-        return wren_call(b, b->add, n);
+        return wren_call3(b, b->add, n, x, y);
     };
     host.update_all = [](void *ud, double dt) -> bool { return wren_call((WrenBoot *)ud, ((WrenBoot *)ud)->update, dt); };
 

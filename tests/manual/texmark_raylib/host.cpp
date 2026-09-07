@@ -98,10 +98,14 @@ char *host_read_script(const char *argv0, const char *filename)
 static void usage(const char *prog)
 {
     printf("usage: %s [options]\n"
+           "  (default)     interactive: left click adds --click sprites at the cursor, ESC quits\n"
+           "  --click N     sprites per click (default 500); hold the button to keep adding\n"
+           "  --burst X,Y   add --click sprites at (X,Y) on the first frame (a scripted click)\n"
+           "  --auto        auto-add: +step sprites per frame while fps >= target\n"
            "  --start N     sprites at start (default 1000)\n"
            "  --step N      sprites added per frame while fps >= target (default 200)\n"
            "  --target FPS  auto-add stops once the rolling fps drops below this (default 60)\n"
-           "  --fixed N     run with exactly N sprites, no auto-add\n"
+           "  --fixed N     run with exactly N sprites, no adding\n"
            "  --seconds S   quit after S seconds (default: run until ESC/close)\n"
            "  --size WxH    window size (default 1280x720)\n"
            "  --vsync       enable vsync (default off)\n",
@@ -110,9 +114,10 @@ static void usage(const char *prog)
 
 int host_run(int argc, char **argv, const char *lang, const TexHost *host)
 {
-    int start = 1000, step = 200, fixed = -1;
+    int start = 1000, step = 200, fixed = -1, click = 500;
     double target = 60.0, seconds = 0.0;
-    bool vsync = false;
+    bool vsync = false, auto_mode = false;
+    double burst_x = -1, burst_y = -1;
     for (int i = 1; i < argc; i++)
     {
         auto next = [&](int &i) -> const char * { return i + 1 < argc ? argv[++i] : ""; };
@@ -123,6 +128,9 @@ int host_run(int argc, char **argv, const char *lang, const TexHost *host)
         else if (!strcmp(argv[i], "--seconds")) seconds = atof(next(i));
         else if (!strcmp(argv[i], "--size")) sscanf(next(i), "%dx%d", &g_screen_w, &g_screen_h);
         else if (!strcmp(argv[i], "--vsync")) vsync = true;
+        else if (!strcmp(argv[i], "--auto")) auto_mode = true;
+        else if (!strcmp(argv[i], "--click")) click = atoi(next(i));
+        else if (!strcmp(argv[i], "--burst")) sscanf(next(i), "%lf,%lf", &burst_x, &burst_y);
         else { usage(argv[0]); return 2; }
     }
     srand(12345); /* same spawn sequence in every language */
@@ -137,7 +145,7 @@ int host_run(int argc, char **argv, const char *lang, const TexHost *host)
 
     long sprites = 0;
     int initial = fixed >= 0 ? fixed : start;
-    if (!host->add_sprites(host->ud, initial))
+    if (!host->add_sprites(host->ud, initial, -1, -1))
     {
         fprintf(stderr, "%s: add_sprites failed\n", lang);
         CloseWindow();
@@ -150,7 +158,8 @@ int host_run(int argc, char **argv, const char *lang, const TexHost *host)
     int ft_idx = 0, ft_count = 0;
     double ft_sum = 0.0;
 
-    bool auto_add = fixed < 0;
+    bool auto_add = fixed < 0 && auto_mode;
+    bool interactive = fixed < 0 && !auto_mode;
     bool stopped = false;
     int below = 0;
     long max_at_target = 0;
@@ -181,11 +190,39 @@ int host_run(int argc, char **argv, const char *lang, const TexHost *host)
         DrawRectangle(0, 0, 440, 78, Fade(BLACK, 0.7f));
         DrawText(TextFormat("%s   sprites: %ld   draws: %ld", lang, sprites, g_frame_draws), 10, 8, 20, RAYWHITE);
         DrawText(TextFormat("fps: %.1f (rolling)   %d (raylib)", avg_fps, GetFPS()), 10, 30, 20, RAYWHITE);
-        DrawText(auto_add ? (stopped ? TextFormat("stopped: %ld sprites at >= %.0f fps", max_at_target, target)
-                                     : TextFormat("adding %d/frame while fps >= %.0f", step, target))
-                          : "fixed count",
+        DrawText(interactive ? TextFormat("left click: +%d sprites at the cursor   ESC: quit", click)
+                 : auto_add ? (stopped ? TextFormat("stopped: %ld sprites at >= %.0f fps", max_at_target, target)
+                                       : TextFormat("adding %d/frame while fps >= %.0f", step, target))
+                            : "fixed count",
                  10, 52, 20, stopped ? GREEN : YELLOW);
         EndDrawing();
+
+        if (burst_x >= 0)
+        {
+            /* --burst: one scripted click on the first frame. */
+            if (!host->add_sprites(host->ud, click, burst_x, burst_y))
+            {
+                exit_code = 1;
+                break;
+            }
+            sprites += click;
+            burst_x = -1;
+        }
+        if (interactive && IsMouseButtonDown(MOUSE_BUTTON_LEFT))
+        {
+            /* Hold to keep adding: a burst on the press, then a trickle. */
+            int n = IsMouseButtonPressed(MOUSE_BUTTON_LEFT) ? click : click / 10;
+            if (n > 0)
+            {
+                Vector2 m = GetMousePosition();
+                if (!host->add_sprites(host->ud, n, m.x, m.y))
+                {
+                    exit_code = 1;
+                    break;
+                }
+                sprites += n;
+            }
+        }
 
         double real_dt = GetFrameTime();
         if (real_dt <= 0.0) real_dt = dt;
@@ -203,7 +240,7 @@ int host_run(int argc, char **argv, const char *lang, const TexHost *host)
             if (avg_fps >= target)
             {
                 below = 0;
-                if (!host->add_sprites(host->ud, step))
+                if (!host->add_sprites(host->ud, step, -1, -1))
                 {
                     exit_code = 1;
                     break;

@@ -23,10 +23,14 @@ sprites = {}
 max_x = screen_width() - wabbit:width()
 max_y = screen_height() - wabbit:height()
 
-function add_sprites(n)
+function add_sprites(n, x, y)
     local list = sprites
     for i = 1, n do
-        list[#list + 1] = Sprite.new(wabbit, rand(0, max_x), rand(0, max_y), rand(-250, 250), rand(-250, 250))
+        if x < 0 then
+            list[#list + 1] = Sprite.new(wabbit, rand(0, max_x), rand(0, max_y), rand(-250, 250), rand(-250, 250))
+        else
+            list[#list + 1] = Sprite.new(wabbit, x, y, rand(-250, 250), rand(-250, 250))
+        end
     end
 end
 

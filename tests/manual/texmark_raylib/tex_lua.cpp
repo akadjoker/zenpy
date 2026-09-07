@@ -60,6 +60,20 @@ static bool lua_boot(LuaBoot *b)
     return true;
 }
 
+static bool call_add(lua_State *L, int n, double x, double y)
+{
+    lua_getglobal(L, "add_sprites");
+    lua_pushinteger(L, n);
+    lua_pushnumber(L, x);
+    lua_pushnumber(L, y);
+    if (lua_pcall(L, 3, 0, 0) != LUA_OK)
+    {
+        fprintf(stderr, "lua: %s\n", lua_tostring(L, -1));
+        return false;
+    }
+    return true;
+}
+
 static bool call1(lua_State *L, const char *fn, bool is_int, double v)
 {
     lua_getglobal(L, fn);
@@ -98,7 +112,7 @@ int main(int argc, char **argv)
     LuaBoot boot = { L, source, false };
     TexHost host;
     host.ud = &boot;
-    host.add_sprites = [](void *ud, int n) -> bool {
+    host.add_sprites = [](void *ud, int n, double x, double y) -> bool {
         LuaBoot *b = (LuaBoot *)ud;
         if (!b->booted)
         {
@@ -106,7 +120,7 @@ int main(int argc, char **argv)
                 return false;
             b->booted = true;
         }
-        return call1(b->L, "add_sprites", true, n);
+        return call_add(b->L, n, x, y);
     };
     host.update_all = [](void *ud, double dt) -> bool { return call1(((LuaBoot *)ud)->L, "update_all", false, dt); };
 

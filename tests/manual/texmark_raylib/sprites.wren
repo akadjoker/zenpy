@@ -41,10 +41,14 @@ class Game {
   static maxX { __maxX }
   static maxY { __maxY }
 
-  static addSprites(n) {
+  static addSprites(n, x, y) {
     for (i in 0...n) {
-      __sprites.add(Sprite.new(__wabbit, Native.rand(0, __maxX), Native.rand(0, __maxY),
-                               Native.rand(-250, 250), Native.rand(-250, 250)))
+      if (x < 0) {
+        __sprites.add(Sprite.new(__wabbit, Native.rand(0, __maxX), Native.rand(0, __maxY),
+                                 Native.rand(-250, 250), Native.rand(-250, 250)))
+      } else {
+        __sprites.add(Sprite.new(__wabbit, x, y, Native.rand(-250, 250), Native.rand(-250, 250)))
+      }
     }
   }
 

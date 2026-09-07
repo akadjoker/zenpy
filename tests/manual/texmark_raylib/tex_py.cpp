@@ -123,7 +123,7 @@ int main(int argc, char **argv)
     PyBoot boot = { source, false, nullptr, nullptr };
     TexHost host;
     host.ud = &boot;
-    host.add_sprites = [](void *ud, int n) -> bool {
+    host.add_sprites = [](void *ud, int n, double x, double y) -> bool {
         PyBoot *b = (PyBoot *)ud;
         if (!b->booted)
         {
@@ -131,7 +131,10 @@ int main(int argc, char **argv)
                 return false;
             b->booted = true;
         }
-        return py_call(b->add, "i", n);
+        PyObject *r = PyObject_CallFunction(b->add, "idd", n, x, y);
+        if (!r) { PyErr_Print(); return false; }
+        Py_DECREF(r);
+        return true;
     };
     host.update_all = [](void *ud, double dt) -> bool { return py_call(((PyBoot *)ud)->update, "d", dt); };
 

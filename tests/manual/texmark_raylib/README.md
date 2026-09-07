@@ -28,8 +28,11 @@ native object.
 
 ```
 make            # same prerequisites as ../bunnymark_raylib (raylib, liblua.a, wren 0.4, python3-dev)
+./tex_zen                          # interactive: left click adds 500 sprites at the cursor (hold to keep adding), ESC quits
+./tex_zen --click 1000             # sprites per click
 ./tex_zen --fixed 20000 --seconds 4
-./run_all.sh    # all five, auto-add, 25 s each
+./tex_zen --auto --seconds 25      # auto-add until the rolling fps drops below 60
+./run_all.sh                       # all five, --auto, 25 s each
 ```
 
 ## Results (2026-09-07, same machine, same window, 1280x720, vsync off)

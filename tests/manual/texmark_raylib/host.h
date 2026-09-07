@@ -17,8 +17,9 @@
 struct TexHost
 {
     void *ud;
-    /* Both return false on a script error (the host then quits). */
-    bool (*add_sprites)(void *ud, int n);
+    /* Both return false on a script error (the host then quits).
+    ** add_sprites: x, y < 0 means "random positions", otherwise spawn at (x, y). */
+    bool (*add_sprites)(void *ud, int n, double x, double y);
     bool (*update_all)(void *ud, double dt);
 };
 

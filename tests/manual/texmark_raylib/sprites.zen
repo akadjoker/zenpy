@@ -23,10 +23,14 @@ sprites = []
 max_x = screen_width() - wabbit.width()
 max_y = screen_height() - wabbit.height()
 
-def add_sprites(n):
+def add_sprites(n, x, y):
+    # x, y < 0: random positions; otherwise spawn at the cursor
     i = 0
     while i < n:
-        sprites.append(Sprite(wabbit, rand(0, max_x), rand(0, max_y), rand(-250, 250), rand(-250, 250)))
+        if x < 0:
+            sprites.append(Sprite(wabbit, rand(0, max_x), rand(0, max_y), rand(-250, 250), rand(-250, 250)))
+        else:
+            sprites.append(Sprite(wabbit, x, y, rand(-250, 250), rand(-250, 250)))
         i = i + 1
 
 def update_all(dt):

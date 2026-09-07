@@ -65,9 +65,9 @@ static int n_rand(VM *, Value *args, int) { args[0] = val_float(host_rand(num(ar
 static int n_screen_width(VM *, Value *args, int) { args[0] = val_int(host_screen_width()); return 1; }
 static int n_screen_height(VM *, Value *args, int) { args[0] = val_int(host_screen_height()); return 1; }
 
-static bool call1(VM *vm, const char *fn, Value arg)
+static bool call_n(VM *vm, const char *fn, Value *args, int n)
 {
-    vm->call_global(fn, &arg, 1);
+    vm->call_global(fn, args, n);
     return !vm->had_error();
 }
 
@@ -109,7 +109,7 @@ int main(int argc, char **argv)
     Boot boot = { &vm, source, false };
     TexHost host;
     host.ud = &boot;
-    host.add_sprites = [](void *ud, int n) -> bool {
+    host.add_sprites = [](void *ud, int n, double x, double y) -> bool {
         Boot *b = (Boot *)ud;
         if (!b->booted)
         {
@@ -117,9 +117,13 @@ int main(int argc, char **argv)
                 return false;
             b->booted = true;
         }
-        return call1(b->vm, "add_sprites", val_int(n));
+        Value args[3] = { val_int(n), val_float(x), val_float(y) };
+        return call_n(b->vm, "add_sprites", args, 3);
     };
-    host.update_all = [](void *ud, double dt) -> bool { return call1(((Boot *)ud)->vm, "update_all", val_float(dt)); };
+    host.update_all = [](void *ud, double dt) -> bool {
+        Value arg = val_float(dt);
+        return call_n(((Boot *)ud)->vm, "update_all", &arg, 1);
+    };
 
     int rc = host_run(argc, argv, "zen", &host);
     free(source);

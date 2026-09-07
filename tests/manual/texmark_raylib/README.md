@@ -57,6 +57,17 @@ Auto-add, target 60 fps, 25 s (`./run_all.sh`), max sprites at >= 60 fps:
 | Wren 0.4 | 45 000 | 58 800 |
 | CPython 3.12 | 31 000 | 34 800 |
 
+One click of 50 000 at the cursor (`--burst 640,400 --click 50000 --seconds 4`),
+51 000 sprites on screen:
+
+| Language | fps |
+|---|---:|
+| ZenPy | 68 |
+| Lua 5.4 (`luaL_checkudata`) | 43 |
+| Lua 5.4 (unchecked) | 58 |
+| Wren 0.4 | 54 |
+| CPython 3.12 | 33 |
+
 Reading:
 
 - For Zen the native object costs nothing measurable: the script-owned

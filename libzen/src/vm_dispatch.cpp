@@ -3474,7 +3474,8 @@ namespace zen
                     if (inst->fields_inline)
                     {
                         Value *detached = (Value *)zen_alloc(&gc_, sizeof(Value) * new_n);
-                        memcpy(detached, inst->fields, sizeof(Value) * old_n);
+                        if (old_n > 0 && inst->fields) /* memcpy(dst, nullptr, 0) is UB */
+                            memcpy(detached, inst->fields, sizeof(Value) * old_n);
                         inst->fields = detached;
                         inst->fields_inline = false;
                     }
@@ -3597,7 +3598,8 @@ namespace zen
                     if (inst->fields_inline)
                     {
                         Value *detached = (Value *)zen_alloc(&gc_, sizeof(Value) * new_n);
-                        memcpy(detached, inst->fields, sizeof(Value) * old_n);
+                        if (old_n > 0 && inst->fields) /* memcpy(dst, nullptr, 0) is UB */
+                            memcpy(detached, inst->fields, sizeof(Value) * old_n);
                         inst->fields = detached;
                         inst->fields_inline = false;
                     }

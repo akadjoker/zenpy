@@ -6,7 +6,7 @@ de leitura é a ordem da lista.
 
 1. [dispatch-and-frames.md](dispatch-and-frames.md) — o ciclo de execução, registos, frames, chamada e retorno.
 2. [calling-convention.md](calling-convention.md) — como uma chamada é codificada, os flags do contador de argumentos, os fast paths e o que acontece quando falham.
-3. [natives-and-embedding.md](natives-and-embedding.md) — funções nativas, ClassBuilder, `native_data`, kwargs, GC durante um nativo, módulos e plugins.
+3. [natives-and-embedding.md](natives-and-embedding.md) — funções nativas, ClassBuilder, `zen_bind.hpp`, `native_data`, kwargs, GC durante um nativo, módulos e plugins.
 4. [compiler-conditions-and-peepholes.md](compiler-conditions-and-peepholes.md) — o que o compilador funde e por que regras; onde cada optimização vive.
 5. [gc-and-roots.md](gc-and-roots.md) — o que o GC vê, o que não vê, e as regras que o código C++ tem de cumprir.
 6. [testing.md](testing.md) — que testes existem, o que cada um cobre, e como correr cada modo.

@@ -1,5 +1,5 @@
 /* ZenPy: script-side quadtree (mode=script) vs the C++ QuadTree as a native
-** class driven from the script (mode=native). */
+** class driven from the script (mode=native). Bound with zen_bind.hpp. */
 #include "qtree.h"
 #include "bench.h"
 
@@ -7,23 +7,13 @@
 #include "compiler.h"
 #include "module.h"
 #include "memory.h"
-#include "object.h"
+#include "zen_bind.hpp"
 
 #include <chrono>
 
 using namespace zen;
 
 static double num(Value v) { return v.type == VAL_FLOAT ? v.as.number : (double)v.as.integer; }
-
-static void *qt_ctor(VM *, int, Value *args) { return new QuadTree(num(args[0]), num(args[1])); }
-static void qt_dtor(VM *, void *data) { delete (QuadTree *)data; }
-static int qt_clear(VM *, Value *args, int) { zen_instance_data<QuadTree>(args[-1])->clear(); return 0; }
-static int qt_insert(VM *, Value *args, int) { zen_instance_data<QuadTree>(args[-1])->insert(num(args[0]), num(args[1])); return 0; }
-static int qt_count(VM *, Value *args, int)
-{
-    args[0] = val_int(zen_instance_data<QuadTree>(args[-1])->count(num(args[0]), num(args[1]), num(args[2]), num(args[3])));
-    return 1;
-}
 
 static bool run_mode(VM &vm, const char *fn, const BenchArgs &a, long &checksum, double &secs)
 {
@@ -45,12 +35,12 @@ int main(int argc, char **argv)
 
     VM vm;
     vm.open_lib_globals(&zen_lib_base);
-    vm.def_class("QuadTree")
-        .ctor(qt_ctor)
-        .dtor(qt_dtor)
-        .method("clear", qt_clear, 0, ZEN_NATIVE_GC_SAFE)
-        .method("insert", qt_insert, 2, ZEN_NATIVE_GC_SAFE)
-        .method("count", qt_count, 4, ZEN_NATIVE_GC_SAFE)
+    bind::def_class<QuadTree>(vm, "QuadTree")
+        .ctor<double, double>()
+        .dtor()
+        .method<&QuadTree::clear>("clear", ZEN_NATIVE_GC_SAFE)
+        .method<&QuadTree::insert>("insert", ZEN_NATIVE_GC_SAFE)
+        .method<&QuadTree::count>("count", ZEN_NATIVE_GC_SAFE)
         .end();
 
     Compiler compiler;

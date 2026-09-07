@@ -49,6 +49,50 @@ custa o mesmo que o host desenhar directamente.
 `constructable(false)`: o script não pode chamar `Cls(...)`.
 `field(name)`: campo normal (em `inst->fields`), visível ao script.
 
+## zen_bind.hpp — bindings a partir da assinatura C++
+
+`libzen/include/zen/zen_bind.hpp` (header-only, C++17, sem STL) gera o
+`NativeFn` a partir da assinatura: conversão dos argumentos, erro de tipo com
+o nome da função e a posição do argumento, aridade tirada da assinatura,
+conversão do resultado. A API crua (`def_native`, `ClassBuilder`) continua a
+existir e é a que o header usa por baixo.
+
+```cpp
+#include "zen_bind.hpp"
+using namespace zen;
+
+static double host_rand(double lo, double hi);
+bind::def_fn<&host_rand>(vm, "rand", ZEN_NATIVE_GC_SAFE);   /* aridade 2 */
+
+struct Texture { int id; void draw(double x, double y); int width() const; ~Texture(); };
+static Texture *tex_load(VM *vm, const char *path);         /* nullptr = erro já reportado */
+
+bind::def_class<Texture>(vm, "Texture")
+    .ctor<&tex_load>()                 /* ou .ctor<int64_t, double>() → new T(...) */
+    .dtor()                            /* delete (T *) quando a instância morre */
+    .method<&Texture::draw>("draw", ZEN_NATIVE_GC_SAFE)
+    .method<&Texture::width>("width")
+    .end();
+```
+
+Tipos aceites nos parâmetros: `bool` (truthiness do Python), qualquer inteiro,
+`float`/`double` (int é aceite), `const char *`, `Value` (passa tudo), e
+`T *` / `T &` para uma classe registada com `def_class<T>` (vem de
+`native_data`). Um primeiro parâmetro `VM *` recebe a VM e não conta como
+argumento do script. Resultados: `void` (→ nil), os mesmos escalares,
+`const char *` (copiado para uma ObjString) e `Value`.
+
+Uma função livre cujo primeiro parâmetro é `T *`/`T &` pode ser registada como
+método: o receptor entra nesse parâmetro e a aridade visível ao script desce
+um (`.method<&gauge_level>("level")` com `double gauge_level(Gauge &)`).
+
+Erros são automáticos e nomeiam o argumento:
+`twice: argument 1 must be an int`, `small: expected 2 argument(s), got 1`.
+O que a assinatura não cobrir (varargs, kwargs, tuplos de retorno) continua a
+escrever-se como `NativeFn` à mão. Cobertura: teste 18 de
+`tests/cpp/test_embedding.cpp`; usos reais em
+`tests/manual/texmark_raylib/tex_zen.cpp` e `tests/manual/glue_bench/glue_zen.cpp`.
+
 ## Keyword arguments num nativo
 
 `sorted(xs, key=f, reverse=True)`: o compilador põe `{"key": f,

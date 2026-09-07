@@ -771,7 +771,8 @@ namespace zen
     {
         int32_t n = arr_count(src);
         array_reserve(gc, dst, n);
-        memcpy(dst->data, src->data, (size_t)n * sizeof(Value));
+        if (n > 0 && src->data) /* memcpy(dst, nullptr, 0) is UB */
+            memcpy(dst->data, src->data, (size_t)n * sizeof(Value));
         dst->end = dst->data + n;
     }
 

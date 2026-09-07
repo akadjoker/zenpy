@@ -78,6 +78,7 @@ static bool g_dis_only = false;
 static bool g_verbose = false;
 static const char *g_dump_path = nullptr;
 static bool g_strip_debug = false;
+static bool g_check_only = false; /* --check: compile, report errors, do not run */
 static const char *g_search_paths[16];
 static int g_num_search_paths = 0;
 
@@ -163,6 +164,8 @@ static int run_source(const char *source, const char *filename,
         fprintf(stderr, "zen: compilation failed.\n");
         return 1;
     }
+    if (g_check_only)
+        return 0;
 
     if (g_disassemble)
     {
@@ -318,6 +321,10 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--strip-debug") == 0)
         {
             g_strip_debug = true;
+        }
+        else if (strcmp(argv[i], "--check") == 0)
+        {
+            g_check_only = true;
         }
         else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0)
         {

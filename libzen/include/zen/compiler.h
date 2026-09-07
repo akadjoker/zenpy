@@ -575,6 +575,11 @@ namespace zen
         int typed_call_reg_;
         Token typed_call_class_;
         bool typed_call_exact_;
+        /* True while the right-hand side of `a, b = expr` is compiled: the
+        ** call found there gets its result count patched into C, so it has
+        ** to be the plain OP_INVOKE / OP_INVOKE_VT form (C = nresults),
+        ** never OP_INVOKE_R / OP_INVOKE_VT_R (C = receiver register). */
+        bool multi_assign_rhs_;
         /* The shape of the most recent simple comparison, left by
         ** comparison() for emit_cond_jump(): valid only while nothing else
         ** has been emitted since (end_offset == current offset). Lets

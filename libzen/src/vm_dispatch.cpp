@@ -577,6 +577,10 @@ namespace zen
         ** the decoded operands travel through these so the shared entry
         ** point does not jump over any initialised local. */
         int call_a = 0, call_nargs = 0, call_nresults = 0;
+        /* OP_INVOKE's result count: read from C by OP_INVOKE itself, fixed
+        ** at 1 by the _R forms (whose C is the receiver register). Every
+        ** `goto op_invoke_entry` sets it first. */
+        int invoke_nresults = 1;
 
 /* Macro para reload após CALL/RETURN (frame mudou) */
 #define LOAD_STATE()                                \
@@ -758,6 +762,8 @@ namespace zen
             &&lbl_OP_SETFIELD_IDXC,
             &&lbl_OP_EQIJMPIFNOT,
             &&lbl_OP_NEIJMPIFNOT,
+            &&lbl_OP_INVOKE_R,
+            &&lbl_OP_INVOKE_VT_R,
         };
 
 #ifdef ZEN_OPCODE_PROFILE
@@ -3792,14 +3798,26 @@ namespace zen
         /* --- OP_INVOKE: method dispatch by receiver type --- */
         /* 2-word instruction: word1=[OP_INVOKE|A|B|C], word2=name_ki */
         /* A=base (receiver at R[A], args at R[A+1]..R[A+B]), result → R[A] */
+        CASE(OP_INVOKE_R)
+        {
+            /* Receiver lives in a local: copy it into the call base here
+            ** (what a separate MOVE did) and continue as OP_INVOKE. */
+            uint32_t i = *ip;
+            R[ZEN_A(i)] = R[ZEN_C(i)];
+            invoke_nresults = 1;
+            goto op_invoke_entry;
+        }
         CASE(OP_INVOKE)
-        op_invoke_entry: /* OP_INVOKE_VT re-enters here on its slow path */
+        {
+            invoke_nresults = ZEN_C(*ip);
+            if (invoke_nresults == 0) invoke_nresults = 1;
+        }
+        op_invoke_entry: /* OP_INVOKE_VT/_R re-enter here on their slow path */
         {
             uint32_t i = *ip;
             uint8_t base = ZEN_A(i);
-            uint8_t arg_count = ZEN_B(i);
-            uint8_t nresults = ZEN_C(i);
-            if (nresults == 0) nresults = 1;
+            int arg_count = ZEN_B(i);
+            uint8_t nresults = (uint8_t)invoke_nresults;
             uint32_t word2 = *(++ip); /* packed: (selector_slot << 16) | name_ki */
             uint16_t sel_slot = (uint16_t)(word2 >> 16);
             uint16_t name_ki = (uint16_t)(word2 & 0xFFFF);
@@ -3807,6 +3825,28 @@ namespace zen
             ObjString *method = as_string(K[name_ki]);
             const char *mname = method->chars;
             Value *args = &R[base + 1];
+
+            /* `obj.m(a, *xs)`: B has bit 7 set and counts the spread list
+            ** as one argument. Unpack it in place, exactly as OP_CALL does
+            ** for a free function. */
+            if (__builtin_expect(arg_count & 0x80, 0))
+            {
+                int fixed = (arg_count & 0x7F) - 1;
+                Value spread_val = args[fixed];
+                if (!is_array(spread_val))
+                {
+                    RT_ERROR("argument unpacking requires a list");
+                }
+                ObjArray *arr = as_array(spread_val);
+                int arr_len = arr_count(arr);
+                if (args + fixed + arr_len > fiber->stack_end)
+                {
+                    RT_ERROR("stack overflow (data)");
+                }
+                for (int si = 0; si < arr_len; si++)
+                    args[fixed + si] = arr->data[si];
+                arg_count = fixed + arr_len;
+            }
 
             /* Mark string args as shared — matches OP_CALL behaviour */
             for (int ai = 0; ai < arg_count; ai++) {
@@ -4201,7 +4241,19 @@ namespace zen
             }
         }
 
+        CASE(OP_INVOKE_VT_R)
+        {
+            uint32_t i = *ip;
+            R[ZEN_A(i)] = R[ZEN_C(i)];
+            invoke_nresults = 1;
+            goto op_invoke_vt_entry;
+        }
         CASE(OP_INVOKE_VT)
+        {
+            invoke_nresults = ZEN_C(*ip);
+            if (invoke_nresults == 0) invoke_nresults = 1;
+        }
+        op_invoke_vt_entry:
         {
             /* Two words laid out exactly like OP_INVOKE: (base, nargs,
             ** nresults) + (selector << 16 | name constant). Fast path when
@@ -4215,8 +4267,7 @@ namespace zen
             uint32_t i = *ip;
             uint8_t base = ZEN_A(i);
             uint8_t arg_count = ZEN_B(i);
-            uint8_t nresults = ZEN_C(i);
-            if (nresults == 0) nresults = 1;
+            uint8_t nresults = (uint8_t)invoke_nresults;
             uint16_t slot = (uint16_t)(ip[1] >> 16);
             Value receiver = R[base];
             if (__builtin_expect(!is_instance(receiver), 0))
@@ -4263,11 +4314,31 @@ namespace zen
             /* 3-word: word1=[OP|base|argc|0], word2=(sel<<16|name_ki), word3=parent_gidx */
             uint32_t i = *ip;
             uint8_t base = ZEN_A(i);
-            uint8_t arg_count = ZEN_B(i);
+            int arg_count = ZEN_B(i);
             uint32_t word2 = ip[1];
             int sel_slot = (int)(word2 >> 16);
             int name_ki = (int)(word2 & 0xFFFF);
             uint32_t parent_gidx = ip[2];
+
+            /* `super().m(a, *xs)`: unpack the spread list in place (see OP_INVOKE). */
+            if (__builtin_expect(arg_count & 0x80, 0))
+            {
+                int fixed = (arg_count & 0x7F) - 1;
+                Value spread_val = R[base + 1 + fixed];
+                if (!is_array(spread_val))
+                {
+                    RT_ERROR("argument unpacking requires a list");
+                }
+                ObjArray *arr = as_array(spread_val);
+                int arr_len = arr_count(arr);
+                if (&R[base + 1 + fixed] + arr_len > fiber->stack_end)
+                {
+                    RT_ERROR("stack overflow (data)");
+                }
+                for (int si = 0; si < arr_len; si++)
+                    R[base + 1 + fixed + si] = arr->data[si];
+                arg_count = fixed + arr_len;
+            }
 
             /* Resolve parent class from globals table */
             Value parent_val = globals_[parent_gidx];
@@ -4354,17 +4425,31 @@ namespace zen
                 new_frame->ret_count = 1;
                 fiber->stack_top = new_frame->base + fn->num_regs;
 
+                /* Vararg parent method: pack the extras into the *args
+                ** array, same as OP_INVOKE does (this was missing: the
+                ** callee saw the first extra as its *args tuple). */
+                if (fn->arity < 0)
+                {
+                    int min_args = (-fn->arity) - 1;
+                    int extra = arg_count - min_args;
+                    gc_pause(&gc_);
+                    ObjArray *arr = new_array(&gc_);
+                    if (extra > 0)
+                        array_push_n(&gc_, arr, new_frame->base + 1 + min_args, extra);
+                    new_frame->base[1 + min_args] = val_obj((Obj *)arr);
+                    gc_resume(&gc_);
+                }
                 /* Fill in default values for missing args */
-                if (fn->arity >= 0 && fn->default_count > 0 && arg_count < fn->arity)
+                else if (fn->default_count > 0 && arg_count < fn->arity)
                 {
                     int required = fn->arity - fn->default_count;
                     for (int di = arg_count; di < fn->arity; di++)
                         new_frame->base[1 + di] = fn->defaults[di - required];
                 }
 
-                /* Clear unused regs: self(1) + arity args */
+                /* Clear unused regs: self(1) + params (the *args slot included) */
                 {
-                    int used = 1 + (fn->arity >= 0 ? fn->arity : arg_count);
+                    int used = 1 + (fn->arity >= 0 ? fn->arity : (-fn->arity));
                     clear_new_regs(new_frame->base, used, fn->num_regs);
                 }
 

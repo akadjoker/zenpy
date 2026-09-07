@@ -250,6 +250,13 @@ namespace zen
         ** cross-type equality, __eq__ on instances). */
         OP_EQIJMPIFNOT, /* if !(R[B] == C): pc += sBx(next word) */
         OP_NEIJMPIFNOT, /* if !(R[B] != C): pc += sBx(next word) */
+
+        /* Method call whose receiver is a local variable (`b.m()`,
+        ** `self.m()`): the VM copies R[C] into R[A] itself instead of a
+        ** separate MOVE. Word 2 as in OP_INVOKE / OP_INVOKE_VT; the result
+        ** count is always 1 (multi-assign keeps the two-instruction form). */
+        OP_INVOKE_R,    /* R[A] = R[C]; R[A] = R[A].method(R[A+1]..R[A+B]) (2-word) */
+        OP_INVOKE_VT_R, /* same, trying the vtable slot first like OP_INVOKE_VT (2-word) */
     };
 
 /* Encode/Decode — ABC format */

@@ -129,6 +129,8 @@ namespace zen
         "SETFIELD_IDXC",
         "EQIJMPIFNOT",
         "NEIJMPIFNOT",
+        "INVOKE_R",
+        "INVOKE_VT_R",
     };
 
     const char *opcode_name(OpCode op)
@@ -658,13 +660,20 @@ namespace zen
             return offset + 2;
         }
         case OP_INVOKE_VT:
+        case OP_INVOKE_R:
+        case OP_INVOKE_VT_R:
         {
-            /* 2-word, same layout as OP_INVOKE: word2 = (sel_slot << 16) | name_ki */
+            /* 2-word, same layout as OP_INVOKE: word2 = (sel_slot << 16) | name_ki.
+            ** The _R forms read the receiver from R[C] instead of R[A]. */
             uint32_t word2 = func->code[offset + 1];
             int sel_slot = (int)(word2 >> 16);
             int name_ki = (int)(word2 & 0xFFFF);
             const char *mname = const_str(func, name_ki);
-            printf("R[%d] = R[%d].vt[%d]:%s(%d args)", a, a, sel_slot, mname ? mname : "?", b);
+            int rcv = (op == OP_INVOKE_VT) ? a : c;
+            if (op == OP_INVOKE_R)
+                printf("R[%d] = R[%d].%s(%d args)  \t; sel=%d", a, rcv, mname ? mname : "?", b, sel_slot);
+            else
+                printf("R[%d] = R[%d].vt[%d]:%s(%d args)", a, rcv, sel_slot, mname ? mname : "?", b);
             printf("\n");
             printf("   |  %04d  %-16s", offset + 1, "(invoke-data)");
             printf("sel=%d name_ki=%d", sel_slot, name_ki);

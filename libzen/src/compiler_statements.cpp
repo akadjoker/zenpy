@@ -2257,7 +2257,10 @@ namespace zen
             int rhs_start = state_->emitter.current_offset();
                 state_->next_reg = rhs_base + lhs_count;
             if (state_->next_reg > state_->max_reg) state_->max_reg = state_->next_reg;
+            bool saved_multi_rhs = multi_assign_rhs_;
+            multi_assign_rhs_ = true; /* keep the call patchable: see patch_c_at below */
             int r0 = expression(rhs_base);
+            multi_assign_rhs_ = saved_multi_rhs;
 
             if (check(TOK_COMMA))
             {

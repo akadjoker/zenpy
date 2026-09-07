@@ -50,6 +50,7 @@ namespace zen
         typed_subscript_reg_ = -1;
         typed_call_reg_ = -1;
         last_expr_ctor_valid_ = false;
+        multi_assign_rhs_ = false;
         fn_written_global_count_ = 0;
         last_cmp_.valid = false;
 
@@ -129,6 +130,7 @@ namespace zen
         typed_subscript_reg_ = -1;
         typed_call_reg_ = -1;
         last_expr_ctor_valid_ = false;
+        multi_assign_rhs_ = false;
         fn_written_global_count_ = 0;
         last_cmp_.valid = false;
         global_type_hint_count_ = 0;

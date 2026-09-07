@@ -1797,17 +1797,27 @@ namespace zen
             if (dest < 0)
                 free_reg(reg);
             bool obj_is_local = false;
+            bool obj_captured = false;
             for (int i = 0; i < state_->local_count; i++)
             {
                 if (state_->locals[i].reg == obj)
                 {
                     obj_is_local = true;
+                    obj_captured = state_->locals[i].captured;
                     break;
                 }
             }
             bool obj_is_top = (obj == state_->next_reg - 1);
             int base = (!obj_is_local && obj_is_top) ? obj : alloc_reg();
-            if (base != obj)
+            /* A local receiver of a plain call (`b.m(...)`, `self.m(...)`)
+            ** is copied into `base` by OP_INVOKE_R / OP_INVOKE_VT_R itself,
+            ** saving the MOVE dispatch. Not when a closure could reassign
+            ** the local while the arguments are evaluated (captured local:
+            ** the copy must happen before them, as it would in Python), nor
+            ** inside a multi-assign RHS (C must stay the result count). */
+            bool receiver_in_c = obj_is_local && !obj_captured && !multi_assign_rhs_ &&
+                                 check(TOK_LPAREN) && obj <= 255;
+            if (base != obj && !receiver_in_c)
                 emit_move(base, obj);
             const FuncSig *sig = method_sig;
             int sel = vm_->intern_selector(field.start, field.length);
@@ -1847,12 +1857,18 @@ namespace zen
                 {
                     /* Same two words as OP_INVOKE; the VM tries the vtable
                     ** slot first and re-enters OP_INVOKE for anything else. */
-                    state_->emitter.emit_abc(OP_INVOKE_VT, base, nargs, 1, field.line);
+                    if (receiver_in_c)
+                        state_->emitter.emit_abc(OP_INVOKE_VT_R, base, nargs, obj, field.line);
+                    else
+                        state_->emitter.emit_abc(OP_INVOKE_VT, base, nargs, 1, field.line);
                     state_->emitter.emit((uint32_t)((sel << 16) | (name_ki & 0xFFFF)), field.line);
                 }
                 else
                 {
-                    state_->emitter.emit_abc(OP_INVOKE, base, nargs, 1, field.line);
+                    if (receiver_in_c)
+                        state_->emitter.emit_abc(OP_INVOKE_R, base, nargs, obj, field.line);
+                    else
+                        state_->emitter.emit_abc(OP_INVOKE, base, nargs, 1, field.line);
                     state_->emitter.emit((uint32_t)((sel << 16) | (name_ki & 0xFFFF)), field.line);
                 }
             }

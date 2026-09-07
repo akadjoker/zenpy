@@ -65,6 +65,22 @@ static int native_apply(VM *vm, Value *args, int nargs)
     return 1;
 }
 
+/* This native is only reached from Zen bytecode, so its GC_SAFE flag is
+** meaningful: args lives on the marked VM stack and the extra root survives
+** a forced collection while a temporary allocation is in flight. */
+static int native_gc_roundtrip(VM *vm, Value *args, int nargs)
+{
+    if (nargs != 1)
+        return -1;
+    Value *held = vm->root(args[0]);
+    if (!held)
+        return -1;
+    vm->make_string("fuzz-gc-roundtrip");
+    vm->collect();
+    args[0] = *held;
+    return 1;
+}
+
 static bool run_setup(VM &vm)
 {
     static const char source[] = R"(
@@ -73,6 +89,16 @@ def identity(x):
 
 def count(first, *rest):
     return first + len(rest)
+
+def fails(x):
+    return x / 0
+
+def gc_roundtrip_from_zen(x):
+    return gc_roundtrip(x)
+
+def yields_twice():
+    yield 1
+    yield 2
 
 class ScriptBox:
     def __init__(self, value=0):
@@ -83,6 +109,7 @@ class ScriptBox:
         return self.value
 
 box = ScriptBox()
+fiber = yields_twice()
 )";
 
     Compiler compiler;
@@ -116,6 +143,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     vm.set_callbacks(callbacks);
     vm.open_lib_globals(&zen_lib_base);
     vm.def_native("apply", native_apply, 2);
+    vm.def_native("gc_roundtrip", native_gc_roundtrip, 1, ZEN_NATIVE_GC_SAFE);
 
     ObjClass *native_box_class = vm.def_class("NativeBox")
         .method("sum", native_sum, -1)
@@ -127,10 +155,12 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         return 0;
     Value script_box = vm.get_global("box");
     Value identity = vm.get_global("identity");
+    Value fails = vm.get_global("fails");
+    Value fiber_value = vm.get_global("fiber");
 
     for (size_t pos = 0; pos + 2 < size; pos += 3)
     {
-        const uint8_t op = data[pos] % 8;
+        const uint8_t op = data[pos] % 10;
         const int nargs = data[pos + 1] % 33; /* Covers the old 16-arg edge. */
         Value args[32];
         for (int i = 0; i < nargs; i++)
@@ -158,11 +188,21 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             break;
         case 6:
         {
-            Value callback_args[2] = { identity, fuzz_value(data[pos + 2], data[pos + 1]) };
+            /* Alternate normal and failing callbacks. Error propagation must
+            ** restore the native's stack/frame state before the next op. */
+            Value callback = (data[pos + 2] & 1) ? identity : fails;
+            Value callback_args[2] = { callback, fuzz_value(data[pos + 2], data[pos + 1]) };
             vm.call_global("apply", callback_args, 2);
             break;
         }
         case 7:
+            vm.call_global("gc_roundtrip_from_zen", args, nargs);
+            break;
+        case 8:
+            if (is_fiber(fiber_value))
+                vm.resume_fiber(as_fiber(fiber_value), fuzz_value(data[pos + 1], data[pos + 2]));
+            break;
+        case 9:
             /* Invalid public inputs must report an error, never dereference. */
             vm.invoke(val_int(1), "sum", nullptr, 0);
             vm.call_global(vm.num_globals() + 1, nullptr, 0);

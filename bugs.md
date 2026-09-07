@@ -586,6 +586,16 @@ Conclusão: o port limpa dependências e encolhe o binário; não muda
 velocidade, porque as estruturas quentes da VM (arrays, maps, strings do
 GC) já eram próprias.
 
+- (cont. ronda 6) `ct::stable_sort` adicionado ao `containers` (merge sort,
+  buffer n/2, runs por insertion sort; 13 testes contra std::stable_sort,
+  paridade no bench) e usado nos sorts Python do zenpy sem desempate por
+  índice. `builtin_json.cpp`: StrBuf → `ct::String`. Módulo `xml` novo
+  (`builtin_xml.cpp`) em cima do `ct::Xml`: `parse` → dicts/listas
+  (`tag/attrs/text/children`), `stringify(node[, indent])`; tests/66_xml.py,
+  docs/zenpy_xml.md. Decisão: o json continua a converter directo para
+  objectos Zen (sem árvore `ct::Json` intermédia), porque é o caminho mais
+  rápido e já não tem dependências.
+
 ### Plano para a próxima sessão (por ordem)
 
 1. Validar: `cd build_release && ninja`, suite normal + `--stress-gc`, bench

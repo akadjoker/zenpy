@@ -597,6 +597,9 @@ Functions: recursive tree of function bodies
 ### `net`
 `resolve`, `tcp_connect`, `tcp_listen`, `tcp_accept`, `udp_create`, `send`, `recv`, `sendto`, `recvfrom`, `set_blocking`, `set_nodelay`, `poll`, `close`
 
+### `xml`
+`parse`, `stringify` — documents as dicts/lists (`tag`, `attrs`, `text`, `children`), on the vendored `ct::Xml` parser; see docs/zenpy_xml.md
+
 ### `http`
 `get`, `post`, `download`, `ping`, `get_local_ip`
 

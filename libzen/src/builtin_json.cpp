@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cmath>
 #include <cerrno>
+#include <ct/string.hpp>
 
 namespace zen
 {
@@ -31,60 +32,20 @@ namespace zen
     ** String buffer — growable char buffer (no STL)
     ** ========================================================= */
 
-    struct StrBuf
-    {
-        char *data;
-        int len;
-        int cap;
-    };
+    /* Output buffer for stringify: ct::String (was a hand-rolled StrBuf). */
+    typedef ct::String StrBuf;
 
-    static void sb_init(StrBuf *sb)
-    {
-        sb->data = (char *)malloc(256);
-        sb->len = 0;
-        sb->cap = 256;
-    }
-
-    static void sb_free(StrBuf *sb)
-    {
-        free(sb->data);
-        sb->data = nullptr;
-        sb->len = 0;
-        sb->cap = 0;
-    }
-
-    static void sb_grow(StrBuf *sb, int need)
-    {
-        if (sb->len + need <= sb->cap)
-            return;
-        int new_cap = sb->cap * 2;
-        while (new_cap < sb->len + need)
-            new_cap *= 2;
-        sb->data = (char *)realloc(sb->data, (size_t)new_cap);
-        sb->cap = new_cap;
-    }
-
-    static void sb_putc(StrBuf *sb, char c)
-    {
-        sb_grow(sb, 1);
-        sb->data[sb->len++] = c;
-    }
-
-    static void sb_puts(StrBuf *sb, const char *s, int n)
-    {
-        sb_grow(sb, n);
-        memcpy(sb->data + sb->len, s, (size_t)n);
-        sb->len += n;
-    }
+    static void sb_init(StrBuf *sb) { sb->reserve(256); }
+    static void sb_free(StrBuf *sb) { sb->clear(); }
+    static void sb_putc(StrBuf *sb, char c) { sb->push_back(c); }
+    static void sb_puts(StrBuf *sb, const char *s, int n) { sb->append(s, (ct::String::size_type)n); }
 
     static void sb_indent(StrBuf *sb, int depth, int width)
     {
         if (width <= 0 || depth <= 0)
             return;
         int n = depth * width;
-        sb_grow(sb, n);
-        memset(sb->data + sb->len, ' ', (size_t)n);
-        sb->len += n;
+        sb->append((ct::String::size_type)n, ' ');
     }
 
     /* =========================================================
@@ -928,7 +889,7 @@ namespace zen
             return -1;
         }
 
-        args[0] = val_obj((Obj *)vm->make_string(sb.data, sb.len));
+        args[0] = val_obj((Obj *)vm->make_string(sb.data(), (int)sb.size()));
         sb_free(&sb);
         return 1;
     }

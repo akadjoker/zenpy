@@ -111,6 +111,7 @@ static void register_default_libs(VM &vm)
 #endif
 #ifndef ZEN_NO_MODULE_JSON
     vm.register_lib(&zen_lib_json);
+    vm.register_lib(&zen_lib_xml);
 #endif
 #ifndef ZEN_NO_MODULE_NET
     vm.register_lib(&zen_lib_net);

@@ -1,0 +1,177 @@
+# Quadtree workload, two ways: the tree written here (run_script) and the
+# C++ QuadTree driven from here (run_native). Same points, same queries,
+# same checksum.
+
+W = 1280.0
+H = 720.0
+DT = 1.0 / 60.0
+R = 6.0
+CAPACITY = 8
+MAX_DEPTH = 8
+
+seed = 42
+def rnd():
+    global seed
+    seed = (seed * 16807) % 2147483647
+    return seed
+def rnd_range(lo, hi):
+    return lo + (hi - lo) * (rnd() / 2147483647.0)
+
+class Point:
+    def __init__(self, x, y, vx, vy):
+        self.x = x
+        self.y = y
+        self.vx = vx
+        self.vy = vy
+
+class Node:
+    x: float = 0.0
+    y: float = 0.0
+    w: float = 0.0
+    h: float = 0.0
+    depth: int = 0
+    count: int = 0
+    split: bool = False
+    pts: Array[Point]
+    c0: Node?
+    c1: Node?
+    c2: Node?
+    c3: Node?
+
+    def __init__(self, x, y, w, h, depth):
+        self.x = x
+        self.y = y
+        self.w = w
+        self.h = h
+        self.depth = depth
+        self.pts = []
+        self.count = 0
+        self.split = False
+        self.c0 = None
+        self.c1 = None
+        self.c2 = None
+        self.c3 = None
+
+    def child_for(self, px, py):
+        if py < self.y + self.h * 0.5:
+            if px < self.x + self.w * 0.5:
+                return self.c0
+            return self.c1
+        if px < self.x + self.w * 0.5:
+            return self.c2
+        return self.c3
+
+    def insert(self, p: Point):
+        node: Node = self
+        while node.split:
+            node = node.child_for(p.x, p.y)
+        node.pts.append(p)
+        node.count += 1
+        if node.count > CAPACITY and node.depth < MAX_DEPTH:
+            node.subdivide()
+
+    def subdivide(self):
+        hw = self.w * 0.5
+        hh = self.h * 0.5
+        d = self.depth + 1
+        self.c0 = Node(self.x, self.y, hw, hh, d)
+        self.c1 = Node(self.x + hw, self.y, hw, hh, d)
+        self.c2 = Node(self.x, self.y + hh, hw, hh, d)
+        self.c3 = Node(self.x + hw, self.y + hh, hw, hh, d)
+        self.split = True
+        old: Array[Point] = self.pts
+        n = self.count
+        i = 0
+        while i < n:
+            p = old[i]
+            self.child_for(p.x, p.y).insert(p)
+            i += 1
+        self.pts = []
+        self.count = 0
+
+    def count_in(self, x0, y0, x1, y1):
+        if x1 <= self.x or y1 <= self.y or x0 >= self.x + self.w or y0 >= self.y + self.h:
+            return 0
+        if self.split:
+            n = self.c0.count_in(x0, y0, x1, y1) + self.c1.count_in(x0, y0, x1, y1)
+            n += self.c2.count_in(x0, y0, x1, y1) + self.c3.count_in(x0, y0, x1, y1)
+            return n
+        n = 0
+        pts: Array[Point] = self.pts
+        i = 0
+        c = self.count
+        while i < c:
+            p = pts[i]
+            if p.x >= x0 and p.x < x1 and p.y >= y0 and p.y < y1:
+                n += 1
+            i += 1
+        return n
+
+def make_points(n):
+    global seed
+    seed = 42
+    pts = []
+    i = 0
+    while i < n:
+        pts.append(Point(rnd_range(0, W), rnd_range(0, H), rnd_range(-60, 60), rnd_range(-60, 60)))
+        i += 1
+    return pts
+
+def move(p: Point):
+    p.x += p.vx * DT
+    p.y += p.vy * DT
+    if p.x < 0:
+        p.x = 0
+        p.vx = -p.vx
+    elif p.x >= W:
+        p.x = W - 1
+        p.vx = -p.vx
+    if p.y < 0:
+        p.y = 0
+        p.vy = -p.vy
+    elif p.y >= H:
+        p.y = H - 1
+        p.vy = -p.vy
+
+def run_script(n, frames):
+    pts: Array[Point] = make_points(n)
+    checksum = 0
+    f = 0
+    while f < frames:
+        root: Node = Node(0.0, 0.0, W, H, 0)
+        i = 0
+        while i < n:
+            p = pts[i]
+            move(p)
+            root.insert(p)
+            i += 1
+        i = 0
+        while i < n:
+            p = pts[i]
+            if root.count_in(p.x - R, p.y - R, p.x + R, p.y + R) > 1:
+                checksum += 1
+            i += 1
+        f += 1
+    return checksum
+
+def run_native(n, frames):
+    pts: Array[Point] = make_points(n)
+    tree: QuadTree = QuadTree(W, H)
+    checksum = 0
+    f = 0
+    while f < frames:
+        tree.clear()
+        i = 0
+        while i < n:
+            p = pts[i]
+            move(p)
+            tree.insert(p.x, p.y)
+            i += 1
+        i = 0
+        while i < n:
+            p = pts[i]
+            if tree.count(p.x - R, p.y - R, p.x + R, p.y + R) > 1:
+                checksum += 1
+            i += 1
+        f += 1
+    return checksum

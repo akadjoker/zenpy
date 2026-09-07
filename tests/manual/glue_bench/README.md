@@ -65,6 +65,11 @@ Reading:
   native one in every language. That is the cost of allocating and walking
   the nodes in the interpreter, and it is the same order of magnitude for
   all three: no interpreter here changes the conclusion.
+- The Zen host (`glue_zen.cpp`) binds the C++ `QuadTree` with
+  `zen_bind.hpp`: `.ctor<double, double>().dtor().method<&QuadTree::insert>
+  ("insert", ZEN_NATIVE_GC_SAFE)` and so on, with no hand-written thunks.
+  Same numbers as the hand-written version it replaced — the thunk the
+  header generates is the one we used to write by hand.
 - So the engine owns the spatial index, the grid, the heap; the script owns
   the game objects and the decisions. Zen's ClassBuilder path (native
   ctor/dtor, `zen_instance_data`, vtable slot to a NativeFn) is what makes

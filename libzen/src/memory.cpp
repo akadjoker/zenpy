@@ -2132,6 +2132,18 @@ namespace zen
                     return true;
                 }
 
+                case OBJ_SET:
+                {
+                    ObjSet *sa = (ObjSet *)a.as.obj;
+                    ObjSet *sb = (ObjSet *)b.as.obj;
+                    if (sa->count != sb->count)
+                        return false;
+                    for (int32_t i = 0; i < sa->capacity; i++)
+                        if (sa->nodes[i].hash != 0xFFFFFFFFu && !set_contains(sb, sa->nodes[i].key))
+                            return false;
+                    return true;
+                }
+
                 case OBJ_MAP:
                 {
                     ObjMap *ma = (ObjMap *)a.as.obj;

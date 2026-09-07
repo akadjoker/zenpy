@@ -6,6 +6,8 @@
 #include <cstdio>
 #endif
 #include <cctype>
+#include <vector>
+#include <algorithm>
 #include "vm.h"
 #include "compiler.h"
 #include "debug.h"

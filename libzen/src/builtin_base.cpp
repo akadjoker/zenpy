@@ -209,6 +209,7 @@ namespace zen
     ** ========================================================= */
     static void py_append_value(VM *vm, std::string &out, Value v, bool repr);
     static bool kwarg_get(VM *vm, const char *name, Value *out);
+    static bool py_truthy(Value v);
     static bool py_collect(VM *vm, Value v, std::vector<Value> &out, const char *who);
 
     static int nat_str(VM *vm, Value *args, int nargs)
@@ -886,6 +887,7 @@ namespace zen
                 snprintf(full, sizeof(full), "%slld", spec);
                 int64_t val = is_int(args[arg_idx]) ? args[arg_idx].as.integer
                             : is_float(args[arg_idx]) ? (int64_t)args[arg_idx].as.number
+                            : is_bool(args[arg_idx]) ? (args[arg_idx].as.boolean ? 1 : 0)
                             : 0;
                 n = snprintf(tmp, sizeof(tmp), full, (long long)val);
                 arg_idx++;
@@ -949,6 +951,7 @@ namespace zen
                 break;
             }
             case 's':
+            case 'r':
             {
                 if (arg_idx >= nargs)
                 {
@@ -956,33 +959,11 @@ namespace zen
                     vm->runtime_error("format(): not enough arguments for %%s.");
                     return -1;
                 }
-                const char *sv = "nil";
-                int sl = 3;
-                if (is_string(args[arg_idx]))
-                {
-                    sv = safe_string_chars(args[arg_idx]);
-                    sl = as_string(args[arg_idx])->length;
-                }
-                else if (is_int(args[arg_idx]))
-                {
-                    sl = snprintf(tmp, sizeof(tmp), "%lld", (long long)args[arg_idx].as.integer);
-                    sv = tmp;
-                }
-                else if (is_float(args[arg_idx]))
-                {
-                    sl = snprintf(tmp, sizeof(tmp), "%g", args[arg_idx].as.number);
-                    sv = tmp;
-                }
-                else if (is_bool(args[arg_idx]))
-                {
-                    sv = args[arg_idx].as.boolean ? "true" : "false";
-                    sl = args[arg_idx].as.boolean ? 4 : 5;
-                }
-                else if (is_nil(args[arg_idx]))
-                {
-                    sv = "nil";
-                    sl = 3;
-                }
+                /* %s: the text print() shows; %r: repr (strings quoted) */
+                std::string pys;
+                py_append_value(vm, pys, args[arg_idx], conv == 'r');
+                const char *sv = pys.c_str();
+                int sl = (int)pys.size();
 
                 /* If spec is just "%s", skip snprintf overhead */
                 if (si == 2)
@@ -993,6 +974,7 @@ namespace zen
                     arg_idx++;
                     continue;
                 }
+                spec[si - 1] = 's';
                 n = snprintf(tmp, sizeof(tmp), spec, sv);
                 arg_idx++;
                 break;
@@ -1237,7 +1219,7 @@ namespace zen
         {
             call_arg[0] = src->data[i];
             Value r = vm->call_fn(fn, call_arg, 1);
-            if (!is_nil(r) && !(r.type == VAL_BOOL && !r.as.boolean))
+            if (py_truthy(r))
                 array_push(gc, result, src->data[i]);
         }
 
@@ -1482,7 +1464,7 @@ namespace zen
         {
             Value k = items[i];
             if (has_key) { Value arg = items[i]; k = vm->call_fn(keyfn, &arg, 1); if (vm->had_error()) return -1; }
-            int c = values_compare(k, best_key);
+            int c = zen_compare_vm(vm, k, best_key);
             if (want_max ? c > 0 : c < 0) { best = items[i]; best_key = k; }
         }
         args[0] = best;
@@ -1498,9 +1480,19 @@ namespace zen
         if (nargs >= 2 && !is_nil(args[1]))
         {
             int nd = (int)to_integer(args[1]);
-            double scale = pow(10.0, nd);
-            double r = nearbyint(x * scale) / scale; /* ties to even, as Python */
-            args[0] = val_float(r);
+            if (nd >= 0)
+            {
+                /* printf rounds the exact binary value, as Python does
+                ** (round(2.675, 2) == 2.67, not 2.68) */
+                char buf[64];
+                snprintf(buf, sizeof buf, "%.*f", nd > 30 ? 30 : nd, x);
+                double r = strtod(buf, nullptr);
+                args[0] = is_int(args[0]) ? val_int((int64_t)r) : val_float(r);
+                return 1;
+            }
+            double scale = pow(10.0, -nd);
+            double r = nearbyint(x / scale) * scale;
+            args[0] = is_int(args[0]) ? val_int((int64_t)r) : val_float(r);
             return 1;
         }
         if (is_int(args[0])) return 1; /* already an int */
@@ -1553,11 +1545,11 @@ namespace zen
                 keyed.emplace_back(vm->call_fn(keyfn, &arg, 1), x);
                 if (vm->had_error()) return -1;
             }
-            std::stable_sort(keyed.begin(), keyed.end(), [](const std::pair<Value, Value> &a, const std::pair<Value, Value> &b) { return values_compare(a.first, b.first) < 0; });
+            std::stable_sort(keyed.begin(), keyed.end(), [vm](const std::pair<Value, Value> &a, const std::pair<Value, Value> &b) { return zen_compare_vm(vm, a.first, b.first) < 0; });
             for (size_t i = 0; i < keyed.size(); i++) items[i] = keyed[i].second;
         }
         else
-            std::stable_sort(items.begin(), items.end(), [](const Value &a, const Value &b) { return values_compare(a, b) < 0; });
+            std::stable_sort(items.begin(), items.end(), [vm](const Value &a, const Value &b) { return zen_compare_vm(vm, a, b) < 0; });
         if (reverse) std::reverse(items.begin(), items.end());
         args[0] = py_array_from(vm, items);
         return 1;
@@ -1719,6 +1711,26 @@ namespace zen
         Value v = nargs >= 1 ? args[0] : val_nil();
         args[0] = val_bool(is_closure(v) || is_native(v) || is_class(v));
         return 1;
+    }
+
+    /* values_compare() plus __lt__ on instances (sorted(), min(), max(), list.sort()). */
+    int zen_compare_vm(VM *vm, Value a, Value b)
+    {
+        if (is_instance(a) || is_instance(b))
+        {
+            Value inst = is_instance(a) ? a : b;
+            if (!is_nil(as_instance(inst)->klass->operator_slots[VM::SLOT_LT]))
+            {
+                Value arg = b;
+                Value r = is_instance(a) ? vm->invoke_operator(a, VM::SLOT_LT, &arg, 1) : val_bool(false);
+                if (py_truthy(r)) return -1;
+                arg = a;
+                r = is_instance(b) ? vm->invoke_operator(b, VM::SLOT_LT, &arg, 1) : val_bool(false);
+                if (py_truthy(r)) return 1;
+                return 0;
+            }
+        }
+        return values_compare(a, b);
     }
 
     /* "fmt" % rhs for OP_MOD: rhs is one value or a tuple (array) of them. */

@@ -377,6 +377,8 @@ namespace zen
 
     /* builtin_base.cpp: printf-style "fmt" % rhs (rhs: one value or an array of them) */
     Value zen_percent_format(VM *vm, Value fmt, Value rhs);
+    /* builtin_base.cpp: ordering with __lt__ on instances, values_compare() otherwise */
+    int zen_compare_vm(VM *vm, Value a, Value b);
 
 } /* namespace zen */
 

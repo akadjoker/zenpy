@@ -46,3 +46,6 @@ bin/fuzz_*
 
 # leftovers if an io/os test aborts before its cleanup
 /_zen_*_tmp/
+/build_prof/
+/build_pgo/
+/build_pgo2/

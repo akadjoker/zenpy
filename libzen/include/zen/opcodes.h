@@ -263,6 +263,10 @@ namespace zen
         ** semantics as OP_EQ (deep equality, __eq__ on instances). */
         OP_EQJMPIFNOT, /* if !(R[B] == R[C]): pc += sBx(next word) */
         OP_NEJMPIFNOT, /* if !(R[B] != R[C]): pc += sBx(next word) */
+
+        /* `return` with no value and the implicit end of a function:
+        ** LOADNIL R[0] + RETURN R[0] as one dispatch (R[0] is dead here). */
+        OP_RETURNNIL,
     };
 
 /* Encode/Decode — ABC format */

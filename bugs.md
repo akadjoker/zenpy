@@ -464,6 +464,43 @@ for_loop globais 0,158 (Wren 0,159) · for_loop locais 0,064 (Lua 0,044) ·
 method_call 0,131 (Lua 0,175, Wren 0,109) · binary_trees 0,266 (Wren 0,245,
 Lua 0,560) · call+return ~12,6 ns (Lua ~9,8).
 
+### Ronda 4b (2026-09-07, tarde: benchmarks de algoritmos → codegen)
+
+Mudança de rumo pedida pelo utilizador: pausa nas micro-optimizações da VM,
+medir cargas reais e só mexer onde o perfil mostra margem. Benchmarks em
+`tests/manual/algo_bench/` (A*, Dijkstra, quadtree, octree, Hanói, flood
+fill; Zen/Python/Lua/Wren; mesmo `py/*.py` corre em CPython e Zen; checksums
+iguais; `run.sh` faz a tabela). Perfil por opcode do Dijkstra: 18% MOVEs.
+
+- `a[i] = expr`: contentor/índice locais já não são copiados para registos
+  auxiliares antes do RHS (2 MOVEs por store).
+- Condições `if`/`elif`/`while`: `condition()` compila cadeias `and`/`or`
+  como saltos (sem booleano, sem MOVE); `cond_false_jump()` transforma
+  `not x` em JMPIF e `a != b` em NEJMPIFNOT; `EQJMPIFNOT`/`NEJMPIFNOT`
+  registo-registo (bytecode 2.7); `if` sem `else` deixa de executar um
+  `JMP +0` no fim do corpo.
+- FIX `not a == b` era `(not a) == b` (operando do `not` agora inclui
+  comparações). FIX fusão de branch em comparações encadeadas
+  (`a != b != c`): o salto de curto-circuito aterrava no compare fundido;
+  `cmp_chain_end_` recusa fusão nesse ponto (o bug do LT existia antes).
+- `OP_RETURNNIL` (return vazio / fim de função): fast path próprio; neutro
+  no tempo (o LOADNIL corria em paralelo com a cadeia call/return), menos
+  1 dispatch por chamada void.
+- Resultado: Dijkstra 0,227→0,188s, octree 0,087→0,071, quadtree
+  0,062→0,053, astar 0,062→0,056; dispatches −25%. Tabela completa em
+  tests/manual/algo_bench/README.md (Zen à frente de Python e Wren em
+  tudo; Lua ganha 10-20% só em Dijkstra e flood fill).
+- Lições: remover trabalho independente (MOVE do receptor, LOADNIL) não
+  mexe no tempo — o loop é latency-bound na chamada; só encurtar cadeias de
+  dependência (ENTER_FRAME) ou tirar dispatches do caminho de dados
+  (holds, `and`) conta. Subconjunto Python/Zen partilhado documentado no
+  README do algo_bench.
+- Sobra (medido, não feito): GETGLOBAL de constantes de módulo dentro de
+  funções (5% do Dijkstra; Lua usa upvalues), MOVE do resultado de chamada
+  para um local (`cur = heap.pop()`, 2,4%), APPEND a ~46 ciclos nas
+  comprehensions grandes (crescimento do array), marshalling de argumentos
+  (22% do Hanói, inerente).
+
 ### Plano para a próxima sessão (por ordem)
 
 1. Validar: `cd build_release && ninja`, suite normal + `--stress-gc`, bench

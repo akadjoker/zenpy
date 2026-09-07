@@ -543,9 +543,15 @@ the general instruction it replaces.
 | `GETFIELD_IDXC` / `SETFIELD_IDXC` | `p.x` on an annotated/inferred receiver | index used only if the class's field name matches; word 2 is the by-name access |
 | `GETFIELD_IDX` / `SETFIELD_IDX` | `self.x` | direct index (class fields are fixed at declaration) |
 | `LTIJMPIFNOT` `LEIJMPIFNOT` `GTIJMPIFNOT` `GEIJMPIFNOT` `EQIJMPIFNOT` `NEIJMPIFNOT` | `if x < 10:` | int8 literal in C, branch fused |
+| `EQJMPIFNOT` / `NEJMPIFNOT` | `if cur == goal:` between registers | consults `__eq__` on instances |
 | `JMPIFNIL` / `JMPIFNOTNIL` | `if x is None:` / `is not None` | identity |
 | `JMPIFEQNIL` / `JMPIFNEQNIL` | `if x == None:` / `!= None` | consults `__eq__` on instances |
 | `ADDI` / `SUBI` | `i + 1`, `x -= 2` | int8 immediate, full ADD/SUB contract |
+| `RETURNNIL` | bare `return`, end of function | LOADNIL + RETURN in one |
+
+Conditions of `if`/`elif`/`while` with a top-level `and`/`or` chain compile to
+one branch per operand (no boolean is built); `not x` branches on `x` directly;
+`a[i] = v` with local `a` and `i` stores without copying them first.
 
 **Static types are hints, never promises.** A parameter annotation (`p: P`), a
 local inferred from `x = P(...)`, an `Array[T]` element, a class-body field

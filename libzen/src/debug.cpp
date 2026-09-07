@@ -133,6 +133,7 @@ namespace zen
         "INVOKE_VT_R",
         "EQJMPIFNOT",
         "NEJMPIFNOT",
+        "RETURNNIL",
     };
 
     const char *opcode_name(OpCode op)
@@ -481,6 +482,9 @@ namespace zen
             if (gn) printf("  \t; '%s'", gn);
             return offset + 2;
         }
+        case OP_RETURNNIL:
+            printf("return None");
+            break;
         case OP_RETURN:
             if (b == 0)
                 printf("return (no value)");

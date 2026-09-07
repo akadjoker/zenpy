@@ -354,8 +354,7 @@ namespace zen
         colon_block();
 
         /* Implicit return None */
-        state_->emitter.emit_abc(OP_LOADNIL, 0, 0, 0, previous_.line);
-        state_->emitter.emit_abc(OP_RETURN, 0, 1, 0, previous_.line);
+        state_->emitter.emit_abc(OP_RETURNNIL, 0, 1, 0, previous_.line);
 
         ObjFunc *fn = state_->emitter.end(state_->max_reg);
         fn->is_generator = state_->is_generator;
@@ -692,8 +691,7 @@ namespace zen
                 }
                 else
                 {
-                    state_->emitter.emit_abc(OP_LOADNIL, 0, 0, 0, previous_.line);
-                    state_->emitter.emit_abc(OP_RETURN, 0, 1, 0, previous_.line);
+                    state_->emitter.emit_abc(OP_RETURNNIL, 0, 1, 0, previous_.line);
                 }
 
                 ObjFunc *fn = state_->emitter.end(state_->max_reg);
@@ -1931,8 +1929,7 @@ namespace zen
         {
             /* return None */
             close_captured_locals();
-            state_->emitter.emit_abc(OP_LOADNIL, 0, 0, 0, previous_.line);
-            state_->emitter.emit_abc(OP_RETURN, 0, 1, 0, previous_.line);
+            state_->emitter.emit_abc(OP_RETURNNIL, 0, 1, 0, previous_.line);
         }
         else
         {

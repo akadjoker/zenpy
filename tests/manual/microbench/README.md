@@ -16,6 +16,7 @@ lua call_base.lua; lua call_f0.lua; lua call_m.lua     # Lua reference for the c
 | call_f0 / call_f3 | call + return of an empty function, 0 and 3 arguments |
 | call_fbig | same with a 33-register callee (register clearing cost) |
 | call_m_typed / call_m_dyn | method call on a typed (INVOKE_VT) / dynamic (INVOKE) receiver |
+| call_m_void | typed method call with no return value (INVOKE_VT_R + RETURNNIL) |
 | typedparam | five field reads through an annotated parameter (GETFIELD_IDXC) |
 | selffield | `x = self.a` into a local (GETFIELD_IDX straight into the local's register) |
 | foreach | `for b in xs: b.m()` over 1000 objects (FOR_NEXT + INVOKE) |

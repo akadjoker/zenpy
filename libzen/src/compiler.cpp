@@ -97,8 +97,7 @@ namespace zen
         }
 
         /* Implicit return nil at end of script */
-        state_->emitter.emit_abc(OP_LOADNIL, 0, 0, 0, previous_.line);
-        state_->emitter.emit_abc(OP_RETURN, 0, 1, 0, previous_.line);
+        state_->emitter.emit_abc(OP_RETURNNIL, 0, 1, 0, previous_.line);
 
         ObjFunc *script = state_->emitter.end(state_->max_reg);
         script->arity = 0;
@@ -189,8 +188,7 @@ namespace zen
         }
         else
         {
-            state_->emitter.emit_abc(OP_LOADNIL, 0, 0, 0, previous_.line);
-            state_->emitter.emit_abc(OP_RETURN, 0, 1, 0, previous_.line);
+            state_->emitter.emit_abc(OP_RETURNNIL, 0, 1, 0, previous_.line);
         }
 
         ObjFunc *script = state_->emitter.end(state_->max_reg);

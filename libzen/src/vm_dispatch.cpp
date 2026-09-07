@@ -581,6 +581,9 @@ namespace zen
         ** at 1 by the _R forms (whose C is the receiver register). Every
         ** `goto op_invoke_entry` sets it first. */
         int invoke_nresults = 1;
+        /* OP_RETURN and OP_RETURNNIL share one body; the instruction word
+        ** travels through here (RETURNNIL substitutes `RETURN R[0], 1`). */
+        uint32_t ret_word = 0;
 
 /* Macro para reload após CALL/RETURN (frame mudou) */
 #define LOAD_STATE()                                \
@@ -766,6 +769,7 @@ namespace zen
             &&lbl_OP_INVOKE_VT_R,
             &&lbl_OP_EQJMPIFNOT,
             &&lbl_OP_NEJMPIFNOT,
+            &&lbl_OP_RETURNNIL,
         };
 
 #ifdef ZEN_OPCODE_PROFILE
@@ -2402,6 +2406,29 @@ namespace zen
             goto op_call_shared;
         }
 
+        CASE(OP_RETURNNIL)
+        {
+            /* `return None` / end of function. Own fast path (the value is
+            ** the constant nil); the general path is OP_RETURN's, entered
+            ** as `RETURN R[0], 1` — every function has a register 0 and it
+            ** is dead once the frame returns. */
+            if (fiber->open_upvalues && fiber->open_upvalues->location >= frame->base)
+                close_upvalues(fiber, frame->base);
+            if (__builtin_expect(fiber->frame_count > 1 && frame->ret_count == 1 &&
+                                     external_call_stop_depth_ < 0, 1))
+            {
+                int ret_reg = frame->ret_reg;
+                fiber->frame_count--;
+                CallFrame *caller_frame = frame - 1;
+                caller_frame->base[ret_reg] = val_nil();
+                fiber->stack_top = caller_frame->base + caller_frame->func->num_regs;
+                LOAD_STATE_FROM(caller_frame);
+                DISPATCH();
+            }
+            R[0] = val_nil();
+            ret_word = ZEN_ENCODE(OP_RETURN, 0, 1, 0);
+            goto op_return_slow;
+        }
         CASE(OP_RETURN)
         {
             uint32_t i = *ip;
@@ -2428,6 +2455,17 @@ namespace zen
                 LOAD_STATE_FROM(caller_frame);
                 DISPATCH();
             }
+            ret_word = i;
+            goto op_return_slow;
+        }
+        op_return_slow:
+        {
+            /* Upvalues are already closed by whichever entry came here. */
+            uint32_t i = ret_word;
+            int a = ZEN_A(i);
+            int nresults = ZEN_B(i);
+            int ret_reg = frame->ret_reg;
+            int ret_count = frame->ret_count;
 
             fiber->frame_count--;
             if (fiber->frame_count == 0)

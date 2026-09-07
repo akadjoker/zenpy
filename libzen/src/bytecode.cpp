@@ -30,6 +30,8 @@ namespace
         BC_FUNC = 5,
         BC_CLOSURE = 6,
         BC_CLASS = 7,
+        BC_STRUCT_DEF = 8, /* record Name { a, b }: name + field names (2.8) */
+        BC_ENUM_MAP = 9,   /* enum Name { A, B = 3 }: module map of scalars (2.8) */
     };
 
     static void set_error(char *err, int err_len, const char *fmt, ...)
@@ -279,10 +281,33 @@ namespace
         return true;
     }
 
+    /* An enum is a module-flagged map whose values are all scalars; an
+    ** imported module is a module-flagged map too, but holds natives, which
+    ** the loader re-creates by re-importing (resolve_native_globals). */
+    static bool is_enum_map(Value value)
+    {
+        if (!is_map(value) || !as_map(value)->is_module)
+            return false;
+        ObjMap *m = as_map(value);
+        for (int32_t i = 0; i < m->capacity; i++)
+        {
+            if (m->nodes[i].hash == 0xFFFFFFFFu) continue;
+            if (!is_string(m->nodes[i].key)) return false;
+            Value v = m->nodes[i].value;
+            if (!(is_nil(v) || is_bool(v) || is_int(v) || is_float(v) || is_string(v))) return false;
+        }
+        return true;
+    }
+
     static bool should_write_global_value(Value value)
     {
-        return value.type == VAL_OBJ && value.as.obj && value.as.obj->type == OBJ_CLASS &&
-               can_write_global_class((ObjClass *)value.as.obj);
+        if (value.type != VAL_OBJ || !value.as.obj)
+            return false;
+        if (value.as.obj->type == OBJ_CLASS)
+            return can_write_global_class((ObjClass *)value.as.obj);
+        if (value.as.obj->type == OBJ_STRUCT_DEF)
+            return true;
+        return is_enum_map(value);
     }
 
     static bool write_global_names(BytecodeWriter &w, VM *vm, bool strip_debug, BytecodeStats *stats, char *err, int err_len)
@@ -398,7 +423,32 @@ namespace
             }
             if (value.as.obj->type == OBJ_CLASS)
                 return w.write_u8(BC_CLASS) && write_class(w, (ObjClass *)value.as.obj, strip_debug, stats, err, err_len);
-        
+            if (value.as.obj->type == OBJ_STRUCT_DEF)
+            {
+                ObjStructDef *def = (ObjStructDef *)value.as.obj;
+                if (!w.write_u8(BC_STRUCT_DEF) || !write_string(w, def->name, stats, err, err_len) ||
+                    !w.write_u32((uint32_t)def->num_fields))
+                    return false;
+                for (int32_t fi = 0; fi < def->num_fields; fi++)
+                    if (!write_string(w, def->field_names[fi], stats, err, err_len))
+                        return false;
+                return true;
+            }
+            if (value.as.obj->type == OBJ_MAP && is_enum_map(value))
+            {
+                ObjMap *m = (ObjMap *)value.as.obj;
+                if (!w.write_u8(BC_ENUM_MAP) || !w.write_u32((uint32_t)m->count))
+                    return false;
+                for (int32_t mi = 0; mi < m->capacity; mi++)
+                {
+                    if (m->nodes[mi].hash == 0xFFFFFFFFu) continue;
+                    if (!write_value(w, m->nodes[mi].key, strip_debug, stats, err, err_len) ||
+                        !write_value(w, m->nodes[mi].value, strip_debug, stats, err, err_len))
+                        return false;
+                }
+                return true;
+            }
+
             set_error(err, err_len, "unsupported object constant type %d", (int)value.as.obj->type);
             return false;
         case VAL_PTR:
@@ -827,6 +877,46 @@ namespace
             cl->upvalues = nullptr;
             cl->upvalue_count = 0;
             *out = val_obj((Obj *)cl);
+            return true;
+        }
+        case BC_STRUCT_DEF:
+        {
+            ObjString *name = nullptr;
+            uint32_t nfields = 0;
+            if (!read_string(vm, r, &name, err, err_len) || !r.read_u32(&nfields))
+            {
+                set_error(err, err_len, "truncated record definition");
+                return false;
+            }
+            VM::StructBuilder builder = vm->def_struct(name->chars);
+            for (uint32_t fi = 0; fi < nfields; fi++)
+            {
+                ObjString *fname = nullptr;
+                if (!read_string(vm, r, &fname, err, err_len))
+                    return false;
+                builder.field(fname->chars);
+            }
+            *out = val_obj((Obj *)builder.end());
+            return true;
+        }
+        case BC_ENUM_MAP:
+        {
+            uint32_t count = 0;
+            if (!r.read_u32(&count))
+            {
+                set_error(err, err_len, "truncated enum");
+                return false;
+            }
+            ObjMap *m = new_map(&vm->get_gc());
+            m->is_module = true;
+            for (uint32_t mi = 0; mi < count; mi++)
+            {
+                Value k = val_nil(), v = val_nil();
+                if (!read_value(vm, r, minor, &k, err, err_len) || !read_value(vm, r, minor, &v, err, err_len))
+                    return false;
+                map_set(&vm->get_gc(), m, k, v);
+            }
+            *out = val_obj((Obj *)m);
             return true;
         }
         case BC_CLASS:

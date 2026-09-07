@@ -617,7 +617,11 @@ GC) já eram próprias.
   método cujo selector caísse num slot já ocupado (`xml.parse`, `d.update`)
   carregava com "selector mismatch"; ordem trocada no loader, formato igual.
   (2) `None + 1` (e qualquer não-número) via `ADDI`/`SUBI` dava float em vez
-  de erro; agora erro como no `OP_ADD`.
+  de erro; agora erro como no `OP_ADD`. (3) `record` e `enum` não eram
+  serializados no `.zbc` (as globais ficavam nil): bytecode 2.8 escreve
+  `BC_STRUCT_DEF` (nome + campos) e `BC_ENUM_MAP` (mapa de módulo só com
+  escalares; um módulo importado, que tem nativos, continua a ser
+  re-importado pelo loader). `--bytecode` 79/79.
 
 ### Plano para a próxima sessão (por ordem)
 

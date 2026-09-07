@@ -574,7 +574,7 @@ expression, `a, *b = ...`, `**kwargs` parameters, keyword-only `*`, lambda
 defaults, `f(**d)`, `[*a]`, f-string `!r`, raw strings, `for/while ... else`.
 See bugs.md "Ronda 5" for the full list.
 
-### Bytecode format (`.zenbc`, version 2.7)
+### Bytecode format (`.zenbc`, version 2.8)
 
 ```
 Header:  ZENBC(5) | major(u16) | minor(u16) | flags(u32)

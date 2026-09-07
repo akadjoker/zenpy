@@ -601,7 +601,9 @@ namespace zen
     int Compiler::unary(Token token, int dest)
     {
         int reg = (dest >= 0) ? dest : alloc_reg();
-        int operand = parse_precedence(PREC_UNARY, -1);
+        /* `not` binds looser than comparisons: `not a == b` is
+        ** `not (a == b)`, `not x in xs` is `not (x in xs)`. */
+        int operand = parse_precedence(token.type == TOK_NOT ? PREC_COMPARISON : PREC_UNARY, -1);
 
         switch (token.type)
         {
@@ -872,6 +874,7 @@ namespace zen
             right = new_right;
 
             state_->emitter.patch_jump(and_jump);
+            cmp_chain_end_ = state_->emitter.current_offset();
         }
 
         if (right != reg)
@@ -2048,18 +2051,32 @@ namespace zen
         /* Assignment: obj[idx] = expr */
         if (can_assign && match(TOK_EQ))
         {
-            /* Preserve container/index across RHS evaluation.
-            ** RHS parsing can allocate/free temporaries and clobber these regs. */
-            int obj_hold = alloc_reg();
-            int idx_hold = alloc_reg();
-            emit_move(obj_hold, obj);
-            emit_move(idx_hold, index);
+            /* Preserve a container/index that lives in a temporary across
+            ** the RHS evaluation. A local needs no copy: it is read after
+            ** the RHS, which is also the order Python evaluates
+            ** `a[i] = f()` in (RHS first, then the target). This is the
+            ** `dist[nb] = d` / `keys[i] = keys[p]` shape of every array
+            ** algorithm — two MOVEs per store otherwise. */
+            int obj_hold = obj;
+            int idx_hold = index;
+            if (!is_local_reg(obj))
+            {
+                obj_hold = alloc_reg();
+                emit_move(obj_hold, obj);
+            }
+            if (!is_local_reg(index))
+            {
+                idx_hold = alloc_reg();
+                emit_move(idx_hold, index);
+            }
 
             int val = expression(-1);
             state_->emitter.emit_abc(OP_SETINDEX, obj_hold, idx_hold, val, previous_.line);
             free_reg(val);
-            free_reg(idx_hold);
-            free_reg(obj_hold);
+            if (idx_hold != index)
+                free_reg(idx_hold);
+            if (obj_hold != obj)
+                free_reg(obj_hold);
             free_reg(index);
             if (obj != reg)
                 free_reg(obj);

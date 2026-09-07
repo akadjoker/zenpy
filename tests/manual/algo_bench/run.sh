@@ -5,7 +5,7 @@
 cd "$(dirname "$0")"
 ZEN="${1:-../../../build_release/bin/zen}"
 WREN="${WREN:-/media/projectos/projects/languages/wren-0.4.0/bin/wren_test}"
-PHASES="astar dijkstra quadtree octree"
+PHASES="astar dijkstra quadtree octree hanoi floodfill"
 
 declare -A best
 run3() { # label cmd... -> fills best[label/phase]
@@ -22,7 +22,7 @@ run3() { # label cmd... -> fills best[label/phase]
 }
 rm -f /tmp/algo_bench_$$.txt
 
-for f in pathfind spatial; do
+for f in pathfind spatial hanoi; do
   run3 zen        "$ZEN" py/$f.py
   run3 zen_typed  "$ZEN" zen_typed/$f.py
   run3 python     python3 py/$f.py

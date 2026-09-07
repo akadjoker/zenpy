@@ -16,7 +16,7 @@ namespace zen
     ** minor 4: ObjFunc gained generic_arity (reified generics, f<T>(...)) —
     **          written at the end of write_func(); read_func() defaults it
     **          to 0 for minor < 4. See read_func()/write_func(). */
-    static constexpr uint16_t ZEN_BYTECODE_VERSION_MINOR = 6; /* 6: INVOKE_R / INVOKE_VT_R (receiver in another register) */
+    static constexpr uint16_t ZEN_BYTECODE_VERSION_MINOR = 7; /* 7: EQJMPIFNOT / NEJMPIFNOT (register-register) */
 
     struct BytecodeStats
     {

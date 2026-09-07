@@ -257,6 +257,12 @@ namespace zen
         ** count is always 1 (multi-assign keeps the two-instruction form). */
         OP_INVOKE_R,    /* R[A] = R[C]; R[A] = R[A].method(R[A+1]..R[A+B]) (2-word) */
         OP_INVOKE_VT_R, /* same, trying the vtable slot first like OP_INVOKE_VT (2-word) */
+
+        /* Register-register equality fused with the branch (2-word, like
+        ** LTJMPIFNOT): `if cur == goal:` / `while a != b:`. Same operand
+        ** semantics as OP_EQ (deep equality, __eq__ on instances). */
+        OP_EQJMPIFNOT, /* if !(R[B] == R[C]): pc += sBx(next word) */
+        OP_NEJMPIFNOT, /* if !(R[B] != R[C]): pc += sBx(next word) */
     };
 
 /* Encode/Decode — ABC format */

@@ -1477,33 +1477,52 @@ namespace zen
 
     void Compiler::if_statement()
     {
-        /* Condition */
-        int cond = expression(-1);
-        bool then_fused = false;
-        int then_jump = emit_cond_jump(cond, then_fused);
-        free_reg(cond);
+        /* Condition: a plain expression branches once; an and/or chain
+        ** has already been turned into its jumps by condition(). */
+        CondJump then_jumps[kMaxCondJumps];
+        int n_then = 0;
+        int cond = condition(then_jumps, n_then);
+        if (cond >= 0)
+        {
+            then_jumps[0].offset = cond_false_jump(cond, then_jumps[0].fused);
+            n_then = 1;
+        }
 
         /* Then block */
         colon_block();
 
         /* Jump over else/elif */
         int else_jump = state_->emitter.emit_jump(OP_JMP, 0, previous_.line);
-        patch_cond_jump(then_jump, then_fused);
+        patch_cond_jumps(then_jumps, n_then);
+
+        /* No elif/else: that jump would be a `JMP +0` executed every time
+        ** the body runs. Drop it and land the condition's false jumps here. */
+        if (!check(TOK_ELIF) && !check(TOK_ELSE) &&
+            state_->emitter.current_offset() == else_jump + 1)
+        {
+            state_->emitter.shrink_to(else_jump);
+            patch_cond_jumps(then_jumps, n_then);
+            return;
+        }
 
         /* elif chains */
         while (match(TOK_ELIF))
         {
-            int elif_cond = expression(-1);
-            bool elif_fused = false;
-            int elif_jump = emit_cond_jump(elif_cond, elif_fused);
-            free_reg(elif_cond);
+            CondJump elif_jumps[kMaxCondJumps];
+            int n_elif = 0;
+            int elif_cond = condition(elif_jumps, n_elif);
+            if (elif_cond >= 0)
+            {
+                elif_jumps[0].offset = cond_false_jump(elif_cond, elif_jumps[0].fused);
+                n_elif = 1;
+            }
 
             colon_block();
 
             /* Patch previous else_jump to here, set new one */
             state_->emitter.patch_jump(else_jump);
             else_jump = state_->emitter.emit_jump(OP_JMP, 0, previous_.line);
-            patch_cond_jump(elif_jump, elif_fused);
+            patch_cond_jumps(elif_jumps, n_elif);
         }
 
         /* else */
@@ -1618,8 +1637,10 @@ namespace zen
         int jumps_at_start = state_->emitter.jump_count();
         int regs_at_start = state_->next_reg;
 
-        /* Condition */
-        int cond = expression(-1);
+        /* Condition (an and/or chain is already compiled to jumps) */
+        CondJump exit_jumps[kMaxCondJumps];
+        int n_exit = 0;
+        int cond = condition(exit_jumps, n_exit);
 
         /* Loop-invariant literal: `while i < 5000000` reloads the constant
         ** on every iteration. When the condition is exactly
@@ -1630,6 +1651,7 @@ namespace zen
         ** register reserved for the body. Same code, one dispatch fewer
         ** per iteration. */
         int hoisted_reg = -1;
+        if (cond >= 0)
         {
             Emitter &e = state_->emitter;
             int off = e.current_offset() - 1;
@@ -1674,9 +1696,11 @@ namespace zen
             }
         }
 
-        bool fused_compare = false;
-        int exit_jump = emit_cond_jump(cond, fused_compare);
-        free_reg(cond);
+        if (cond >= 0)
+        {
+            exit_jumps[0].offset = cond_false_jump(cond, exit_jumps[0].fused);
+            n_exit = 1;
+        }
         /* Keep the hoisted literal's register out of the body's reach. */
         if (hoisted_reg >= 0 && state_->next_reg <= hoisted_reg)
             state_->next_reg = hoisted_reg + 1;
@@ -1688,7 +1712,7 @@ namespace zen
         state_->emitter.emit_loop(loop_start, 0, previous_.line);
 
         /* Patch exit */
-        patch_cond_jump(exit_jump, fused_compare);
+        patch_cond_jumps(exit_jumps, n_exit);
         if (hoisted_reg >= 0 && state_->next_reg == hoisted_reg + 1)
             state_->next_reg = regs_at_start;
 

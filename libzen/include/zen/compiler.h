@@ -440,6 +440,18 @@ namespace zen
         ** says which patch routine to use. */
         int emit_cond_jump(int cond, bool &fused);
         void patch_cond_jump(int offset, bool fused);
+        /* emit_cond_jump plus: a condition that is exactly `not x` branches
+        ** on x with the sense inverted (the NOT is dropped). Frees `reg`. */
+        int cond_false_jump(int reg, bool &fused);
+        /* The condition of if/elif/while. A plain expression: returns its
+        ** register and n == 0 — the caller branches on it. A top-level
+        ** `and`/`or` chain: compiled as jumps (no boolean is ever built, no
+        ** MOVE to unify the operands), returns -1; the fall-through is the
+        ** true path and jumps[0..n) must be patched to the false target. */
+        struct CondJump { int offset; bool fused; };
+        static const int kMaxCondJumps = 32;
+        int condition(CondJump *jumps, int &n);
+        void patch_cond_jumps(const CondJump *jumps, int n);
 
         /* --- Global resolution (compile-time lookup) --- */
         int require_global_slot(const char *name, int len);
@@ -604,6 +616,10 @@ namespace zen
             int imm;
         };
         LastCmp last_cmp_;
+        /* Offset right after a chained comparison (`a < b < c`): its
+        ** short-circuit jump lands there expecting the boolean already in
+        ** its register, so no branch fusion may replace the last compare. */
+        int cmp_chain_end_;
         /* Set by call_expr() when the expression just parsed was exactly a
         ** `ClassName(...)` constructor call; cleared by every other rule. */
         bool last_expr_ctor_valid_;

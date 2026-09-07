@@ -764,6 +764,8 @@ namespace zen
             &&lbl_OP_NEIJMPIFNOT,
             &&lbl_OP_INVOKE_R,
             &&lbl_OP_INVOKE_VT_R,
+            &&lbl_OP_EQJMPIFNOT,
+            &&lbl_OP_NEJMPIFNOT,
         };
 
 #ifdef ZEN_OPCODE_PROFILE
@@ -5066,6 +5068,47 @@ namespace zen
                 ip += ZEN_SBX(*ip);
             NEXT();
         }
+
+/* if !(R[B] == R[C]) / if !(R[B] != R[C]): same shape as OP_LTJMPIFNOT,
+** same operand semantics as OP_EQ. */
+#define ZEN_JMP_EQ(WANT_EQUAL)                                                        \
+        {                                                                             \
+            uint32_t i = *ip;                                                         \
+            Value vb = R[ZEN_B(i)], vc = R[ZEN_C(i)];                                 \
+            bool eq;                                                                  \
+            bool at_jump_offset = false;                                              \
+            if (__builtin_expect(is_instance(vb) || is_instance(vc), 0))              \
+            {                                                                         \
+                ++ip;                                                                 \
+                at_jump_offset = true;                                                \
+                Value result;                                                         \
+                SAVE_IP();                                                            \
+                if (try_binary_operator(this, vb, vc, SLOT_EQ, SLOT_EQ, &result))     \
+                {                                                                     \
+                    if (had_error_)                                                   \
+                        return;                                                       \
+                    LOAD_STATE();                                                     \
+                    eq = is_truthy_full(result);                                      \
+                }                                                                     \
+                else                                                                  \
+                {                                                                     \
+                    LOAD_STATE();                                                     \
+                    eq = values_deep_equal(vb, vc);                                   \
+                }                                                                     \
+            }                                                                         \
+            else if (vb.type == VAL_INT && vc.type == VAL_INT)                        \
+                eq = vb.as.integer == vc.as.integer;                                  \
+            else                                                                      \
+                eq = values_deep_equal(vb, vc);                                       \
+            if (!at_jump_offset)                                                      \
+                ++ip;                                                                 \
+            if (eq != (WANT_EQUAL))                                                   \
+                ip += ZEN_SBX(*ip);                                                   \
+            NEXT();                                                                   \
+        }
+        CASE(OP_EQJMPIFNOT) ZEN_JMP_EQ(true)
+        CASE(OP_NEJMPIFNOT) ZEN_JMP_EQ(false)
+#undef ZEN_JMP_EQ
 
         CASE(OP_LEJMPIFNOT)
         {

@@ -131,6 +131,8 @@ namespace zen
         "NEIJMPIFNOT",
         "INVOKE_R",
         "INVOKE_VT_R",
+        "EQJMPIFNOT",
+        "NEJMPIFNOT",
     };
 
     const char *opcode_name(OpCode op)
@@ -830,6 +832,17 @@ namespace zen
             break;
 
         /* === Fused comparison+jump (2-word) === */
+        case OP_EQJMPIFNOT:
+        case OP_NEJMPIFNOT:
+        {
+            uint32_t word2 = func->code[offset + 1];
+            int jsbx = ZEN_SBX(word2);
+            printf("if !(R[%d] %s R[%d]): -> %04d", b, op == OP_EQJMPIFNOT ? "==" : "!=", c, offset + 2 + jsbx);
+            printf("\n");
+            printf("   |  %04d  %-16s", offset + 1, "(jump-offset)");
+            printf("sBx=%d  \t; -> %04d", jsbx, offset + 2 + jsbx);
+            return offset + 2;
+        }
         case OP_LTJMPIFNOT:
         {
             uint32_t word2 = func->code[offset + 1];

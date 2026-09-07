@@ -51,6 +51,7 @@ namespace zen
         typed_call_reg_ = -1;
         last_expr_ctor_valid_ = false;
         multi_assign_rhs_ = false;
+        cmp_chain_end_ = -1;
         fn_written_global_count_ = 0;
         last_cmp_.valid = false;
 
@@ -131,6 +132,7 @@ namespace zen
         typed_call_reg_ = -1;
         last_expr_ctor_valid_ = false;
         multi_assign_rhs_ = false;
+        cmp_chain_end_ = -1;
         fn_written_global_count_ = 0;
         last_cmp_.valid = false;
         global_type_hint_count_ = 0;
@@ -387,6 +389,120 @@ namespace zen
         return true;
     }
 
+    int Compiler::cond_false_jump(int reg, bool &fused)
+    {
+        Emitter &e = state_->emitter;
+        int off = e.current_offset() - 1;
+        /* A pending literal comparison (`x != 0`, `x == None`) is emitted
+        ** as EQ+NOT too; emit_cond_jump() has the better (immediate) form. */
+        const bool literal_cmp_pending = last_cmp_.valid && last_cmp_.end_offset == e.current_offset() &&
+                                         last_cmp_.reg == reg;
+        if (off >= 0 && e.last_op_start() == off && !is_local_reg(reg) && !literal_cmp_pending &&
+            cmp_chain_end_ != e.current_offset())
+        {
+            Instruction ins = e.instruction_at(off);
+            if (ZEN_OP(ins) == OP_NOT && ZEN_A(ins) == reg)
+            {
+                /* `if not xs[i]:` — the operand was computed into its own
+                ** temporary just above `reg` (or is reg itself) and
+                ** nothing ran since. */
+                int operand = ZEN_B(ins);
+                int line = e.line_at(off);
+                e.shrink_to(off);
+                last_cmp_.valid = false;
+                /* `a != b` is EQ + NOT with both on the same register — that
+                ** shape only comes from comparison(), which emits the EQ as
+                ** the single word right before (so off-1 is a real head
+                ** word, not the data word of something longer). Fuse. */
+                int off2 = off - 1;
+                if (off2 >= 0 && operand == reg && !is_local_reg(operand))
+                {
+                    Instruction cmp = e.instruction_at(off2);
+                    if (ZEN_OP(cmp) == OP_EQ && ZEN_A(cmp) == operand)
+                    {
+                        int b = ZEN_B(cmp), c = ZEN_C(cmp);
+                        int cline = e.line_at(off2);
+                        e.shrink_to(off2);
+                        fused = true;
+                        free_reg(reg);
+                        return e.emit_cmpi_jmpifnot(OP_NEJMPIFNOT, b, c, cline);
+                    }
+                }
+                fused = false;
+                free_reg(reg);
+                return e.emit_jump(OP_JMPIF, operand, line);
+            }
+        }
+        int j = emit_cond_jump(reg, fused);
+        free_reg(reg);
+        return j;
+    }
+
+    int Compiler::condition(CondJump *jumps, int &n)
+    {
+        n = 0;
+        int reg = parse_precedence(PREC_AND + 1, -1);
+        if (had_error_)
+            return reg;
+        if (!check(TOK_AND) && !check(TOK_OR))
+        {
+            /* Plain condition. A ternary is the only operator that binds
+            ** looser than `and`/`or` and can still follow. */
+            if (check(TOK_IF) && current_.line == previous_.line)
+            {
+                advance();
+                reg = infix_rule(previous_, reg, -1);
+            }
+            return reg;
+        }
+
+        int true_jumps[kMaxCondJumps];
+        int n_true = 0;
+        while (true)
+        {
+            if (n >= kMaxCondJumps || n_true >= kMaxCondJumps)
+            {
+                error("Condition has too many and/or operands.");
+                return -1;
+            }
+            bool fused = false;
+            jumps[n].offset = cond_false_jump(reg, fused);
+            jumps[n].fused = fused;
+            n++;
+            if (match(TOK_AND))
+            {
+                reg = parse_precedence(PREC_AND + 1, -1);
+                if (had_error_)
+                    return -1;
+                continue;
+            }
+            if (match(TOK_OR))
+            {
+                /* The and-chain so far held: straight to the body. Its
+                ** false jumps land on the next operand instead. */
+                true_jumps[n_true++] = state_->emitter.emit_jump(OP_JMP, 0, previous_.line);
+                patch_cond_jumps(jumps, n);
+                n = 0;
+                reg = parse_precedence(PREC_AND + 1, -1);
+                if (had_error_)
+                    return -1;
+                continue;
+            }
+            break;
+        }
+        if (check(TOK_IF) && current_.line == previous_.line)
+            error("A conditional expression cannot follow an and/or chain in a condition; parenthesize it.");
+        for (int i = 0; i < n_true; i++)
+            state_->emitter.patch_jump(true_jumps[i]);
+        return -1;
+    }
+
+    void Compiler::patch_cond_jumps(const CondJump *jumps, int n)
+    {
+        for (int i = 0; i < n; i++)
+            patch_cond_jump(jumps[i].offset, jumps[i].fused);
+    }
+
     int Compiler::emit_cond_jump(int cond, bool &fused)
     {
         Emitter &e = state_->emitter;
@@ -447,19 +563,21 @@ namespace zen
         if (off >= 0 && e.last_op_start() == off)
         {
             Instruction cmp = e.instruction_at(off);
-            if (ZEN_A(cmp) == cond && (ZEN_OP(cmp) == OP_LT || ZEN_OP(cmp) == OP_LE) &&
-                !is_local_reg(cond))
+            OpCode cop = (OpCode)ZEN_OP(cmp);
+            if (ZEN_A(cmp) == cond && (cop == OP_LT || cop == OP_LE || cop == OP_EQ) &&
+                !is_local_reg(cond) && cmp_chain_end_ != e.current_offset())
             {
                 /* The comparison's boolean was only ever going to be
                 ** branched on: drop it for the fused compare-and-jump,
                 ** whose handler keeps string and overloaded-operator
                 ** semantics. */
-                bool le = ZEN_OP(cmp) == OP_LE;
                 int b = ZEN_B(cmp), c = ZEN_C(cmp);
                 int line = e.line_at(off);
                 e.shrink_to(off);
                 fused = true;
-                return le ? e.emit_le_jmpifnot(b, c, line) : e.emit_lt_jmpifnot(b, c, line);
+                if (cop == OP_EQ)
+                    return e.emit_cmpi_jmpifnot(OP_EQJMPIFNOT, b, c, line);
+                return cop == OP_LE ? e.emit_le_jmpifnot(b, c, line) : e.emit_lt_jmpifnot(b, c, line);
             }
         }
         return e.emit_jump(OP_JMPIFNOT, cond, previous_.line);

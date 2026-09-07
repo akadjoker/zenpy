@@ -37,3 +37,4 @@ call_f0 0.114s, call_f3 0.128s, call_fbig 0.155s, call_m_typed 0.134s,
 call_m_dyn 0.135s, typedparam 0.074s, selffield 0.126s (was 0.191s),
 foreach 0.066s, forrange 0.058s, forrange_empty 0.065s; Lua: call_base
 0.032s, call_f0 0.081s, call_m 0.170s. call+return ≈ 12.6 ns (Lua ≈ 9.8).
+Later that day (ff92cc1): call_m_void 0.169 → 0.158s with RETURNNIL.

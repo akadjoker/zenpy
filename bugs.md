@@ -484,8 +484,8 @@ iguais; `run.sh` faz a tabela). Perfil por opcode do Dijkstra: 18% MOVEs.
   (`a != b != c`): o salto de curto-circuito aterrava no compare fundido;
   `cmp_chain_end_` recusa fusão nesse ponto (o bug do LT existia antes).
 - `OP_RETURNNIL` (return vazio / fim de função): fast path próprio; neutro
-  no tempo (o LOADNIL corria em paralelo com a cadeia call/return), menos
-  1 dispatch por chamada void.
+  no Hanói (o LOADNIL corria em paralelo com a cadeia call/return), mas
+  microbench `call_m_void` 0,169→0,158s (−6,5%): o `update()` típico de jogo.
 - Resultado: Dijkstra 0,227→0,188s, octree 0,087→0,071, quadtree
   0,062→0,053, astar 0,062→0,056; dispatches −25%. Tabela completa em
   tests/manual/algo_bench/README.md (Zen à frente de Python e Wren em

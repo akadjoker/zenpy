@@ -38,18 +38,15 @@ The per-opcode profile of Dijkstra showed 18% of all dispatches were MOVEs:
 every store, and every `and` in a condition copied its operand into the
 result register. Both fixed in the compiler the same day (see below).
 
-## 2026-09-07, after the condition/subscript codegen fixes (same window)
+## 2026-09-07, after the condition/subscript codegen fixes (commit ff92cc1, same window)
 
 |            | astar | dijkstra | quadtree | octree | hanoi | floodfill |
 |------------|------:|---------:|---------:|-------:|------:|----------:|
-| zen        | 0.056 | 0.188    | 0.054    | 0.072  | 0.054 | 0.011     |
-| zen_typed  | 0.059 | 0.188    | 0.052    | 0.069  | 0.054 | 0.011     |
-| python     | 0.080 | 0.285    | 0.076    | 0.115  | 0.092 | 0.027     |
-| lua        | 0.045 | 0.169    | 0.059    | 0.088  | 0.064 | 0.009     |
-| wren       | 0.061 | 0.350    | 0.071    | 0.101  | 0.074 | 0.020     |
-
-(zen_typed dijkstra varies 0.185–0.215 between runs; its bytecode is identical
-to the plain version's.)
+| zen        | 0.055 | 0.179    | 0.052    | 0.070  | 0.055 | 0.011     |
+| zen_typed  | 0.055 | 0.181    | 0.052    | 0.068  | 0.055 | 0.011     |
+| python     | 0.070 | 0.253    | 0.074    | 0.112  | 0.091 | 0.027     |
+| lua        | 0.042 | 0.160    | 0.054    | 0.084  | 0.065 | 0.009     |
+| wren       | 0.061 | 0.326    | 0.071    | 0.100  | 0.074 | 0.020     |
 
 Reading:
 

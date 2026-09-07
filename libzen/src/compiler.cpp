@@ -872,6 +872,13 @@ namespace zen
             /* Read */
             if (dest >= 0 && dest != reg)
             {
+                /* `n = self.item`, `v = xs[i]`, `r = f(x)`: the link that
+                ** follows reads the local where it lives and puts its own
+                ** result in dest — copying the local into dest first only
+                ** hid the receiver from the typed/self paths (a MOVE plus a
+                ** by-name GETFIELD instead of one GETFIELD_IDX). */
+                if (chain_continues())
+                    return reg;
                 emit_move(dest, reg);
                 return dest;
             }

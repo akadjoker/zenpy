@@ -1282,13 +1282,12 @@ namespace zen
     ** maps (keys) and sets.
     ** ========================================================= */
 #define ZEN_INTLIKE_V(v) ((v).type == VAL_INT || (v).type == VAL_BOOL)
-    /* Element plus its sort key and original position: ct::sort is not
-    ** stable, the position breaks ties the way Python's stable sort does. */
+    /* Element plus its sort key (sorted(key=...)); ct::stable_sort keeps
+    ** the original order of equal keys, as Python's sort does. */
     struct KeyedValue
     {
         Value key;
         Value val;
-        uint32_t index;
     };
     static void py_reverse(ct::Vector<Value> &v)
     {
@@ -1565,7 +1564,6 @@ namespace zen
             KeyedValue kv;
             kv.val = items[i];
             kv.key = items[i];
-            kv.index = (uint32_t)i;
             if (has_key)
             {
                 Value arg = items[i];
@@ -1574,9 +1572,8 @@ namespace zen
             }
             keyed.push_back(kv);
         }
-        ct::sort(keyed.begin(), keyed.end(), [vm](const KeyedValue &a, const KeyedValue &b) {
-            int c = zen_compare_vm(vm, a.key, b.key);
-            return c < 0 || (c == 0 && a.index < b.index); /* stable, as Python's sort */
+        ct::stable_sort(keyed.begin(), keyed.end(), [vm](const KeyedValue &a, const KeyedValue &b) {
+            return zen_compare_vm(vm, a.key, b.key) < 0;
         });
         for (size_t i = 0; i < keyed.size(); i++) items[i] = keyed[i].val;
         if (reverse) py_reverse(items);

@@ -251,13 +251,12 @@ if (ARRAY_METHOD("sort"))
     if (count > 1)
     {
         SAVE_IP();
-        struct Keyed { Value key; Value val; uint32_t index; };
+        struct Keyed { Value key; Value val; };
         ct::Vector<Keyed> keyed;
         keyed.resize((size_t)count);
         for (int32_t k = 0; k < count; k++)
         {
             keyed[k].val = arr->data[k];
-            keyed[k].index = (uint32_t)k;
             if (is_nil(keyfn))
                 keyed[k].key = arr->data[k];
             else
@@ -268,9 +267,8 @@ if (ARRAY_METHOD("sort"))
             }
         }
         VM *self_vm = this;
-        ct::sort(keyed.begin(), keyed.end(), [self_vm](const Keyed &x, const Keyed &y) {
-            int c = zen_compare_vm(self_vm, x.key, y.key);
-            return c < 0 || (c == 0 && x.index < y.index); /* stable */
+        ct::stable_sort(keyed.begin(), keyed.end(), [self_vm](const Keyed &x, const Keyed &y) {
+            return zen_compare_vm(self_vm, x.key, y.key) < 0; /* stable, as Python's sort */
         });
         if (had_error_) return;
         for (int32_t k = 0; k < count; k++)

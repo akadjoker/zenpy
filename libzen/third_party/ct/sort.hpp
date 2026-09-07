@@ -2,6 +2,7 @@
 #pragma once
 
 #include "detail/utils.hpp"
+#include <new>
 
 namespace ct
 {
@@ -168,6 +169,84 @@ namespace ct
             allocator.deallocate(buf, bytes);
         }
 
+        template <typename T, typename C>
+        inline void merge_forward(T *lo, T *mid, T *hi, T *buf, C cmp)
+        {
+            std::size_t nl = static_cast<std::size_t>(mid - lo);
+            for (std::size_t i = 0; i < nl; ++i)
+                new (buf + i) T(detail::move(lo[i]));
+            T *l = buf;
+            T *le = buf + nl;
+            T *r = mid;
+            T *out = lo;
+            while (l < le && r < hi)
+            {
+                if (cmp(*r, *l))
+                    *out++ = detail::move(*r++);
+                else
+                    *out++ = detail::move(*l++);
+            }
+            while (l < le)
+                *out++ = detail::move(*l++);
+            for (std::size_t i = 0; i < nl; ++i)
+                buf[i].~T();
+        }
+
+        template <typename T, typename C>
+        inline void merge_backward(T *lo, T *mid, T *hi, T *buf, C cmp)
+        {
+            std::size_t nr = static_cast<std::size_t>(hi - mid);
+            for (std::size_t i = 0; i < nr; ++i)
+                new (buf + i) T(detail::move(mid[i]));
+            T *l = mid;
+            T *r = buf + nr;
+            T *out = hi;
+            while (l > lo && r > buf)
+            {
+                if (cmp(*(r - 1), *(l - 1)))
+                    *--out = detail::move(*--l);
+                else
+                    *--out = detail::move(*--r);
+            }
+            while (r > buf)
+                *--out = detail::move(*--r);
+            for (std::size_t i = 0; i < nr; ++i)
+                buf[i].~T();
+        }
+
+        template <typename T, typename C>
+        inline void stable_sort_impl(T *lo, T *hi, C cmp)
+        {
+            std::size_t n = static_cast<std::size_t>(hi - lo);
+            if (n <= kSmallSort)
+            {
+                insertion_sort(lo, hi, cmp);
+                return;
+            }
+            for (T *p = lo; p < hi; p += kSmallSort)
+                insertion_sort(p, (hi - p > static_cast<std::ptrdiff_t>(kSmallSort)) ? p + kSmallSort : hi, cmp);
+
+            std::size_t half = n / 2 + 1;
+            std::size_t bytes = 0;
+            if (!checked_mul(half, sizeof(T), bytes))
+                fatal("ct::stable_sort: tamanho invalido");
+            HeapAlloc allocator;
+            T *buf = static_cast<T *>(allocator.allocate(bytes, alignof(T)));
+            for (std::size_t width = kSmallSort; width < n; width *= 2)
+            {
+                for (T *p = lo; hi - p > static_cast<std::ptrdiff_t>(width); p += 2 * width)
+                {
+                    T *mid = p + width;
+                    T *end = (hi - p > static_cast<std::ptrdiff_t>(2 * width)) ? p + 2 * width : hi;
+                    if (mid - p <= end - mid)
+                        merge_forward(p, mid, end, buf, cmp);
+                    else
+                        merge_backward(p, mid, end, buf, cmp);
+                }
+            }
+            allocator.deallocate(buf, bytes);
+        }
+
     } 
 
     template <typename It, typename C>
@@ -186,6 +265,24 @@ namespace ct
         using T = typename detail::remove_ref<decltype(*first)>::type;
         detail::intro_sort(&*first, &*first + (last - first),
                            [](const T &a, const T &b) { return a < b; });
+    }
+
+    template <typename It, typename C>
+    inline void stable_sort(It first, It last, C cmp)
+    {
+        if (first == last)
+            return;
+        detail::stable_sort_impl(&*first, &*first + (last - first), cmp);
+    }
+
+    template <typename It>
+    inline void stable_sort(It first, It last)
+    {
+        if (first == last)
+            return;
+        using T = typename detail::remove_ref<decltype(*first)>::type;
+        detail::stable_sort_impl(&*first, &*first + (last - first),
+                                 [](const T &a, const T &b) { return a < b; });
     }
 
 #define CT_RADIX_SORT(T, U, KEY_EXPR)                                          \

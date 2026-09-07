@@ -42,9 +42,8 @@ namespace zen
             /* EXPERIMENTAL SSO: small string optimization (1-7 bytes inline) */
             struct
             {
-                uint8_t len;               /* 1-7 bytes */
+                uint8_t len;               /* 1-6 bytes (EXPERIMENT: fit in 8) */
                 char chars[7];             /* string data */
-                uint8_t _pad;              /* padding */
             } sso;
         } as;
     };

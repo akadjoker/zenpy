@@ -14,6 +14,10 @@
 **   range(a,b?,step?)→ array [a..b) with step
 ** ========================================================= */
 
+#include <vector>
+#include <string>
+#include <algorithm>
+#include <cmath>
 #include "module.h"
 #include "vm.h"
 #include "memory.h"
@@ -203,6 +207,8 @@ namespace zen
     /* =========================================================
     ** str(val) → string
     ** ========================================================= */
+    static void py_append_value(VM *vm, std::string &out, Value v, bool repr);
+
     static int nat_str(VM *vm, Value *args, int nargs)
     {
         if (nargs < 1)
@@ -216,35 +222,9 @@ namespace zen
             args[0] = v;
             return 1;
         }
-        char buf[64];
-        int len = 0;
-        if (is_nil(v))
-            len = snprintf(buf, sizeof(buf), "nil");
-        else if (is_bool(v))
-            len = snprintf(buf, sizeof(buf), "%s", v.as.boolean ? "true" : "false");
-        else if (is_int(v))
-            len = snprintf(buf, sizeof(buf), "%lld", (long long)v.as.integer);
-        else if (is_float(v))
-            len = snprintf(buf, sizeof(buf), "%g", v.as.number);
-        else if (is_array(v))
-            len = snprintf(buf, sizeof(buf), "<array>");
-        else if (is_map(v))
-            len = snprintf(buf, sizeof(buf), "<map>");
-        else if (is_instance(v))
-        {
-            ObjInstance *inst = as_instance(v);
-            Value slot = inst->klass->operator_slots[VM::SLOT_STR];
-            if (!is_nil(slot))
-            {
-                args[0] = vm->invoke_operator(v, VM::SLOT_STR, nullptr, 0);
-                return 1;
-            }
-            len = snprintf(buf, sizeof(buf), "<object>");
-        }
-        else
-            len = snprintf(buf, sizeof(buf), "<object>");
-
-        args[0] = val_obj((Obj *)vm->make_string(buf, len));
+        std::string out;
+        py_append_value(vm, out, v, false); /* str(x) == what print(x) shows */
+        args[0] = val_obj((Obj *)vm->make_string(out.c_str(), (int)out.size()));
         return 1;
     }
 
@@ -277,8 +257,23 @@ namespace zen
         if (is_string(v))
         {
             ObjString *s = as_string(v);
+            int base = 10;
+            if (nargs >= 2 && is_int(args[1]))
+                base = (int)args[1].as.integer;
+            const char *p = s->chars;
+            while (*p == ' ' || *p == '\t') p++;
+            /* Python accepts the 0x/0o/0b prefix when it matches the base */
+            bool neg = false;
+            if (*p == '-') { neg = true; p++; } else if (*p == '+') p++;
+            if (p[0] == '0' && ((base == 16 && (p[1] == 'x' || p[1] == 'X')) ||
+                                (base == 8 && (p[1] == 'o' || p[1] == 'O')) ||
+                                (base == 2 && (p[1] == 'b' || p[1] == 'B'))))
+                p += 2;
             char *end;
-            int64_t n = strtoll(s->chars, &end, 10);
+            int64_t n = strtoll(p, &end, base);
+            if (neg) n = -n;
+            if (end == p)
+                end = s->chars; /* nothing parsed: same error as before */
             if (end == s->chars)
             {
                 vm->runtime_error("int(): cannot convert '%s' to int.", s->chars);
@@ -1249,8 +1244,425 @@ namespace zen
     static int nat_Float32Array(VM *vm, Value *args, int n) { return nat_typed_array(vm, args, n, BUF_FLOAT32); }
     static int nat_Float64Array(VM *vm, Value *args, int n) { return nat_typed_array(vm, args, n, BUF_FLOAT64); }
 
+
+    /* =========================================================
+    ** Python core builtins: abs, min, max, round, sum, sorted, reversed,
+    ** any, all, list, tuple, set, dict, bool, repr, chr, hex, oct, bin,
+    ** divmod, pow, callable. Iterables are arrays, strings (characters),
+    ** maps (keys) and sets.
+    ** ========================================================= */
+#define ZEN_INTLIKE_V(v) ((v).type == VAL_INT || (v).type == VAL_BOOL)
+    static bool py_truthy(Value v)
+    {
+        if (is_array(v)) return arr_count(as_array(v)) > 0;
+        if (is_string(v)) return as_string(v)->length > 0;
+        if (is_map(v)) return as_map(v)->count > 0;
+        if (is_set(v)) return as_set(v)->count > 0;
+        if (is_range(v))
+        {
+            ObjRange *r = as_range(v);
+            return r->step > 0 ? r->start < r->stop : (r->step < 0 && r->start > r->stop);
+        }
+        return is_truthy(v);
+    }
+
+    static bool py_collect(VM *vm, Value v, std::vector<Value> &out, const char *who)
+    {
+        if (is_array(v))
+        {
+            ObjArray *a = as_array(v);
+            out.assign(a->data, a->data + arr_count(a));
+            return true;
+        }
+        if (is_string(v))
+        {
+            ObjString *s = as_string(v);
+            for (int i = 0; i < s->length; i++)
+                out.push_back(val_obj((Obj *)vm->make_string(s->chars + i, 1)));
+            return true;
+        }
+        if (is_map(v))
+        {
+            ObjMap *m = as_map(v);
+            for (int32_t i = 0; i < m->capacity; i++)
+                if (m->nodes[i].hash != 0xFFFFFFFFu)
+                    out.push_back(m->nodes[i].key);
+            return true;
+        }
+        if (is_set(v))
+        {
+            ObjSet *st = as_set(v);
+            for (int32_t i = 0; i < st->capacity; i++)
+                if (st->nodes[i].hash != 0xFFFFFFFFu)
+                    out.push_back(st->nodes[i].key);
+            return true;
+        }
+        if (is_range(v))
+        {
+            ObjRange *r = as_range(v);
+            if (r->step > 0)
+                for (int64_t x = r->start; x < r->stop; x += r->step) out.push_back(val_int(x));
+            else if (r->step < 0)
+                for (int64_t x = r->start; x > r->stop; x += r->step) out.push_back(val_int(x));
+            return true;
+        }
+        vm->runtime_error("%s: object is not iterable", who);
+        return false;
+    }
+
+    static Value py_array_from(VM *vm, const std::vector<Value> &items)
+    {
+        GC *gc = &vm->get_gc();
+        ObjArray *r = new_array(gc);
+        for (const Value &x : items)
+            array_push(gc, r, x);
+        return val_obj((Obj *)r);
+    }
+
+    /* Text of a value exactly as print() shows it (repr: strings quoted). */
+    static void py_append_value(VM *vm, std::string &out, Value v, bool repr)
+    {
+        char buf[64];
+        if (is_nil(v)) out += "None";
+        else if (is_bool(v)) out += v.as.boolean ? "True" : "False";
+        else if (is_int(v)) { snprintf(buf, sizeof buf, "%lld", (long long)v.as.integer); out += buf; }
+        else if (is_float(v)) { format_float_py(v.as.number, buf, sizeof buf); out += buf; }
+        else if (is_string(v))
+        {
+            ObjString *str = as_string(v);
+            if (repr) out += '\'';
+            out.append(str->chars, (size_t)str->length);
+            if (repr) out += '\'';
+        }
+        else if (is_array(v))
+        {
+            ObjArray *a = as_array(v);
+            out += '[';
+            for (int32_t i = 0; i < arr_count(a); i++)
+            {
+                if (i) out += ", ";
+                py_append_value(vm, out, a->data[i], true);
+            }
+            out += ']';
+        }
+        else if (is_map(v))
+        {
+            ObjMap *m = as_map(v);
+            out += '{';
+            bool first = true;
+            for (int32_t i = 0; i < m->capacity; i++)
+            {
+                if (m->nodes[i].hash == 0xFFFFFFFFu) continue;
+                if (!first) out += ", ";
+                first = false;
+                py_append_value(vm, out, m->nodes[i].key, true);
+                out += ": ";
+                py_append_value(vm, out, m->nodes[i].value, true);
+            }
+            out += '}';
+        }
+        else if (is_set(v))
+        {
+            ObjSet *st = as_set(v);
+            if (st->count == 0) { out += "set()"; return; }
+            out += '{';
+            bool first = true;
+            for (int32_t i = 0; i < st->capacity; i++)
+            {
+                if (st->nodes[i].hash == 0xFFFFFFFFu) continue;
+                if (!first) out += ", ";
+                first = false;
+                py_append_value(vm, out, st->nodes[i].key, true);
+            }
+            out += '}';
+        }
+        else if (is_instance(v))
+        {
+            ObjInstance *inst = as_instance(v);
+            Value slot = inst->klass->operator_slots[VM::SLOT_STR];
+            if (!is_nil(slot))
+            {
+                Value r = vm->invoke_operator(v, VM::SLOT_STR, nullptr, 0);
+                if (is_string(r)) { out.append(as_string(r)->chars, (size_t)as_string(r)->length); return; }
+            }
+            out += '<'; out += inst->klass->name->chars; out += " object>";
+        }
+        else if (is_class(v)) { out += "<class '"; out += as_class(v)->name->chars; out += "'>"; }
+        else out += "<object>";
+    }
+
+    static int nat_repr(VM *vm, Value *args, int nargs)
+    {
+        std::string out;
+        py_append_value(vm, out, nargs > 0 ? args[0] : val_nil(), true);
+        args[0] = val_obj((Obj *)vm->make_string(out.c_str(), (int)out.size()));
+        return 1;
+    }
+
+    static int nat_abs(VM *vm, Value *args, int nargs)
+    {
+        if (nargs < 1) { vm->runtime_error("abs() takes one argument"); return -1; }
+        Value v = args[0];
+        if (is_int(v)) args[0] = val_int(v.as.integer < 0 ? -v.as.integer : v.as.integer);
+        else if (is_float(v)) args[0] = val_float(fabs(v.as.number));
+        else if (is_bool(v)) args[0] = val_int(v.as.boolean ? 1 : 0);
+        else { vm->runtime_error("abs(): bad operand type"); return -1; }
+        return 1;
+    }
+
+    static int nat_minmax(VM *vm, Value *args, int nargs, bool want_max)
+    {
+        std::vector<Value> items;
+        if (nargs == 1)
+        {
+            if (!py_collect(vm, args[0], items, want_max ? "max" : "min")) return -1;
+        }
+        else
+            items.assign(args, args + nargs);
+        if (items.empty()) { vm->runtime_error("%s() arg is an empty sequence", want_max ? "max" : "min"); return -1; }
+        Value best = items[0];
+        for (size_t i = 1; i < items.size(); i++)
+        {
+            int c = values_compare(items[i], best);
+            if (want_max ? c > 0 : c < 0) best = items[i];
+        }
+        args[0] = best;
+        return 1;
+    }
+    static int nat_min(VM *vm, Value *args, int nargs) { return nat_minmax(vm, args, nargs, false); }
+    static int nat_max(VM *vm, Value *args, int nargs) { return nat_minmax(vm, args, nargs, true); }
+
+    static int nat_round(VM *vm, Value *args, int nargs)
+    {
+        if (nargs < 1) { vm->runtime_error("round() takes at least one argument"); return -1; }
+        double x = to_number(args[0]);
+        if (nargs >= 2 && !is_nil(args[1]))
+        {
+            int nd = (int)to_integer(args[1]);
+            double scale = pow(10.0, nd);
+            double r = nearbyint(x * scale) / scale; /* ties to even, as Python */
+            args[0] = val_float(r);
+            return 1;
+        }
+        if (is_int(args[0])) return 1; /* already an int */
+        args[0] = val_int((int64_t)nearbyint(x));
+        return 1;
+    }
+
+    static int nat_sum(VM *vm, Value *args, int nargs)
+    {
+        if (nargs < 1) { vm->runtime_error("sum() takes at least one argument"); return -1; }
+        std::vector<Value> items;
+        if (!py_collect(vm, args[0], items, "sum")) return -1;
+        Value acc = nargs >= 2 ? args[1] : val_int(0);
+        for (const Value &x : items)
+        {
+            if (is_array(acc) && is_array(x))
+            {
+                std::vector<Value> joined;
+                py_collect(vm, acc, joined, "sum");
+                ObjArray *xa = as_array(x);
+                joined.insert(joined.end(), xa->data, xa->data + arr_count(xa));
+                acc = py_array_from(vm, joined);
+                continue;
+            }
+            if (!is_numeric_like(acc) || !is_numeric_like(x)) { vm->runtime_error("sum(): unsupported operand"); return -1; }
+            if (ZEN_INTLIKE_V(acc) && ZEN_INTLIKE_V(x))
+                acc = val_int(to_integer(acc) + to_integer(x));
+            else
+                acc = val_float(to_number(acc) + to_number(x));
+        }
+        args[0] = acc;
+        return 1;
+    }
+
+    static int nat_sorted(VM *vm, Value *args, int nargs)
+    {
+        if (nargs < 1) { vm->runtime_error("sorted() takes one argument"); return -1; }
+        std::vector<Value> items;
+        if (!py_collect(vm, args[0], items, "sorted")) return -1;
+        bool reverse = nargs >= 2 && py_truthy(args[1]); /* sorted(xs, True) until keywords reach natives */
+        std::stable_sort(items.begin(), items.end(), [](const Value &a, const Value &b) { return values_compare(a, b) < 0; });
+        if (reverse) std::reverse(items.begin(), items.end());
+        args[0] = py_array_from(vm, items);
+        return 1;
+    }
+
+    static int nat_reversed(VM *vm, Value *args, int nargs)
+    {
+        if (nargs < 1) { vm->runtime_error("reversed() takes one argument"); return -1; }
+        std::vector<Value> items;
+        if (!py_collect(vm, args[0], items, "reversed")) return -1;
+        std::reverse(items.begin(), items.end());
+        args[0] = py_array_from(vm, items);
+        return 1;
+    }
+
+    static int nat_any(VM *vm, Value *args, int nargs)
+    {
+        std::vector<Value> items;
+        if (nargs < 1 || !py_collect(vm, args[0], items, "any")) return -1;
+        for (const Value &x : items) if (py_truthy(x)) { args[0] = val_bool(true); return 1; }
+        args[0] = val_bool(false);
+        return 1;
+    }
+    static int nat_all(VM *vm, Value *args, int nargs)
+    {
+        std::vector<Value> items;
+        if (nargs < 1 || !py_collect(vm, args[0], items, "all")) return -1;
+        for (const Value &x : items) if (!py_truthy(x)) { args[0] = val_bool(false); return 1; }
+        args[0] = val_bool(true);
+        return 1;
+    }
+
+    static int nat_list(VM *vm, Value *args, int nargs)
+    {
+        std::vector<Value> items;
+        if (nargs >= 1 && !py_collect(vm, args[0], items, "list")) return -1;
+        args[0] = py_array_from(vm, items);
+        return 1;
+    }
+    static int nat_set(VM *vm, Value *args, int nargs)
+    {
+        std::vector<Value> items;
+        if (nargs >= 1 && !py_collect(vm, args[0], items, "set")) return -1;
+        GC *gc = &vm->get_gc();
+        ObjSet *st = new_set(gc);
+        for (const Value &x : items) set_add(gc, st, x);
+        args[0] = val_obj((Obj *)st);
+        return 1;
+    }
+    static int nat_dict(VM *vm, Value *args, int nargs)
+    {
+        GC *gc = &vm->get_gc();
+        ObjMap *m = new_map(gc);
+        if (nargs >= 1)
+        {
+            if (is_map(args[0]))
+            {
+                ObjMap *src = as_map(args[0]);
+                for (int32_t i = 0; i < src->capacity; i++)
+                    if (src->nodes[i].hash != 0xFFFFFFFFu)
+                        map_set(gc, m, src->nodes[i].key, src->nodes[i].value);
+            }
+            else
+            {
+                std::vector<Value> items;
+                if (!py_collect(vm, args[0], items, "dict")) return -1;
+                for (const Value &pair : items)
+                {
+                    if (!is_array(pair) || arr_count(as_array(pair)) != 2)
+                    {
+                        vm->runtime_error("dict(): each item must be a (key, value) pair");
+                        return -1;
+                    }
+                    map_set(gc, m, as_array(pair)->data[0], as_array(pair)->data[1]);
+                }
+            }
+        }
+        args[0] = val_obj((Obj *)m);
+        return 1;
+    }
+    static int nat_bool(VM *, Value *args, int nargs) { args[0] = val_bool(nargs >= 1 && py_truthy(args[0])); return 1; }
+
+    static int nat_basefmt(VM *vm, Value *args, int nargs, const char *prefix, int base)
+    {
+        if (nargs < 1 || !(is_int(args[0]) || is_bool(args[0]))) { vm->runtime_error("%s(): integer argument required", prefix); return -1; }
+        int64_t v = to_integer(args[0]);
+        char digits[80];
+        int n = 0;
+        uint64_t u = v < 0 ? (uint64_t)(-(v + 1)) + 1 : (uint64_t)v;
+        do { int d = (int)(u % (uint64_t)base); digits[n++] = (char)(d < 10 ? '0' + d : 'a' + d - 10); u /= (uint64_t)base; } while (u);
+        std::string out;
+        if (v < 0) out += '-';
+        out += prefix;
+        while (n) out += digits[--n];
+        args[0] = val_obj((Obj *)vm->make_string(out.c_str(), (int)out.size()));
+        return 1;
+    }
+    static int nat_hex(VM *vm, Value *args, int nargs) { return nat_basefmt(vm, args, nargs, "0x", 16); }
+    static int nat_oct(VM *vm, Value *args, int nargs) { return nat_basefmt(vm, args, nargs, "0o", 8); }
+    static int nat_bin(VM *vm, Value *args, int nargs) { return nat_basefmt(vm, args, nargs, "0b", 2); }
+
+    static int nat_divmod(VM *vm, Value *args, int nargs)
+    {
+        if (nargs < 2) { vm->runtime_error("divmod() takes two arguments"); return -1; }
+        Value a = args[0], b = args[1];
+        std::vector<Value> pair;
+        if (ZEN_INTLIKE_V(a) && ZEN_INTLIKE_V(b))
+        {
+            int64_t x = to_integer(a), y = to_integer(b);
+            if (y == 0) { vm->runtime_error("divmod(): division by zero"); return -1; }
+            int64_t q = x / y, r = x % y;
+            if (r != 0 && ((r < 0) != (y < 0))) { q--; r += y; }
+            pair.push_back(val_int(q)); pair.push_back(val_int(r));
+        }
+        else
+        {
+            double x = to_number(a), y = to_number(b);
+            if (y == 0.0) { vm->runtime_error("divmod(): division by zero"); return -1; }
+            double q = floor(x / y), r = fmod(x, y);
+            if (r != 0.0 && ((r < 0.0) != (y < 0.0))) r += y;
+            pair.push_back(val_float(q)); pair.push_back(val_float(r));
+        }
+        args[0] = py_array_from(vm, pair);
+        return 1;
+    }
+
+    static int nat_pow(VM *vm, Value *args, int nargs)
+    {
+        if (nargs < 2) { vm->runtime_error("pow() takes two or three arguments"); return -1; }
+        if (nargs >= 3 && ZEN_INTLIKE_V(args[0]) && ZEN_INTLIKE_V(args[1]) && ZEN_INTLIKE_V(args[2]))
+        {
+            int64_t b = to_integer(args[0]), e = to_integer(args[1]), m = to_integer(args[2]);
+            if (m == 0) { vm->runtime_error("pow(): modulus is zero"); return -1; }
+            int64_t r = 1; b %= m; if (b < 0) b += m;
+            while (e > 0) { if (e & 1) r = (int64_t)(((__int128)r * b) % m); b = (int64_t)(((__int128)b * b) % m); e >>= 1; }
+            args[0] = val_int(r);
+            return 1;
+        }
+        if (ZEN_INTLIKE_V(args[0]) && ZEN_INTLIKE_V(args[1]) && to_integer(args[1]) >= 0)
+        {
+            int64_t b = to_integer(args[0]), e = to_integer(args[1]), r = 1;
+            while (e-- > 0) r *= b;
+            args[0] = val_int(r);
+            return 1;
+        }
+        args[0] = val_float(pow(to_number(args[0]), to_number(args[1])));
+        return 1;
+    }
+
+    static int nat_callable(VM *, Value *args, int nargs)
+    {
+        Value v = nargs >= 1 ? args[0] : val_nil();
+        args[0] = val_bool(is_closure(v) || is_native(v) || is_class(v));
+        return 1;
+    }
+
     static const NativeReg base_functions[] = {
         {"str", nat_str, 1},
+        {"repr", nat_repr, 1},
+        {"abs", nat_abs, 1},
+        {"min", nat_min, -1},
+        {"max", nat_max, -1},
+        {"round", nat_round, -1},
+        {"sum", nat_sum, -1},
+        {"sorted", nat_sorted, -1},
+        {"reversed", nat_reversed, 1},
+        {"any", nat_any, 1},
+        {"all", nat_all, 1},
+        {"list", nat_list, -1},
+        {"tuple", nat_list, -1},
+        {"set", nat_set, -1},
+        {"dict", nat_dict, -1},
+        {"bool", nat_bool, -1},
+        {"chr", nat_char, 1},
+        {"hex", nat_hex, 1},
+        {"oct", nat_oct, 1},
+        {"bin", nat_bin, 1},
+        {"divmod", nat_divmod, 2},
+        {"pow", nat_pow, -1},
+        {"callable", nat_callable, 1},
         {"int", nat_int, 1},
         {"float", nat_float, 1},
         {"char", nat_char, 1},
@@ -1406,7 +1818,7 @@ namespace zen
     const NativeLib zen_lib_base = {
         "base",
         base_functions,
-        41,   /* num_functions */
+        (int)(sizeof(base_functions) / sizeof(base_functions[0])), /* num_functions */
         nullptr, /* constants */
         0,    /* num_constants */
         base_lib_init, /* init_func */

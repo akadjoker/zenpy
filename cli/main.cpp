@@ -33,19 +33,35 @@ static char *read_file(const char *path, long *out_size = nullptr)
         return nullptr;
     }
 
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    char *buf = (char *)malloc(size + 1);
+    /* ftell() lies for pipes and /dev/stdin: read in chunks instead. */
+    size_t cap = 65536, read = 0;
+    char *buf = (char *)malloc(cap + 1);
     if (!buf)
     {
         fclose(f);
         fprintf(stderr, "zen: out of memory\n");
         return nullptr;
     }
-
-    size_t read = fread(buf, 1, size, f);
+    while (true)
+    {
+        size_t got = fread(buf + read, 1, cap - read, f);
+        read += got;
+        if (got == 0 || feof(f) || ferror(f))
+            break;
+        if (read == cap)
+        {
+            cap *= 2;
+            char *nb = (char *)realloc(buf, cap + 1);
+            if (!nb)
+            {
+                free(buf);
+                fclose(f);
+                fprintf(stderr, "zen: out of memory\n");
+                return nullptr;
+            }
+            buf = nb;
+        }
+    }
     buf[read] = '\0';
     fclose(f);
     if (out_size)

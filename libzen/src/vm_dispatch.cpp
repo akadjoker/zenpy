@@ -149,6 +149,23 @@ namespace zen
     }
 
     /* Python-style value printing (for print() statement) */
+    /* Python-style type name for error messages. */
+    static const char *zen_type_name_of(Value v)
+    {
+        if (is_nil(v)) return "NoneType";
+        if (is_bool(v)) return "bool";
+        if (is_int(v)) return "int";
+        if (is_float(v)) return "float";
+        if (is_string(v)) return "str";
+        if (is_array(v)) return "list";
+        if (is_map(v)) return "dict";
+        if (is_set(v)) return "set";
+        if (is_instance(v)) return as_instance(v)->klass->name->chars;
+        if (is_closure(v) || is_native(v)) return "function";
+        if (is_class(v)) return "type";
+        return "object";
+    }
+
     static void print_value_py(Value v, bool repr)
     {
         if (is_nil(v))
@@ -167,8 +184,8 @@ namespace zen
         }
         else if (is_float(v))
         {
-            char buf[32];
-            int len = snprintf(buf, sizeof(buf), "%g", v.as.number);
+            char buf[40];
+            int len = format_float_py(v.as.number, buf, sizeof buf);
             zen_write(buf, (size_t)len);
         }
         else if (is_string(v))
@@ -633,15 +650,26 @@ namespace zen
     } while (0)
 
 /* Aritmética helpers — use int64_t wrapping via unsigned cast to avoid UB */
+/* int op int stays int; bool counts as 0/1 (True + True == 2, as in Python);
+** anything else numeric goes through double; a non-number is an error, not
+** a silent 0. */
+#define ZEN_INTLIKE(v) ((v).type == VAL_INT || (v).type == VAL_BOOL)
+#define ZEN_INTVAL(v) ((v).type == VAL_INT ? (v).as.integer : (int64_t)((v).as.boolean ? 1 : 0))
 #define NUM_BINOP(op)                                                         \
     do                                                                        \
     {                                                                         \
         Value vb = R[ZEN_B(i)], vc = R[ZEN_C(i)];                             \
-        if (vb.type == VAL_INT && vc.type == VAL_INT)                         \
+        if (__builtin_expect(vb.type == VAL_INT && vc.type == VAL_INT, 1))    \
             R[ZEN_A(i)] = val_int((int64_t)((uint64_t)vb.as.integer           \
                                                 op(uint64_t) vc.as.integer)); \
-        else                                                                  \
+        else if (ZEN_INTLIKE(vb) && ZEN_INTLIKE(vc))                          \
+            R[ZEN_A(i)] = val_int((int64_t)((uint64_t)ZEN_INTVAL(vb)          \
+                                                op(uint64_t) ZEN_INTVAL(vc))); \
+        else if (__builtin_expect(is_numeric_like(vb) && is_numeric_like(vc), 1)) \
             R[ZEN_A(i)] = val_float(to_number(vb) op to_number(vc));          \
+        else                                                                  \
+            RT_ERROR("unsupported operand type(s) for " #op ": %s and %s",    \
+                     zen_type_name_of(vb), zen_type_name_of(vc));             \
     } while (0)
 
         /* =================================================================
@@ -998,6 +1026,19 @@ namespace zen
                     R[ZEN_A(i)] = val_obj((Obj *)new_string_concat(&gc_, sb, as_string(vc)));
                 }
             }
+            else if (is_array(vb) && is_array(vc))
+            {
+                /* [1, 2] + [3]: a new list, both operands untouched */
+                ObjArray *xa = as_array(vb), *xb = as_array(vc);
+                gc_pause(&gc_);
+                ObjArray *r = new_array(&gc_);
+                if (arr_count(xa) > 0)
+                    array_push_n(&gc_, r, xa->data, arr_count(xa));
+                if (arr_count(xb) > 0)
+                    array_push_n(&gc_, r, xb->data, arr_count(xb));
+                gc_resume(&gc_);
+                R[ZEN_A(i)] = val_obj((Obj *)r);
+            }
             else if (is_instance(vb) || is_instance(vc))
             {
                 Value result;
@@ -1170,6 +1211,21 @@ namespace zen
                     R[ZEN_A(i)] = val_obj((Obj *)result);
                 }
             }
+            else if ((is_array(vb) && ZEN_INTLIKE(vc)) || (ZEN_INTLIKE(vb) && is_array(vc)))
+            {
+                /* [0] * n / n * [0]: n shallow copies of the elements */
+                ObjArray *src = is_array(vb) ? as_array(vb) : as_array(vc);
+                int64_t n = is_array(vb) ? ZEN_INTVAL(vc) : ZEN_INTVAL(vb);
+                int32_t cnt = arr_count(src);
+                if (n > 0 && (int64_t)cnt * n > 0x7FFFFFFF)
+                    RT_ERROR("list repetition too large");
+                gc_pause(&gc_);
+                ObjArray *r = new_array(&gc_);
+                for (int64_t k = 0; k < n && cnt > 0; k++)
+                    array_push_n(&gc_, r, src->data, cnt);
+                gc_resume(&gc_);
+                R[ZEN_A(i)] = val_obj((Obj *)r);
+            }
             else if (is_instance(vb) || is_instance(vc))
             {
                 Value result;
@@ -1302,7 +1358,12 @@ namespace zen
                     if (b == 0.0)
                         RT_ERROR("modulo by zero");
                     else
-                        R[ZEN_A(i)] = val_float(a - (int64_t)(a / b) * b);
+                    {
+                        double r = fmod(a, b);
+                        if (r != 0.0 && ((r < 0.0) != (b < 0.0)))
+                            r += b; /* Python: the result takes the divisor's sign */
+                        R[ZEN_A(i)] = val_float(r);
+                    }
                 }
             }
             else if (is_instance(vb) || is_instance(vc))
@@ -1323,7 +1384,12 @@ namespace zen
                     if (b == 0.0)
                         RT_ERROR("modulo by zero");
                     else
-                        R[ZEN_A(i)] = val_float(a - (int64_t)(a / b) * b);
+                    {
+                        double r = fmod(a, b);
+                        if (r != 0.0 && ((r < 0.0) != (b < 0.0)))
+                            r += b; /* Python: the result takes the divisor's sign */
+                        R[ZEN_A(i)] = val_float(r);
+                    }
                 }
             }
             else
@@ -1630,6 +1696,8 @@ namespace zen
             int8_t imm = (int8_t)ZEN_C(i);
             if (__builtin_expect(vb.type == VAL_INT, 1))
                 R[ZEN_A(i)] = val_int((int64_t)((uint64_t)vb.as.integer + (int64_t)imm));
+            else if (vb.type == VAL_BOOL)
+                R[ZEN_A(i)] = val_int((int64_t)(vb.as.boolean ? 1 : 0) + (int64_t)imm);
             else if (__builtin_expect(!is_obj(vb), 1))
                 R[ZEN_A(i)] = val_float(to_number(vb) + imm);
             else if (is_instance(vb))
@@ -1691,6 +1759,8 @@ namespace zen
             int8_t imm = (int8_t)ZEN_C(i);
             if (__builtin_expect(vb.type == VAL_INT, 1))
                 R[ZEN_A(i)] = val_int((int64_t)((uint64_t)vb.as.integer - (int64_t)imm));
+            else if (vb.type == VAL_BOOL)
+                R[ZEN_A(i)] = val_int((int64_t)(vb.as.boolean ? 1 : 0) - (int64_t)imm);
             else if (__builtin_expect(!is_obj(vb), 1))
                 R[ZEN_A(i)] = val_float(to_number(vb) - imm);
             else if (is_instance(vb))
@@ -1819,6 +1889,8 @@ namespace zen
             }
             else if (is_string(vb) && is_string(vc))
                 R[ZEN_A(i)] = val_bool(strcmp(safe_string_chars(vb), safe_string_chars(vc)) < 0);
+            else if (is_array(vb) && is_array(vc))
+                R[ZEN_A(i)] = val_bool(values_compare(vb, vc) < 0);
             else if (vb.type == VAL_INT && vc.type == VAL_INT)
                 R[ZEN_A(i)] = val_bool(vb.as.integer < vc.as.integer);
             else
@@ -1848,6 +1920,8 @@ namespace zen
             }
             else if (is_string(vb) && is_string(vc))
                 R[ZEN_A(i)] = val_bool(strcmp(safe_string_chars(vb), safe_string_chars(vc)) <= 0);
+            else if (is_array(vb) && is_array(vc))
+                R[ZEN_A(i)] = val_bool(values_compare(vb, vc) <= 0);
             else if (vb.type == VAL_INT && vc.type == VAL_INT)
                 R[ZEN_A(i)] = val_bool(vb.as.integer <= vc.as.integer);
             else
@@ -5058,8 +5132,8 @@ namespace zen
         CASE(OP_PRINT)
         {
             uint32_t i = *ip;
-            if (!ZEN_C(i))
-            { /* C=0: normal print value */
+            if (ZEN_C(i) != 1)
+            { /* C=0: value + separator/newline; C=2: value only (print(sep=, end=)) */
                 Value v = R[ZEN_A(i)];
                 if (is_instance(v) && instance_has_method_slot(v, SLOT_STR))
                 {
@@ -5087,6 +5161,8 @@ namespace zen
                 }
             }
         print_end:
+            if (ZEN_C(i) == 2)
+                NEXT();
             if (ZEN_B(i))
                 zen_writeln();
             else
@@ -5124,6 +5200,8 @@ namespace zen
             }
             else if (is_string(vb) && is_string(vc))
                 less = strcmp(safe_string_chars(vb), safe_string_chars(vc)) < 0;
+            else if (is_array(vb) && is_array(vc))
+                less = values_compare(vb, vc) < 0;
             else if (vb.type == VAL_INT && vc.type == VAL_INT)
                 less = vb.as.integer < vc.as.integer;
             else

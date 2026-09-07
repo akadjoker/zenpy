@@ -826,12 +826,19 @@ namespace zen
                 h = 0x9e3779b9u;
                 break;
             case VAL_BOOL:
-                h = v.as.boolean ? 0x9e3779bbu : 0x9e3779b9u;
+                /* hash(True) == hash(1): a bool key finds the int entry */
+                h = (uint32_t)(v.as.boolean ? 1 : 0) * 2654435761u;
                 break;
             case VAL_INT:
                 __builtin_unreachable();
             case VAL_FLOAT:
             {
+                double d = v.as.number;
+                if (d == (double)(int64_t)d && d > -9.2e18 && d < 9.2e18)
+                {
+                    h = (uint32_t)(int64_t)d * 2654435761u; /* hash(1.0) == hash(1) */
+                    break;
+                }
                 uint64_t bits;
                 memcpy(&bits, &v.as.number, sizeof(bits));
                 h = (uint32_t)((bits ^ (bits >> 32)) * 2654435761ULL);
@@ -2065,6 +2072,9 @@ namespace zen
 
     bool values_deep_equal(Value a, Value b)
     {
+        /* Different tags: only numbers can still be equal (1 == 1.0 == True). */
+        if (a.type != b.type)
+            return values_equal(a, b);
         /* Fast path: same type + same bits */
         if (a.type == b.type)
         {
@@ -2176,3 +2186,110 @@ namespace zen
     }
 
 } /* namespace zen */
+
+/* ---- Python-compatible ordering and float text (see value.h) ---- */
+#include <cmath>
+namespace zen
+{
+    int values_compare(Value a, Value b)
+    {
+        if (is_numeric_like(a) && is_numeric_like(b))
+        {
+            if (a.type == VAL_INT && b.type == VAL_INT)
+                return a.as.integer < b.as.integer ? -1 : (a.as.integer > b.as.integer ? 1 : 0);
+            double x = to_number(a), y = to_number(b);
+            return x < y ? -1 : (x > y ? 1 : 0);
+        }
+        if (is_string(a) && is_string(b))
+        {
+            ObjString *sa = as_string(a), *sb = as_string(b);
+            int n = sa->length < sb->length ? sa->length : sb->length;
+            int c = memcmp(sa->chars, sb->chars, (size_t)n);
+            if (c != 0)
+                return c < 0 ? -1 : 1;
+            return sa->length < sb->length ? -1 : (sa->length > sb->length ? 1 : 0);
+        }
+        if (is_array(a) && is_array(b))
+        {
+            ObjArray *aa = as_array(a), *ab = as_array(b);
+            int na = arr_count(aa), nb = arr_count(ab);
+            int n = na < nb ? na : nb;
+            for (int i = 0; i < n; i++)
+            {
+                int c = values_compare(aa->data[i], ab->data[i]);
+                if (c != 0)
+                    return c;
+            }
+            return na < nb ? -1 : (na > nb ? 1 : 0);
+        }
+        return 0;
+    }
+
+    int format_float_py(double d, char *buf, size_t cap)
+    {
+        if (d != d)
+            return snprintf(buf, cap, "nan");
+        if (d == HUGE_VAL)
+            return snprintf(buf, cap, "inf");
+        if (d == -HUGE_VAL)
+            return snprintf(buf, cap, "-inf");
+        /* Shortest precision that round-trips. */
+        char sci[40];
+        int prec = 1;
+        for (; prec <= 17; prec++)
+        {
+            snprintf(sci, sizeof sci, "%.*e", prec - 1, d);
+            if (strtod(sci, nullptr) == d)
+                break;
+        }
+        /* sci = [-]D.DDDDe[+-]XX : split digits and exponent */
+        const char *p = sci;
+        bool neg = false;
+        if (*p == '-') { neg = true; p++; }
+        char digits[24];
+        int nd = 0;
+        for (; *p && *p != 'e'; p++)
+            if (*p != '.')
+                digits[nd++] = *p;
+        int exp10 = atoi(p + 1); /* value = d1.d2d3.. * 10^exp10 */
+        while (nd > 1 && digits[nd - 1] == '0')
+            nd--;
+        digits[nd] = '\0';
+        char *o = buf;
+        char *end = buf + cap - 1;
+        if (neg && o < end) *o++ = '-';
+        if (exp10 >= -4 && exp10 < 16)
+        {
+            if (exp10 < 0)
+            {
+                if (o < end) *o++ = '0';
+                if (o < end) *o++ = '.';
+                for (int i = 0; i < -exp10 - 1 && o < end; i++) *o++ = '0';
+                for (int i = 0; i < nd && o < end; i++) *o++ = digits[i];
+            }
+            else
+            {
+                for (int i = 0; i <= exp10 && o < end; i++) *o++ = i < nd ? digits[i] : '0';
+                if (o < end) *o++ = '.';
+                if (exp10 + 1 < nd)
+                {
+                    for (int i = exp10 + 1; i < nd && o < end; i++) *o++ = digits[i];
+                }
+                else if (o < end)
+                    *o++ = '0';
+            }
+        }
+        else
+        {
+            if (o < end) *o++ = digits[0];
+            if (nd > 1)
+            {
+                if (o < end) *o++ = '.';
+                for (int i = 1; i < nd && o < end; i++) *o++ = digits[i];
+            }
+            o += snprintf(o, (size_t)(end - o + 1), "e%c%02d", exp10 < 0 ? '-' : '+', exp10 < 0 ? -exp10 : exp10);
+        }
+        *o = '\0';
+        return (int)(o - buf);
+    }
+}

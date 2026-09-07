@@ -929,7 +929,7 @@ namespace zen
             if (can_assign && (check(TOK_PLUS_EQ) || check(TOK_MINUS_EQ) ||
                               check(TOK_STAR_EQ) || check(TOK_SLASH_EQ) ||
                               check(TOK_PERCENT_EQ) || check(TOK_DSLASH_EQ) ||
-                              check(TOK_DSTAR_EQ)))
+                              check(TOK_DSTAR_EQ) || check(TOK_AMP_EQ) || check(TOK_PIPE_EQ) || check(TOK_CARET_EQ) || check(TOK_LSHIFT_EQ) || check(TOK_RSHIFT_EQ)))
             {
                 /* Check const */
                 for (int i = state_->local_count - 1; i >= 0; i--)
@@ -978,7 +978,7 @@ namespace zen
                 case TOK_SLASH_EQ:   arith = OP_DIV;  break;
                 case TOK_PERCENT_EQ: arith = OP_MOD;  break;
                 case TOK_DSLASH_EQ:  arith = OP_IDIV; break;
-                case TOK_DSTAR_EQ:   arith = OP_POW;  break;
+                case TOK_DSTAR_EQ:   arith = OP_POW;  break;   case TOK_AMP_EQ:   arith = OP_BAND;   break;   case TOK_PIPE_EQ:   arith = OP_BOR;   break;   case TOK_CARET_EQ:   arith = OP_BXOR;   break;   case TOK_LSHIFT_EQ:   arith = OP_SHL;   break;   case TOK_RSHIFT_EQ:   arith = OP_SHR;   break;
                 default: break;
                 }
                 state_->emitter.emit_abc(arith, reg, reg, rhs, previous_.line);
@@ -1048,7 +1048,7 @@ namespace zen
         if (can_assign && (check(TOK_PLUS_EQ) || check(TOK_MINUS_EQ) ||
                            check(TOK_STAR_EQ) || check(TOK_SLASH_EQ) ||
                            check(TOK_PERCENT_EQ) || check(TOK_DSLASH_EQ) ||
-                           check(TOK_DSTAR_EQ)))
+                           check(TOK_DSTAR_EQ) || check(TOK_AMP_EQ) || check(TOK_PIPE_EQ) || check(TOK_CARET_EQ) || check(TOK_LSHIFT_EQ) || check(TOK_RSHIFT_EQ)))
         {
             Token op = current_;
             advance();
@@ -1086,7 +1086,7 @@ namespace zen
             case TOK_SLASH_EQ:   arith = OP_DIV;  break;
             case TOK_PERCENT_EQ: arith = OP_MOD;  break;
             case TOK_DSLASH_EQ:  arith = OP_IDIV; break;
-            case TOK_DSTAR_EQ:   arith = OP_POW;  break;
+            case TOK_DSTAR_EQ:   arith = OP_POW;  break;   case TOK_AMP_EQ:   arith = OP_BAND;   break;   case TOK_PIPE_EQ:   arith = OP_BOR;   break;   case TOK_CARET_EQ:   arith = OP_BXOR;   break;   case TOK_LSHIFT_EQ:   arith = OP_SHL;   break;   case TOK_RSHIFT_EQ:   arith = OP_SHR;   break;
             default: break;
             }
             state_->emitter.emit_abc(arith, r, r, rhs, previous_.line);

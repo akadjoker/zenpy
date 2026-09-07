@@ -1619,7 +1619,7 @@ namespace zen
                 /* Augmented assign: self.field += expr  */
                 if (can_assign && (check(TOK_PLUS_EQ) || check(TOK_MINUS_EQ) ||
                                    check(TOK_STAR_EQ) || check(TOK_SLASH_EQ) || check(TOK_PERCENT_EQ) ||
-                                   check(TOK_DSLASH_EQ) || check(TOK_DSTAR_EQ)))
+                                   check(TOK_DSLASH_EQ) || check(TOK_DSTAR_EQ) || check(TOK_AMP_EQ) || check(TOK_PIPE_EQ) || check(TOK_CARET_EQ) || check(TOK_LSHIFT_EQ) || check(TOK_RSHIFT_EQ)))
                 {
                     Token op = current_;
                     advance();
@@ -1631,7 +1631,7 @@ namespace zen
                     case TOK_STAR_EQ:   arith = OP_MUL;  break;
                     case TOK_SLASH_EQ:  arith = OP_DIV;  break;
                     case TOK_DSLASH_EQ: arith = OP_IDIV; break;
-                    case TOK_DSTAR_EQ:  arith = OP_POW;  break;
+                    case TOK_DSTAR_EQ:  arith = OP_POW;  break;  case TOK_AMP_EQ:  arith = OP_BAND;  break;  case TOK_PIPE_EQ:  arith = OP_BOR;  break;  case TOK_CARET_EQ:  arith = OP_BXOR;  break;  case TOK_LSHIFT_EQ:  arith = OP_SHL;  break;  case TOK_RSHIFT_EQ:  arith = OP_SHR;  break;
                     default:            arith = OP_MOD;  break;
                     }
                     int tmp = alloc_reg();
@@ -1722,7 +1722,7 @@ namespace zen
         /* Augmented assignment on any other receiver: obj.field += expr */
         if (can_assign && (check(TOK_PLUS_EQ) || check(TOK_MINUS_EQ) ||
                            check(TOK_STAR_EQ) || check(TOK_SLASH_EQ) || check(TOK_PERCENT_EQ) ||
-                           check(TOK_DSLASH_EQ) || check(TOK_DSTAR_EQ)))
+                           check(TOK_DSLASH_EQ) || check(TOK_DSTAR_EQ) || check(TOK_AMP_EQ) || check(TOK_PIPE_EQ) || check(TOK_CARET_EQ) || check(TOK_LSHIFT_EQ) || check(TOK_RSHIFT_EQ)))
         {
             Token op = current_;
             advance();
@@ -1734,7 +1734,7 @@ namespace zen
             case TOK_STAR_EQ:   arith = OP_MUL;  break;
             case TOK_SLASH_EQ:  arith = OP_DIV;  break;
             case TOK_DSLASH_EQ: arith = OP_IDIV; break;
-            case TOK_DSTAR_EQ:  arith = OP_POW;  break;
+            case TOK_DSTAR_EQ:  arith = OP_POW;  break;  case TOK_AMP_EQ:  arith = OP_BAND;  break;  case TOK_PIPE_EQ:  arith = OP_BOR;  break;  case TOK_CARET_EQ:  arith = OP_BXOR;  break;  case TOK_LSHIFT_EQ:  arith = OP_SHL;  break;  case TOK_RSHIFT_EQ:  arith = OP_SHR;  break;
             default:            arith = OP_MOD;  break;
             }
             int name_ki = state_->emitter.add_string_constant(field.start, field.length);
@@ -2087,7 +2087,7 @@ namespace zen
         if (can_assign && (check(TOK_PLUS_EQ) || check(TOK_MINUS_EQ) ||
                            check(TOK_STAR_EQ) || check(TOK_SLASH_EQ) ||
                            check(TOK_PERCENT_EQ) || check(TOK_DSLASH_EQ) ||
-                           check(TOK_DSTAR_EQ)))
+                           check(TOK_DSTAR_EQ) || check(TOK_AMP_EQ) || check(TOK_PIPE_EQ) || check(TOK_CARET_EQ) || check(TOK_LSHIFT_EQ) || check(TOK_RSHIFT_EQ)))
         {
             Token op = current_;
             advance();
@@ -2117,6 +2117,21 @@ namespace zen
                 break;
             case TOK_DSTAR_EQ:
                 arith = OP_POW;
+                break;
+                case TOK_AMP_EQ:
+                arith = OP_BAND;
+                break;
+                case TOK_PIPE_EQ:
+                arith = OP_BOR;
+                break;
+                case TOK_CARET_EQ:
+                arith = OP_BXOR;
+                break;
+                case TOK_LSHIFT_EQ:
+                arith = OP_SHL;
+                break;
+                case TOK_RSHIFT_EQ:
+                arith = OP_SHR;
                 break;
             default:
                 break;
@@ -2267,7 +2282,7 @@ namespace zen
                     advance(); /* consume 'for' */
                     begin_scope();
 
-                    consume(TOK_IDENTIFIER, "Expected variable name after 'for'.");
+                    if (!match(TOK_UNDERSCORE)) consume(TOK_IDENTIFIER, "Expected variable name after 'for'.");
                     Token var_name = previous_;
                     consume(TOK_IN, "Expected 'in' after variable name.");
 
@@ -2277,6 +2292,7 @@ namespace zen
                     int iter_result = parse_precedence(PREC_OR, iter_reg);
                     if (iter_result != iter_reg)
                         emit_move(iter_reg, iter_result);
+                    state_->next_reg = iter_reg + 1; /* index must be iter_reg + 1 */
 
                     /* Same loop shape as for_statement: the iterator's index
                     ** in R[iter_reg+1], OP_FOR_NEXT at the bottom entered by
@@ -2423,7 +2439,7 @@ namespace zen
 
                 advance(); /* consume 'for' */
                 begin_scope();
-                consume(TOK_IDENTIFIER, "Expected variable name after 'for'.");
+                if (!match(TOK_UNDERSCORE)) consume(TOK_IDENTIFIER, "Expected variable name after 'for'.");
                 Token var_name = previous_;
                 consume(TOK_IN, "Expected 'in' after variable name.");
 
@@ -2431,6 +2447,7 @@ namespace zen
                 int ir = parse_precedence(PREC_OR, iter_reg);
                 if (ir != iter_reg)
                     emit_move(iter_reg, ir);
+                state_->next_reg = iter_reg + 1; /* index must be iter_reg + 1 */
                 int idx_reg = alloc_reg(); /* must be iter_reg + 1 (OP_FOR_NEXT) */
                 state_->emitter.emit_asbx(OP_LOADI, idx_reg, 0, line);
                 int var_reg = add_local(var_name);
@@ -2532,7 +2549,7 @@ namespace zen
 
             advance(); /* consume 'for' */
             begin_scope();
-            consume(TOK_IDENTIFIER, "Expected variable name after 'for'.");
+            if (!match(TOK_UNDERSCORE)) consume(TOK_IDENTIFIER, "Expected variable name after 'for'.");
             Token var_name = previous_;
             consume(TOK_IN, "Expected 'in' after variable name.");
 
@@ -2540,6 +2557,7 @@ namespace zen
             int ir = parse_precedence(PREC_OR, iter_reg);
             if (ir != iter_reg)
                 emit_move(iter_reg, ir);
+            state_->next_reg = iter_reg + 1; /* index must be iter_reg + 1 */
             int idx_reg = alloc_reg(); /* must be iter_reg + 1 (OP_FOR_NEXT) */
             state_->emitter.emit_asbx(OP_LOADI, idx_reg, 0, line);
             int var_reg = add_local(var_name);
@@ -2684,11 +2702,11 @@ namespace zen
         }
         consume(TOK_COLON, "Expected ':' after lambda parameters.");
 
-        /* Body: single expression */
-        int result = expression(0);
-        if (result != 0)
-            emit_move(0, result);
-        state_->emitter.emit_abc(OP_RETURN, 0, 1, 0, previous_.line);
+        /* Body: one expression into a temporary above the parameters —
+        ** compiled with dest 0 it clobbered parameter 0 (`lambda x: f(g(x))`
+        ** read the upvalue f into R[0] before x was used). */
+        int result = expression(-1);
+        state_->emitter.emit_abc(OP_RETURN, result, 1, 0, previous_.line);
 
         ObjFunc *fn = state_->emitter.end(state_->max_reg);
         fn->arity = arity;

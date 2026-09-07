@@ -1736,7 +1736,7 @@ namespace zen
         begin_scope();
 
         /* Loop variable(s) — detect tuple unpack: for k, v in ... */
-        consume(TOK_IDENTIFIER, "Expected variable name after 'for'.");
+        if (!match(TOK_UNDERSCORE)) consume(TOK_IDENTIFIER, "Expected variable name after 'for'.");
         Token var_names[8];
         int var_count = 1;
         var_names[0] = previous_;
@@ -1852,6 +1852,10 @@ namespace zen
         int iter_reg = alloc_reg();
         int iter_result = expression(iter_reg);
         if (iter_result != iter_reg) emit_move(iter_reg, iter_result);
+        /* Whatever the iterable expression allocated above iter_reg (an
+        ** array literal's element temps, for one) is dead now; the index
+        ** MUST land in iter_reg + 1 or FOR_NEXT reads a stale register. */
+        state_->next_reg = iter_reg + 1;
 
         /* Index counter — R[iter_reg+1] (used by FOR_ITER for arrays) */
         int idx_reg = alloc_reg(); /* must be iter_reg + 1 */
@@ -2211,15 +2215,67 @@ namespace zen
             return;
         }
 
+        /* Values first, then `sep=` / `end=` keywords (any order); all the
+        ** registers stay live until everything is emitted. */
+        int saved_next = state_->next_reg;
+        static const int kMaxPrintArgs = 64;
+        int vals[kMaxPrintArgs];
+        int nvals = 0;
+        int sep_reg = -1, end_reg = -1;
         do
         {
-            int reg = expression(-1);
-            bool last = check(TOK_RPAREN);
-            state_->emitter.emit_abc(OP_PRINT, reg, last ? 1 : 0, 0, previous_.line);
-            free_reg(reg);
+            if (next_is_keyword_arg())
+            {
+                Token kw = current_;
+                advance(); /* name */
+                advance(); /* '=' */
+                int r = expression(-1);
+                if (kw.length == 3 && memcmp(kw.start, "sep", 3) == 0)
+                    sep_reg = r;
+                else if (kw.length == 3 && memcmp(kw.start, "end", 3) == 0)
+                    end_reg = r;
+                else
+                    error("print() only accepts the keywords sep= and end=.");
+                continue;
+            }
+            if (nvals >= kMaxPrintArgs)
+            {
+                error("Too many arguments to print().");
+                return;
+            }
+            vals[nvals++] = expression(-1);
         } while (match(TOK_COMMA));
-
         consume(TOK_RPAREN, "Expected ')' after print arguments.");
+
+        if (sep_reg < 0 && end_reg < 0)
+        {
+            for (int i = 0; i < nvals; i++)
+                state_->emitter.emit_abc(OP_PRINT, vals[i], i == nvals - 1 ? 1 : 0, 0, previous_.line);
+        }
+        else
+        {
+            /* C=2: the value alone; the separator and the end are printed as
+            ** values themselves (a string prints raw). */
+            int space_reg = -1;
+            if (sep_reg < 0 && nvals > 1)
+            {
+                space_reg = alloc_reg();
+                int ki = state_->emitter.add_string_constant(" ", 1);
+                state_->emitter.emit_abx(OP_LOADK, space_reg, ki, previous_.line);
+                sep_reg = space_reg;
+            }
+            for (int i = 0; i < nvals; i++)
+            {
+                state_->emitter.emit_abc(OP_PRINT, vals[i], 0, 2, previous_.line);
+                if (i < nvals - 1)
+                    state_->emitter.emit_abc(OP_PRINT, sep_reg, 0, 2, previous_.line);
+            }
+            if (end_reg >= 0)
+                state_->emitter.emit_abc(OP_PRINT, end_reg, 0, 2, previous_.line);
+            else
+                state_->emitter.emit_abc(OP_PRINT, 0, 1, 1, previous_.line); /* just the newline */
+        }
+        state_->next_reg = saved_next;
     }
 
     /* =========================================================

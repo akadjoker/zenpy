@@ -145,13 +145,18 @@ if (STR_METHOD("split"))
 }
 if (STR_METHOD("trim") || STR_METHOD("strip"))
 {
-    /* str.trim() → strip leading/trailing whitespace */
+    /* str.strip() → whitespace; str.strip(chars) → any of those characters */
+    const char *set = " \t\n\r\v\f";
+    int set_len = 6;
+    if (arg_count >= 1 && is_string(args[0]))
+    {
+        set = as_string(args[0])->chars;
+        set_len = as_string(args[0])->length;
+    }
     int start = 0, end = str->length;
-    while (start < end && (str->chars[start] == ' ' || str->chars[start] == '\t' ||
-                           str->chars[start] == '\n' || str->chars[start] == '\r'))
+    while (start < end && memchr(set, str->chars[start], (size_t)set_len))
         start++;
-    while (end > start && (str->chars[end - 1] == ' ' || str->chars[end - 1] == '\t' ||
-                           str->chars[end - 1] == '\n' || str->chars[end - 1] == '\r'))
+    while (end > start && memchr(set, str->chars[end - 1], (size_t)set_len))
         end--;
     R[base] = val_obj((Obj *)create_string(&gc_, str->chars + start, end - start));
     break;

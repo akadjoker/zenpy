@@ -30,3 +30,9 @@ Numbers on 2026-09-06 (best of 3): call_base 0.048s, call_f0 0.126s,
 call_m_typed 0.153s, typedparam 0.075s, foreach 0.074s, forrange 0.086s,
 forrange_empty (20M) 0.064s; Lua: call_base 0.030s, call_f0 0.080s,
 call_m 0.166s.
+
+Numbers on 2026-09-07 (best of 3, commit 7cf79a8): call_base 0.051s,
+call_f0 0.114s, call_f3 0.128s, call_fbig 0.155s, call_m_typed 0.134s,
+call_m_dyn 0.135s, typedparam 0.074s, selffield 0.126s (was 0.191s),
+foreach 0.066s, forrange 0.058s, forrange_empty 0.065s; Lua: call_base
+0.032s, call_f0 0.081s, call_m 0.170s. call+return ≈ 12.6 ns (Lua ≈ 9.8).

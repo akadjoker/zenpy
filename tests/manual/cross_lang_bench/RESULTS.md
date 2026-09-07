@@ -208,3 +208,24 @@ index taken only when the class's field name at that index matches, else
 the by-name access in the second word runs). A five-field read through a
 `p: P` parameter went from 0.092s to 0.075s per million calls; the four
 benchmarks above are unchanged (they use `self` or dynamic receivers).
+
+
+## 2026-09-07 — round 4 of `perf/lua-hot-path-gc` (commit 7cf79a8)
+
+Same machine, same window, best of 3, Release -O3. Wren run through
+`wren-0.4.0/bin/wren_test` (the test runner executes a script file; no
+`wren_cli` build needed).
+
+| Benchmark      | Lua 5.4 | Wren   | Python 3.12 | ZenPy  |
+|----------------|--------:|-------:|------------:|-------:|
+| fib(28) x5     | 0.109s  | 0.208s | 0.244s      | 0.134s |
+| for_loop (5M, module globals) | 0.044s | 0.159s | 0.481s | 0.158s |
+| for_loop (locals)             | 0.044s | —      | —      | 0.064s |
+| method_call    | 0.175s  | 0.109s | 0.204s      | 0.131s |
+| binary_trees   | 0.560s  | 0.245s | 0.388s      | 0.266s |
+
+Changes on this day: frames entered/left from registers (call+return
+~15 → ~12 ns), INVOKE_R/INVOKE_VT_R (receiver copied by the VM), a local
+read in place through a following `.field`/`[i]`/`(args)` link
+(`x = self.a` 0.191 → 0.126s), class-body field annotations, comprehensions
+on FOR_NEXT, `x is not None` fixed.

@@ -486,7 +486,7 @@ libzen/
 │   ├── vm.h           # VM, GC, value representation
 │   ├── compiler.h     # compiler API
 │   ├── object.h       # object types (string, func, class, ...)
-│   ├── opcodes.h      # 89 opcodes
+│   ├── opcodes.h      # 115 opcodes
 │   ├── bytecode.h     # serialization API
 │   ├── module.h       # NativeLib / NativeReg
 │   └── zen_plugin.h   # plugin macros
@@ -523,9 +523,39 @@ Wide:     [opcode:8 | A:8 | Bx:16]         e.g. LOADK R[A] = K[Bx]
 Signed:   [opcode:8 | A:8 | sBx:16]        e.g. JMP pc += sBx
 ```
 
-Multi-word instructions for complex ops: `INVOKE` (2 words), `SUPER_INVOKE` (3 words), `CALL_GLOBAL` (2 words).
+Multi-word instructions for complex ops: `INVOKE` / `INVOKE_VT` / `INVOKE_R` / `INVOKE_VT_R` (2 words),
+`SUPER_INVOKE` and `INVOKE_GENERIC` (3 words), `CALLGLOBAL` and `CALL_GENERIC` (2 words),
+`GETFIELD_IDXC` / `SETFIELD_IDXC` (2 words), the fused branches below (2 words), `FIELD_MULADD` (5 words).
 
-### Bytecode format (`.zenbc`, version 2.1)
+### Hot-path opcodes (bytecode 2.5 / 2.6)
+
+The compiler emits these for the common shapes; each keeps the exact semantics of
+the general instruction it replaces.
+
+| Opcode | Shape | Notes |
+|---|---|---|
+| `CALLGLOBAL` | `f(x)` on a module-level name | GETGLOBAL + CALL in one dispatch |
+| `FORPREP` / `FORLOOP` | `for i in range(...)` | Lua-style numeric loop, no range object |
+| `FOR_NEXT` | `for x in iterable`, comprehensions | step + test + jump at the bottom |
+| `INVOKE_VT` | `obj.m(...)` with a statically known class | vtable slot first, re-enters `INVOKE` otherwise |
+| `INVOKE_R` / `INVOKE_VT_R` | `local.m(...)`, `self.m(...)` | receiver register in C, no MOVE |
+| `INVOKE_VT_FAST` | `Array[T][i].m(...)`, exact arity | fully static |
+| `GETFIELD_IDXC` / `SETFIELD_IDXC` | `p.x` on an annotated/inferred receiver | index used only if the class's field name matches; word 2 is the by-name access |
+| `GETFIELD_IDX` / `SETFIELD_IDX` | `self.x` | direct index (class fields are fixed at declaration) |
+| `LTIJMPIFNOT` `LEIJMPIFNOT` `GTIJMPIFNOT` `GEIJMPIFNOT` `EQIJMPIFNOT` `NEIJMPIFNOT` | `if x < 10:` | int8 literal in C, branch fused |
+| `JMPIFNIL` / `JMPIFNOTNIL` | `if x is None:` / `is not None` | identity |
+| `JMPIFEQNIL` / `JMPIFNEQNIL` | `if x == None:` / `!= None` | consults `__eq__` on instances |
+| `ADDI` / `SUBI` | `i + 1`, `x -= 2` | int8 immediate, full ADD/SUB contract |
+
+**Static types are hints, never promises.** A parameter annotation (`p: P`), a
+local inferred from `x = P(...)`, an `Array[T]` element, a class-body field
+annotation (`left: Node?`) or a field whose every constructor assignment was the
+same class only pick a faster opcode. Every such opcode checks the actual value at
+run time and falls back to the general path (by-name lookup, dynamic dispatch), so
+a wrong or stale annotation costs speed, not behaviour. Class bodies are sealed
+after their declaration (`CLASSSEAL`), which is what makes the vtable slots stable.
+
+### Bytecode format (`.zenbc`, version 2.6)
 
 ```
 Header:  ZENBC(5) | major(u16) | minor(u16) | flags(u32)

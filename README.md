@@ -561,7 +561,20 @@ run time and falls back to the general path (by-name lookup, dynamic dispatch), 
 a wrong or stale annotation costs speed, not behaviour. Class bodies are sealed
 after their declaration (`CLASSSEAL`), which is what makes the vtable slots stable.
 
-### Bytecode format (`.zenbc`, version 2.6)
+### Python compatibility
+
+Zen is not a CPython clone: the rule is "no crash, predictable result".
+`tools/diff_cpython.py` runs `tests/diff/*.py` chunk by chunk under CPython
+and Zen and reports every difference; `tests/65_python_semantics.py` runs
+unchanged under both. Known, deliberate differences: tuples are lists,
+64-bit integers, dicts are not insertion-ordered, strings index by byte, no
+try/except, a `for` variable does not survive its loop, `a += [x]` builds a
+new list. Not yet supported (clear compile/run-time error): `yield` as an
+expression, `a, *b = ...`, `**kwargs` parameters, keyword-only `*`, lambda
+defaults, `f(**d)`, `[*a]`, f-string `!r`, raw strings, `for/while ... else`.
+See bugs.md "Ronda 5" for the full list.
+
+### Bytecode format (`.zenbc`, version 2.7)
 
 ```
 Header:  ZENBC(5) | major(u16) | minor(u16) | flags(u32)

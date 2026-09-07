@@ -501,6 +501,61 @@ iguais; `run.sh` faz a tabela). Perfil por opcode do Dijkstra: 18% MOVEs.
   comprehensions grandes (crescimento do array), marshalling de argumentos
   (22% do Hanói, inerente).
 
+### Ronda 5 (2026-09-07, noite: cobertura Python pelo método diferencial)
+
+Critério combinado com o utilizador: **não somos uma cópia do Python; sem
+crash e com resultado previsível está bom.** Ferramenta: `tools/diff_cpython.py`
+corre cada `tests/diff/*.py` chunk a chunk em CPython e Zen e compara a
+saída (um chunk que o Zen não compila fica de fora dos seguintes; cascatas
+detectadas por nome). Corpus de 10 ficheiros por tema. Evolução: 159 →
+258 chunks iguais; compile-errors 58 → 24; runtime-errors 86 → 34.
+
+Corrigido (commits 86aa4e8, fa5a159, b88b02d, bf83647):
+- **Resultados errados silenciosos**: `for x in [literal]` saltava o 1.º
+  elemento (índice do FOR_NEXT não era iter_reg+1, temporários do literal
+  ainda alocados; também nas comprehensions); `lambda x: f(g(x))` esmagava
+  o parâmetro (corpo compilado para R0); `print(x, end="")` compilava como
+  atribuição a uma global `end`; `True + True` = 0 e `True == 1` False;
+  `[1] + [2]`, `[0] * n` davam 0; `[1] < [1, 0]` False; `-5.0 % 2` = -1;
+  `strip("x")`, `int(s, base)`, `replace(a, b, n)`, `find(s, start)`
+  ignoravam argumentos; `str([1])` = `<array>`; `filter` ignorava 0;
+  `xs.sort(reverse=True)` ignorado; `{1,2} == {2,1}` False; `max` de
+  instâncias com `__lt__` errado; `"%d %s" % (1, "a")` era "modulo by zero";
+  `round(2.675, 2)` = 2.68; `zen /dev/stdin` buffer overflow (ftell).
+- **Novo**: builtins abs min max round sum sorted reversed any all list
+  tuple set dict bool repr chr hex oct bin divmod pow callable getattr
+  hasattr (a tabela tinha `41` hardcoded: tudo o que vinha depois
+  desaparecia!); kwargs para nativos (mapa no último slot, flag 0x40,
+  `vm->kwargs()`; `sorted(key=, reverse=)`, `min/max(key=, default=)`,
+  `dict(a=1)`, `print(sep=, end=)`); genexpr como argumento; comprehensions
+  com vários `for`/`if` e alvos em tuplo (`comprehension_into()`); ternário
+  encadeado; `_` como variável; `&= |= ^= <<= >>=`; métodos str (title,
+  capitalize, swapcase, is*, index, rfind, rindex, center, ljust, rjust,
+  zfill, splitlines, rsplit, partition), list (count, extend, copy, pop(i),
+  sort(key=, reverse=)), dict (update, setdefault, pop, copy, `for k in d`),
+  set (discard, remove, issubset, issuperset, isdisjoint, union,
+  intersection, difference, symmetric_difference, `| & - ^`);
+  `isinstance(x, (A, B))` e com `int/str/list/...`; `type(x).__name__`,
+  `f.__name__`; `%s/%r/%i` no format; floats impressos como repr do Python
+  (mais curto que faz round-trip: `1/3` → 0.3333333333333333, `3.0` → 3.0).
+- tests/65_python_semantics.py corre igual em CPython e Zen.
+
+Diferenças de desenho (ficam, documentadas): tuplos são listas (`(1, 2)`
+imprime `[1, 2]`, `[1,2] == (1,2)`); inteiros de 64 bits (sem bigint, `2**63`
+vira float); dicts sem ordem de inserção garantida; strings indexadas por
+byte (UTF-8 multi-byte parte); variável do `for` não sobrevive ao loop;
+`a += [x]` cria lista nova (não é in-place); `sum` de floats sem
+compensação; `"%s" % [lista]` espalha a lista; `for/while ... else` não
+existe; try/except não existe (decisão do utilizador).
+
+Ainda não suportado (erro claro, não silencioso): `yield` como expressão /
+`yield from`; `a, *b = ...`, `(m, n), o = ...`, `for a, (b, c) in`; `def
+f(a, *, b)`, `**kwargs`; defaults em lambda; `f(**d)`; `[*a]`; f-string
+`!r`; strings `r"..."` e escapes octais; `x = []` no corpo da classe;
+generators em `list()/sum()`; iter/next/hash/id/slice/frozenset;
+str.format/encode; atributos novos em instâncias (classes seladas);
+`Base.who(obj)` (método sem bind); `counts.get` como valor.
+
 ### Plano para a próxima sessão (por ordem)
 
 1. Validar: `cd build_release && ninja`, suite normal + `--stress-gc`, bench

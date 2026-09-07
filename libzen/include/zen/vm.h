@@ -79,6 +79,8 @@ namespace zen
     {
         ObjClosure *closure; /* closure a executar (nullptr = top-level script) */
         ObjFunc *func;       /* func shortcut (== closure->func) */
+        Value *constants;    /* == func->constants, cached so LOAD_STATE reads only the frame */
+        ObjUpvalue **upvalues; /* == closure->upvalues, same reason */
         Instruction *ip;     /* instruction pointer (ponteiro directo) */
         Value *base;         /* base dos registos deste frame */
         int ret_reg;         /* registo no caller onde começam os resultados */

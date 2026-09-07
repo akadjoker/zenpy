@@ -571,8 +571,8 @@ namespace zen
         CallFrame *frame = &fiber->frames[fiber->frame_count - 1];
         Instruction *ip = frame->ip;
         Value *R = frame->base;
-        Value *K = frame->func->constants;
-        ObjUpvalue **UV = frame->closure ? frame->closure->upvalues : nullptr;
+        Value *K = frame->constants;
+        ObjUpvalue **UV = frame->upvalues;
         /* OP_CALL and OP_CALLGLOBAL share one body (see op_call_shared);
         ** the decoded operands travel through these so the shared entry
         ** point does not jump over any initialised local. */
@@ -583,8 +583,26 @@ namespace zen
     frame = &fiber->frames[fiber->frame_count - 1]; \
     ip = frame->ip;                                 \
     R = frame->base;                                \
-    K = frame->func->constants;                     \
-    UV = frame->closure->upvalues /* every frame the VM pushes carries its closure */
+    K = frame->constants;                           \
+    UV = frame->upvalues /* every frame the VM pushes carries its closure */
+
+/* Reload from a frame pointer already in hand (no fiber->frame_count round
+** trip through memory: the store above would have to be forwarded to the
+** load before any of the other loads can issue). */
+#define LOAD_STATE_FROM(f_)     \
+    frame = (f_);               \
+    ip = frame->ip;             \
+    R = frame->base;            \
+    K = frame->constants;       \
+    UV = frame->upvalues
+
+/* Enter a frame just pushed: everything is still in registers. */
+#define ENTER_FRAME(nf_, fn_, cl_, base_) \
+    frame = (nf_);                        \
+    ip = (fn_)->code;                     \
+    R = (base_);                          \
+    K = (fn_)->constants;                 \
+    UV = (cl_)->upvalues
 
 #define SAVE_IP() frame->ip = ip
 
@@ -1997,6 +2015,8 @@ namespace zen
                     CHECK_STACK_SPACE(fiber, &R[a + 1], fn->num_regs);
                     CallFrame *new_frame = &fiber->frames[fiber->frame_count++];
                     new_frame->closure = cl;
+                    new_frame->constants = cl->func->constants;
+                    new_frame->upvalues = cl->upvalues;
                     new_frame->func = fn;
                     new_frame->ip = fn->code;
                     new_frame->base = &R[a + 1];
@@ -2004,7 +2024,7 @@ namespace zen
                     new_frame->ret_count = nresults;
                     fiber->stack_top = new_frame->base + fn->num_regs;
                     clear_new_regs(new_frame->base, nargs, fn->num_regs);
-                    LOAD_STATE();
+                    ENTER_FRAME(new_frame, fn, cl, &R[a + 1]);
                     DISPATCH();
                 }
 
@@ -2039,6 +2059,8 @@ namespace zen
                 CHECK_STACK_SPACE(fiber, &R[a + 1], fn->num_regs);
                 CallFrame *new_frame = &fiber->frames[fiber->frame_count++];
                 new_frame->closure = cl;
+                new_frame->constants = cl->func->constants;
+                new_frame->upvalues = cl->upvalues;
                 new_frame->func = fn;
                 new_frame->ip = fn->code;
                 new_frame->base = &R[a + 1];
@@ -2078,7 +2100,7 @@ namespace zen
                     int used = fn->arity < 0 ? ((-fn->arity - 1) + 1) : fn->arity;
                     clear_new_regs(new_frame->base, used, fn->num_regs);
                 }
-                LOAD_STATE();
+                ENTER_FRAME(new_frame, fn, cl, &R[a + 1]);
                 DISPATCH();
             }
             if (is_native(callee))
@@ -2164,6 +2186,8 @@ namespace zen
                     CHECK_STACK_SPACE(fiber, &R[a], fn->num_regs);
                     CallFrame *new_frame = &fiber->frames[fiber->frame_count++];
                     new_frame->closure = cl;
+                    new_frame->constants = cl->func->constants;
+                    new_frame->upvalues = cl->upvalues;
                     new_frame->func = fn;
                     new_frame->ip = fn->code;
                     new_frame->base = &R[a]; /* self at base[0], args at base[1..] */
@@ -2185,7 +2209,7 @@ namespace zen
                         clear_new_regs(new_frame->base, used, fn->num_regs);
                     }
 
-                    LOAD_STATE();
+                    ENTER_FRAME(new_frame, fn, cl, &R[a]);
                     DISPATCH();
                 }
                 else if (found && is_native(init_method))
@@ -2309,6 +2333,8 @@ namespace zen
             CHECK_STACK_SPACE(fiber, &R[a + 1], fn->num_regs);
             CallFrame *new_frame = &fiber->frames[fiber->frame_count++];
             new_frame->closure = cl;
+            new_frame->constants = cl->func->constants;
+            new_frame->upvalues = cl->upvalues;
             new_frame->func = fn;
             new_frame->ip = fn->code;
             new_frame->base = &R[a + 1]; /* base[0..ngeneric-1]=types, base[ngeneric..]=values */
@@ -2346,7 +2372,7 @@ namespace zen
                 int used = ngeneric + used_value;
                 clear_new_regs(new_frame->base, used, fn->num_regs);
             }
-            LOAD_STATE();
+            ENTER_FRAME(new_frame, fn, cl, &R[a + 1]);
             DISPATCH();
         }
         }
@@ -2391,7 +2417,7 @@ namespace zen
                 CallFrame *caller_frame = frame - 1;
                 caller_frame->base[ret_reg] = R[a];
                 fiber->stack_top = caller_frame->base + caller_frame->func->num_regs;
-                LOAD_STATE();
+                LOAD_STATE_FROM(caller_frame);
                 DISPATCH();
             }
 
@@ -2452,7 +2478,7 @@ namespace zen
             {
                 return;
             }
-            LOAD_STATE();
+            LOAD_STATE_FROM(caller_frame);
             DISPATCH();
         }
 
@@ -3849,6 +3875,8 @@ namespace zen
                         SAVE_IP();
                         CallFrame *new_frame = &fiber->frames[fiber->frame_count++];
                         new_frame->closure = cl;
+                        new_frame->constants = cl->func->constants;
+                        new_frame->upvalues = cl->upvalues;
                         new_frame->func = fn;
                         new_frame->ip = fn->code;
                         new_frame->base = &R[base];
@@ -3856,7 +3884,7 @@ namespace zen
                         new_frame->ret_count = nresults;
                         fiber->stack_top = new_frame->base + fn->num_regs;
                         clear_new_regs(new_frame->base, 1 + arg_count, fn->num_regs);
-                        LOAD_STATE();
+                        ENTER_FRAME(new_frame, fn, cl, &R[base]);
                         DISPATCH();
                     }
                     /* Same reasoning as OP_CALL: a generic method invoked
@@ -3895,6 +3923,8 @@ namespace zen
                     SAVE_IP();
                     CallFrame *new_frame = &fiber->frames[fiber->frame_count++];
                     new_frame->closure = cl;
+                    new_frame->constants = cl->func->constants;
+                    new_frame->upvalues = cl->upvalues;
                     new_frame->func = fn;
                     new_frame->ip = fn->code;
                     new_frame->base = &R[base]; /* base[0]=self, base[1..]=args */
@@ -3929,7 +3959,7 @@ namespace zen
                         clear_new_regs(new_frame->base, used, fn->num_regs);
                     }
 
-                    LOAD_STATE();
+                    ENTER_FRAME(new_frame, fn, cl, &R[base]);
                     DISPATCH();
                 }
                 else if (is_native(mval))
@@ -4128,6 +4158,8 @@ namespace zen
                 CHECK_STACK_SPACE(fiber, &R[base], fn->num_regs);
                 CallFrame *new_frame = &fiber->frames[fiber->frame_count++];
                 new_frame->closure = cl;
+                new_frame->constants = cl->func->constants;
+                new_frame->upvalues = cl->upvalues;
                 new_frame->func = fn;
                 new_frame->ip = fn->code;
                 /* base[0]=self, base[1..ngeneric]=types, base[1+ngeneric..]=values */
@@ -4164,7 +4196,7 @@ namespace zen
                     clear_new_regs(new_frame->base, used, fn->num_regs);
                 }
 
-                LOAD_STATE();
+                ENTER_FRAME(new_frame, fn, cl, &R[base]);
                 DISPATCH();
             }
         }
@@ -4214,6 +4246,8 @@ namespace zen
             SAVE_IP();
             CallFrame *new_frame = &fiber->frames[fiber->frame_count++];
             new_frame->closure = cl;
+            new_frame->constants = cl->func->constants;
+            new_frame->upvalues = cl->upvalues;
             new_frame->func = fn;
             new_frame->ip = fn->code;
             new_frame->base = &R[base]; /* base[0]=self, base[1..]=args */
@@ -4221,7 +4255,7 @@ namespace zen
             new_frame->ret_count = nresults;
             fiber->stack_top = new_frame->base + fn->num_regs;
             clear_new_regs(new_frame->base, 1 + arg_count, fn->num_regs);
-            LOAD_STATE();
+            ENTER_FRAME(new_frame, fn, cl, &R[base]);
             DISPATCH();
         }
         CASE(OP_SUPER_INVOKE)
@@ -4311,6 +4345,8 @@ namespace zen
                 SAVE_IP();
                 CallFrame *new_frame = &fiber->frames[fiber->frame_count++];
                 new_frame->closure = cl;
+                new_frame->constants = cl->func->constants;
+                new_frame->upvalues = cl->upvalues;
                 new_frame->func = fn;
                 new_frame->ip = fn->code;
                 new_frame->base = &R[base]; /* base[0]=self, base[1..]=args */
@@ -4332,7 +4368,7 @@ namespace zen
                     clear_new_regs(new_frame->base, used, fn->num_regs);
                 }
 
-                LOAD_STATE();
+                ENTER_FRAME(new_frame, fn, cl, &R[base]);
                 DISPATCH();
             }
             else if (is_native(mval))
@@ -4557,6 +4593,8 @@ namespace zen
             SAVE_IP();
             CallFrame *new_frame = &fiber->frames[fiber->frame_count++];
             new_frame->closure = cl;
+            new_frame->constants = cl->func->constants;
+            new_frame->upvalues = cl->upvalues;
             new_frame->func = fn;
             new_frame->ip = fn->code;
             new_frame->base = &R[base];
@@ -4564,7 +4602,7 @@ namespace zen
             new_frame->ret_count = 1;
             fiber->stack_top = new_frame->base + fn->num_regs;
             clear_new_regs(new_frame->base, 1 + arg_count, fn->num_regs);
-            LOAD_STATE();
+            ENTER_FRAME(new_frame, fn, cl, &R[base]);
             DISPATCH();
         }
 
@@ -5330,6 +5368,8 @@ namespace zen
             CHECK_STACK_SPACE(fiber, &R[a + 1], fn->num_regs);
             CallFrame *new_frame = &fiber->frames[fiber->frame_count++];
             new_frame->closure = cl;
+            new_frame->constants = cl->func->constants;
+            new_frame->upvalues = cl->upvalues;
             new_frame->func = fn;
             new_frame->ip = fn->code;
             new_frame->base = &R[a + 1]; /* args start after result slot */
@@ -5337,7 +5377,7 @@ namespace zen
             new_frame->ret_count = 1;
             fiber->stack_top = new_frame->base + fn->num_regs;
             clear_new_regs(new_frame->base, 0, fn->num_regs);
-            LOAD_STATE();
+            ENTER_FRAME(new_frame, fn, cl, &R[a + 1]);
             DISPATCH();
         }
 

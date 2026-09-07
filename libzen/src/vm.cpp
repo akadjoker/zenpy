@@ -217,6 +217,8 @@ namespace zen
             fiber->frame_count = 1;
             CallFrame *frame = &fiber->frames[0];
             frame->closure = closure;
+            frame->constants = closure->func->constants;
+            frame->upvalues = closure->upvalues;
             frame->func = closure->func;
             frame->ip = closure->func->code;
             frame->base = fiber->stack;
@@ -264,6 +266,8 @@ namespace zen
         fiber->frame_count = 1;
         CallFrame *frame = &fiber->frames[0];
         frame->closure = closure;
+        frame->constants = closure->func->constants;
+        frame->upvalues = closure->upvalues;
         frame->func = closure->func;
         frame->ip = closure->func->code;
         frame->base = fiber->stack;
@@ -293,6 +297,8 @@ namespace zen
         main_fiber_->frame_count = 1;
         CallFrame *frame = &main_fiber_->frames[0];
         frame->closure = closure;
+        frame->constants = closure->func->constants;
+        frame->upvalues = closure->upvalues;
         frame->func = closure->func;
         frame->ip = closure->func->code;
         frame->base = main_fiber_->stack;
@@ -365,6 +371,8 @@ namespace zen
             fiber->frame_count = 1;
             CallFrame *frame = &fiber->frames[0];
             frame->closure = cl;
+            frame->constants = cl->func->constants;
+            frame->upvalues = cl->upvalues;
             frame->func = cl->func;
             frame->ip = cl->func->code;
             frame->base = base;
@@ -426,6 +434,8 @@ namespace zen
             fiber->stack_top = base + cl->func->num_regs;
             CallFrame *frame = &fiber->frames[fiber->frame_count++];
             frame->closure = cl;
+            frame->constants = cl->func->constants;
+            frame->upvalues = cl->upvalues;
             frame->func = cl->func;
             frame->ip = cl->func->code;
             frame->base = base;
@@ -1035,6 +1045,8 @@ namespace zen
 
         CallFrame *frame = &fiber->frames[fiber->frame_count++];
         frame->closure = closure;
+        frame->constants = closure->func->constants;
+        frame->upvalues = closure->upvalues;
         frame->func = func;
         frame->ip = func->code;
         /* Args já estão no stack — base aponta para o início */
@@ -1586,6 +1598,8 @@ namespace zen
 
                 CallFrame *frame = &fiber->frames[fiber->frame_count++];
                 frame->closure = cl;
+                frame->constants = cl->func->constants;
+                frame->upvalues = cl->upvalues;
                 frame->func = cl->func;
                 frame->ip = cl->func->code;
                 frame->base = base;
@@ -1659,6 +1673,8 @@ namespace zen
                     int saved_frame_count = fiber->frame_count; /* save before push */
                     CallFrame *frame = &fiber->frames[fiber->frame_count++];
                     frame->closure = cl;
+                    frame->constants = cl->func->constants;
+                    frame->upvalues = cl->upvalues;
                     frame->func = cl->func;
                     frame->ip = cl->func->code;
                     frame->base = base;
@@ -1756,6 +1772,8 @@ namespace zen
             int saved_frame_count = fiber->frame_count; /* save before push */
             CallFrame *frame = &fiber->frames[fiber->frame_count++];
             frame->closure = cl;
+            frame->constants = cl->func->constants;
+            frame->upvalues = cl->upvalues;
             frame->func = cl->func;
             frame->ip = cl->func->code;
             frame->base = base;
@@ -1853,6 +1871,8 @@ namespace zen
 
             CallFrame *frame = &fiber->frames[fiber->frame_count++];
             frame->closure = cl;
+            frame->constants = cl->func->constants;
+            frame->upvalues = cl->upvalues;
             frame->func = cl->func;
             frame->ip = cl->func->code;
             frame->base = base;
@@ -2105,6 +2125,8 @@ namespace zen
         mod_fiber->frame_count = 1;
         CallFrame *mf = &mod_fiber->frames[0];
         mf->closure = mod_cl;
+        mf->constants = mod_cl->func->constants;
+        mf->upvalues = mod_cl->upvalues;
         mf->func = mod_func;
         mf->ip = mod_func->code;
         mf->base = mod_fiber->stack;

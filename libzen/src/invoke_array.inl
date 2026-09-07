@@ -33,10 +33,20 @@ if (ARRAY_METHOD("push") || ARRAY_METHOD("append"))
 }
 if (ARRAY_METHOD("pop"))
 {
-    /* arr.pop() → remove+return last element */
+    /* arr.pop() → remove+return last element; arr.pop(i) → at index i */
     if (arr_count(arr) == 0)
     {
         RT_ERROR("pop() on empty array");
+    }
+    if (arg_count >= 1 && is_int(args[0]))
+    {
+        int64_t pi = args[0].as.integer;
+        if (pi < 0) pi += arr_count(arr);
+        if (pi < 0 || pi >= arr_count(arr))
+            RT_ERROR("pop index out of range");
+        R[base] = arr->data[pi];
+        array_remove(arr, (int32_t)pi);
+        break;
     }
     R[base] = *--arr->end;
     break;
@@ -285,6 +295,55 @@ if (ARRAY_METHOD("dump"))
     dump_value_rec(receiver, 0);
     putchar('\n');
     R[base] = val_nil();
+    break;
+}
+/* ---- Python list methods ---- */
+if (ARRAY_METHOD("count"))
+{
+    if (arg_count != 1) RT_ERROR("count() expects 1 argument");
+    int32_t n = 0;
+    for (int32_t k = 0; k < arr_count(arr); k++)
+        if (values_deep_equal(arr->data[k], args[0])) n++;
+    R[base] = val_int(n);
+    break;
+}
+if (ARRAY_METHOD("extend"))
+{
+    if (arg_count != 1) RT_ERROR("extend() expects 1 argument");
+    if (is_array(args[0]))
+    {
+        ObjArray *src = as_array(args[0]);
+        int32_t n = arr_count(src);
+        if (n > 0)
+        {
+            gc_pause(&gc_);
+            ObjArray *copy = new_array(&gc_); /* src may be arr itself */
+            array_push_n(&gc_, copy, src->data, n);
+            array_push_n(&gc_, arr, copy->data, n);
+            gc_resume(&gc_);
+        }
+    }
+    else if (is_string(args[0]))
+    {
+        ObjString *s = as_string(args[0]);
+        gc_pause(&gc_);
+        for (int k = 0; k < s->length; k++)
+            array_push(&gc_, arr, val_obj((Obj *)create_string(&gc_, s->chars + k, 1)));
+        gc_resume(&gc_);
+    }
+    else
+        RT_ERROR("extend() expects a list or a string");
+    R[base] = val_nil();
+    break;
+}
+if (ARRAY_METHOD("copy"))
+{
+    gc_pause(&gc_);
+    ObjArray *copy = new_array(&gc_);
+    if (arr_count(arr) > 0)
+        array_push_n(&gc_, copy, arr->data, arr_count(arr));
+    gc_resume(&gc_);
+    R[base] = val_obj((Obj *)copy);
     break;
 }
 {

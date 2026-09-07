@@ -14,7 +14,7 @@ import argparse, os, subprocess, sys, tempfile
 
 def run(cmd, path):
     try:
-        p = subprocess.run(cmd + [path], capture_output=True, text=True, timeout=60)
+        p = subprocess.run(cmd + [path], capture_output=True, text=True, errors="replace", timeout=60)
         return p.returncode, p.stdout, (p.stderr or "").strip()
     except subprocess.TimeoutExpired:
         return -1, "", "timeout"

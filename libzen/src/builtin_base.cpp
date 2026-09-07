@@ -209,6 +209,7 @@ namespace zen
     ** ========================================================= */
     static void py_append_value(VM *vm, std::string &out, Value v, bool repr);
     static bool kwarg_get(VM *vm, const char *name, Value *out);
+    static bool py_collect(VM *vm, Value v, std::vector<Value> &out, const char *who);
 
     static int nat_str(VM *vm, Value *args, int nargs)
     {
@@ -693,33 +694,82 @@ namespace zen
     ** isinstance(obj, cls) → bool
     ** ========================================================= */
 
+    /* isinstance(x, Cls), isinstance(x, (A, B)), and the builtin type
+    ** functions as types: isinstance(1, int), isinstance("s", str), ... */
+    static int py_isinstance_one(Value obj, Value cls)
+    {
+        if (is_class(cls))
+        {
+            if (!is_instance(obj)) return 0;
+            ObjClass *target = as_class(cls);
+            for (ObjClass *k = as_instance(obj)->klass; k; k = k->parent)
+                if (k == target) return 1;
+            return 0;
+        }
+        if (is_native(cls) && as_native(cls)->name)
+        {
+            const char *n = as_native(cls)->name->chars;
+            if (!strcmp(n, "int")) return is_int(obj) || is_bool(obj);
+            if (!strcmp(n, "float")) return is_float(obj);
+            if (!strcmp(n, "str")) return is_string(obj);
+            if (!strcmp(n, "bool")) return is_bool(obj);
+            if (!strcmp(n, "list") || !strcmp(n, "tuple")) return is_array(obj);
+            if (!strcmp(n, "dict")) return is_map(obj);
+            if (!strcmp(n, "set")) return is_set(obj);
+            if (!strcmp(n, "object")) return 1;
+        }
+        return -1;
+    }
     static int nat_isinstance(VM *vm, Value *args, int nargs)
     {
-        (void)nargs;
-        Value obj = args[0];
-        Value cls = args[1];
-        if (!is_class(cls))
+        if (nargs < 2) { vm->runtime_error("isinstance() takes two arguments"); return -1; }
+        Value obj = args[0], cls = args[1];
+        int r = -1;
+        if (is_array(cls))
         {
-            vm->runtime_error("isinstance() arg 2 must be a class");
-            return -1;
+            ObjArray *arr = as_array(cls);
+            r = 0;
+            for (int32_t i = 0; i < arr_count(arr) && r == 0; i++)
+                r = py_isinstance_one(obj, arr->data[i]);
         }
-        ObjClass *target = as_class(cls);
-        if (!is_instance(obj))
+        else
+            r = py_isinstance_one(obj, cls);
+        if (r < 0) { vm->runtime_error("isinstance() arg 2 must be a class or a tuple of classes"); return -1; }
+        args[0] = val_bool(r == 1);
+        return 1;
+    }
+
+    /* getattr(obj, name[, default]) / hasattr(obj, name): instance fields. */
+    static bool py_get_field(Value obj, ObjString *name, Value *out)
+    {
+        if (!is_instance(obj)) return false;
+        ObjInstance *inst = as_instance(obj);
+        ObjClass *k = inst->klass;
+        for (int32_t fi = 0; fi < k->num_fields; fi++)
         {
-            args[0] = val_bool(false);
-            return 1;
-        }
-        ObjClass *klass = as_instance(obj)->klass;
-        while (klass)
-        {
-            if (klass == target)
+            ObjString *fn = k->field_names[fi];
+            if (fn->length == name->length && memcmp(fn->chars, name->chars, (size_t)name->length) == 0)
             {
-                args[0] = val_bool(true);
-                return 1;
+                *out = fi < inst->num_fields ? inst->fields[fi] : val_nil();
+                return true;
             }
-            klass = klass->parent;
         }
-        args[0] = val_bool(false);
+        return false;
+    }
+    static int nat_getattr(VM *vm, Value *args, int nargs)
+    {
+        if (nargs < 2 || !is_string(args[1])) { vm->runtime_error("getattr() expects (object, name[, default])"); return -1; }
+        Value v;
+        if (py_get_field(args[0], as_string(args[1]), &v)) { args[0] = v; return 1; }
+        if (nargs >= 3) { args[0] = args[2]; return 1; }
+        vm->runtime_error("object has no attribute '%s'", as_string(args[1])->chars);
+        return -1;
+    }
+    static int nat_hasattr(VM *vm, Value *args, int nargs)
+    {
+        if (nargs < 2 || !is_string(args[1])) { vm->runtime_error("hasattr() expects (object, name)"); return -1; }
+        Value v;
+        args[0] = val_bool(py_get_field(args[0], as_string(args[1]), &v));
         return 1;
     }
 
@@ -1111,26 +1161,22 @@ namespace zen
         if (nargs == 0) { args[0] = val_obj((Obj *)new_array(&vm->get_gc())); return 1; }
         GC *gc = &vm->get_gc();
 
-        /* Find minimum length across all iterables */
-        int32_t min_len = INT32_MAX;
+        /* Any iterables (lists, strings, dicts, sets, ranges) */
+        std::vector<std::vector<Value>> cols(nargs);
+        size_t min_len = SIZE_MAX;
         for (int a = 0; a < nargs; a++)
         {
-            if (!is_obj(args[a]) || args[a].as.obj->type != OBJ_ARRAY)
-            {
-                vm->runtime_error("zip: argument %d is not an array", a);
-                return 0;
-            }
-            int32_t sz = arr_count(as_array(args[a]));
-            if (sz < min_len) min_len = sz;
+            if (!py_collect(vm, args[a], cols[a], "zip")) return -1;
+            if (cols[a].size() < min_len) min_len = cols[a].size();
         }
-        if (min_len == INT32_MAX) min_len = 0;
+        if (min_len == SIZE_MAX) min_len = 0;
 
         ObjArray *result = new_array(gc);
-        for (int32_t i = 0; i < min_len; i++)
+        for (size_t i = 0; i < min_len; i++)
         {
             ObjArray *tuple = new_array(gc);
             for (int a = 0; a < nargs; a++)
-                array_push(gc, tuple, as_array(args[a])->data[i]);
+                array_push(gc, tuple, cols[a][i]);
             array_push(gc, result, val_obj((Obj *)tuple));
         }
 
@@ -1728,6 +1774,8 @@ namespace zen
         {"divmod", nat_divmod, 2},
         {"pow", nat_pow, -1},
         {"callable", nat_callable, 1},
+        {"getattr", nat_getattr, -1},
+        {"hasattr", nat_hasattr, 2},
         {"int", nat_int, 1},
         {"float", nat_float, 1},
         {"char", nat_char, 1},

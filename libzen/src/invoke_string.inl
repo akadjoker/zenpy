@@ -40,19 +40,26 @@ if (STR_METHOD("sub"))
 }
 if (STR_METHOD("find"))
 {
-    /* str.find(needle) → index or -1 */
-    if (arg_count != 1 || !is_string(args[0]))
+    /* str.find(needle[, start]) → index or -1 */
+    if (arg_count < 1 || !is_string(args[0]))
     {
         RT_ERROR("find() expects a string argument");
     }
     ObjString *needle = as_string(args[0]);
-    if (needle->length == 0)
+    int start_at = (arg_count >= 2 && is_int(args[1])) ? (int)args[1].as.integer : 0;
+    if (start_at < 0) start_at += str->length;
+    if (start_at < 0) start_at = 0;
+    if (start_at > str->length)
     {
-        R[base] = val_int(0);
+        R[base] = val_int(-1);
+    }
+    else if (needle->length == 0)
+    {
+        R[base] = val_int(start_at);
     }
     else
     {
-        const char *found = find_sep(str->chars, str->length, needle->chars, needle->length);
+        const char *found = find_sep(str->chars + start_at, str->length - start_at, needle->chars, needle->length);
         R[base] = found ? val_int((int32_t)(found - str->chars)) : val_int(-1);
     }
     break;
@@ -163,11 +170,12 @@ if (STR_METHOD("trim") || STR_METHOD("strip"))
 }
 if (STR_METHOD("replace"))
 {
-    /* str.replace(old, new) → new string with all occurrences replaced */
-    if (arg_count != 2 || !is_string(args[0]) || !is_string(args[1]))
+    /* str.replace(old, new[, count]) → new string with occurrences replaced */
+    if (arg_count < 2 || !is_string(args[0]) || !is_string(args[1]))
     {
         RT_ERROR("replace() expects (string, string)");
     }
+    int64_t replace_limit = (arg_count >= 3 && is_int(args[2])) ? args[2].as.integer : -1;
     ObjString *old_s = as_string(args[0]);
     ObjString *new_s = as_string(args[1]);
     if (old_s->length == 0)
@@ -188,19 +196,22 @@ if (STR_METHOD("replace"))
             occurrences++;
             sp = f + old_s->length;
         }
+        if (replace_limit >= 0 && occurrences > (int)replace_limit)
+            occurrences = (int)replace_limit;
         if (occurrences == 0)
         {
             R[base] = receiver;
         }
         else
         {
+            int replaced = 0;
             int new_len = str->length + occurrences * (new_s->length - old_s->length);
             char *buf = (char *)malloc(new_len);
             char *wp = buf;
             sp = str->chars;
             while (sp < ep)
             {
-                const char *f = find_sep(sp, ep - sp, old_s->chars, old_s->length);
+                const char *f = replaced < occurrences ? find_sep(sp, ep - sp, old_s->chars, old_s->length) : nullptr;
                 if (!f)
                 {
                     memcpy(wp, sp, ep - sp);
@@ -212,6 +223,7 @@ if (STR_METHOD("replace"))
                 memcpy(wp, new_s->chars, new_s->length);
                 wp += new_s->length;
                 sp = f + old_s->length;
+                replaced++;
             }
             R[base] = val_obj((Obj *)create_string(&gc_, buf, new_len));
             free(buf);
@@ -462,6 +474,173 @@ if (STR_METHOD("rstrip"))
                        str->chars[end - 1] == '\n' || str->chars[end - 1] == '\r'))
         end--;
     R[base] = val_obj((Obj *)create_string(&gc_, str->chars, end));
+    break;
+}
+
+/* ---- Python string methods (added by the CPython differential pass) ---- */
+if (STR_METHOD("title") || STR_METHOD("capitalize") || STR_METHOD("swapcase"))
+{
+    bool title = STR_METHOD("title"), cap = STR_METHOD("capitalize");
+    gc_pause(&gc_);
+    ObjString *out = create_string(&gc_, str->chars, str->length);
+    char *p = (char *)out->chars;
+    bool start = true;
+    for (int k = 0; k < out->length; k++)
+    {
+        unsigned char ch = (unsigned char)p[k];
+        if (title)
+            p[k] = (char)(std::isalpha(ch) ? (start ? std::toupper(ch) : std::tolower(ch)) : ch), start = !std::isalpha(ch);
+        else if (cap)
+            p[k] = (char)(k == 0 ? std::toupper(ch) : std::tolower(ch));
+        else
+            p[k] = (char)(std::isupper(ch) ? std::tolower(ch) : (std::islower(ch) ? std::toupper(ch) : ch));
+    }
+    gc_resume(&gc_);
+    R[base] = val_obj((Obj *)out);
+    break;
+}
+if (STR_METHOD("isalpha") || STR_METHOD("isdigit") || STR_METHOD("isalnum") || STR_METHOD("isspace") ||
+    STR_METHOD("isupper") || STR_METHOD("islower"))
+{
+    int kind = STR_METHOD("isalpha") ? 0 : STR_METHOD("isdigit") ? 1 : STR_METHOD("isalnum") ? 2 : STR_METHOD("isspace") ? 3 : STR_METHOD("isupper") ? 4 : 5;
+    bool ok = str->length > 0, cased = false;
+    for (int k = 0; k < str->length && ok; k++)
+    {
+        unsigned char ch = (unsigned char)str->chars[k];
+        switch (kind)
+        {
+        case 0: ok = std::isalpha(ch); break;
+        case 1: ok = std::isdigit(ch); break;
+        case 2: ok = std::isalnum(ch); break;
+        case 3: ok = std::isspace(ch); break;
+        case 4: ok = !std::islower(ch); if (std::isupper(ch)) cased = true; break;
+        default: ok = !std::isupper(ch); if (std::islower(ch)) cased = true; break;
+        }
+    }
+    if (kind >= 4) ok = ok && cased;
+    R[base] = val_bool(ok);
+    break;
+}
+if (STR_METHOD("index") || STR_METHOD("rfind") || STR_METHOD("rindex"))
+{
+    if (arg_count < 1 || !is_string(args[0]))
+        RT_ERROR("%s() expects a string argument", mname);
+    ObjString *needle = as_string(args[0]);
+    bool from_right = mname[0] == 'r';
+    int pos = -1;
+    if (needle->length <= str->length)
+    {
+        if (from_right)
+        {
+            for (int k = str->length - needle->length; k >= 0; k--)
+                if (memcmp(str->chars + k, needle->chars, (size_t)needle->length) == 0) { pos = k; break; }
+        }
+        else
+        {
+            const char *found = needle->length == 0 ? str->chars : find_sep(str->chars, str->length, needle->chars, needle->length);
+            pos = found ? (int)(found - str->chars) : -1;
+        }
+    }
+    if (pos < 0 && (STR_METHOD("index") || STR_METHOD("rindex")))
+        RT_ERROR("substring not found");
+    R[base] = val_int(pos);
+    break;
+}
+if (STR_METHOD("center") || STR_METHOD("ljust") || STR_METHOD("rjust") || STR_METHOD("zfill"))
+{
+    if (arg_count < 1 || !is_int(args[0]))
+        RT_ERROR("%s() expects a width", mname);
+    int width = (int)args[0].as.integer;
+    char fill = STR_METHOD("zfill") ? '0' : ' ';
+    if (arg_count >= 2 && is_string(args[1]) && as_string(args[1])->length == 1)
+        fill = as_string(args[1])->chars[0];
+    int padn = width > str->length ? width - str->length : 0;
+    int left = STR_METHOD("ljust") ? 0 : STR_METHOD("rjust") || STR_METHOD("zfill") ? padn : padn / 2;
+    char *p = (char *)malloc((size_t)str->length + padn + 1);
+    int k = 0;
+    if (STR_METHOD("zfill") && str->length > 0 && (str->chars[0] == '-' || str->chars[0] == '+') && padn > 0)
+    {
+        p[k++] = str->chars[0];
+        for (int z = 0; z < padn; z++) p[k++] = '0';
+        memcpy(p + k, str->chars + 1, (size_t)str->length - 1);
+    }
+    else
+    {
+        for (int z = 0; z < left; z++) p[k++] = fill;
+        memcpy(p + k, str->chars, (size_t)str->length);
+        k += str->length;
+        for (int z = left; z < padn; z++) p[k++] = fill;
+    }
+    R[base] = val_obj((Obj *)create_string(&gc_, p, str->length + padn));
+    free(p);
+    break;
+}
+if (STR_METHOD("splitlines"))
+{
+    gc_pause(&gc_);
+    ObjArray *result = new_array(&gc_);
+    R[base] = val_obj((Obj *)result);
+    int startp = 0;
+    for (int k = 0; k < str->length; k++)
+    {
+        if (str->chars[k] == '\n' || str->chars[k] == '\r')
+        {
+            array_push(&gc_, result, val_obj((Obj *)create_string(&gc_, str->chars + startp, k - startp)));
+            if (str->chars[k] == '\r' && k + 1 < str->length && str->chars[k + 1] == '\n') k++;
+            startp = k + 1;
+        }
+    }
+    if (startp < str->length)
+        array_push(&gc_, result, val_obj((Obj *)create_string(&gc_, str->chars + startp, str->length - startp)));
+    gc_resume(&gc_);
+    break;
+}
+if (STR_METHOD("rsplit") || STR_METHOD("partition") || STR_METHOD("rpartition"))
+{
+    if (arg_count < 1 || !is_string(args[0]) || as_string(args[0])->length == 0)
+        RT_ERROR("%s() expects a non-empty separator", mname);
+    ObjString *sep = as_string(args[0]);
+    gc_pause(&gc_);
+    ObjArray *result = new_array(&gc_);
+    R[base] = val_obj((Obj *)result);
+    if (STR_METHOD("rsplit"))
+    {
+        int maxsplit = (arg_count >= 2 && is_int(args[1])) ? (int)args[1].as.integer : -1;
+        int endp = str->length, splits = 0;
+        while (true)
+        {
+            int k = endp - sep->length;
+            while (k >= 0 && memcmp(str->chars + k, sep->chars, (size_t)sep->length) != 0) k--;
+            if (k < 0 || (maxsplit >= 0 && splits >= maxsplit))
+            {
+                array_insert(&gc_, result, 0, val_obj((Obj *)create_string(&gc_, str->chars, endp)));
+                break;
+            }
+            array_insert(&gc_, result, 0, val_obj((Obj *)create_string(&gc_, str->chars + k + sep->length, endp - k - sep->length)));
+            endp = k;
+            splits++;
+        }
+    }
+    else
+    {
+        bool right = STR_METHOD("rpartition");
+        int k = -1;
+        if (right) { for (int j = str->length - sep->length; j >= 0; j--) if (memcmp(str->chars + j, sep->chars, (size_t)sep->length) == 0) { k = j; break; } }
+        else { const char *f = find_sep(str->chars, str->length, sep->chars, sep->length); k = f ? (int)(f - str->chars) : -1; }
+        if (k < 0)
+        {
+            array_push(&gc_, result, right ? val_obj((Obj *)create_string(&gc_, "", 0)) : receiver);
+            array_push(&gc_, result, val_obj((Obj *)create_string(&gc_, "", 0)));
+            array_push(&gc_, result, right ? receiver : val_obj((Obj *)create_string(&gc_, "", 0)));
+        }
+        else
+        {
+            array_push(&gc_, result, val_obj((Obj *)create_string(&gc_, str->chars, k)));
+            array_push(&gc_, result, val_obj((Obj *)sep));
+            array_push(&gc_, result, val_obj((Obj *)create_string(&gc_, str->chars + k + sep->length, str->length - k - sep->length)));
+        }
+    }
+    gc_resume(&gc_);
     break;
 }
 {

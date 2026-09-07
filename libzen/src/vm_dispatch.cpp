@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstdio>
 #endif
+#include <cctype>
 #include "vm.h"
 #include "compiler.h"
 #include "debug.h"
@@ -164,6 +165,29 @@ namespace zen
         if (is_closure(v) || is_native(v)) return "function";
         if (is_class(v)) return "type";
         return "object";
+    }
+
+
+    /* Set algebra for the | & ^ - operators: 0 union, 1 intersection,
+    ** 2 difference, 3 symmetric difference. */
+    static ObjSet *set_binop(GC *gc, ObjSet *a, ObjSet *b, int kind)
+    {
+        ObjSet *out = new_set(gc);
+        for (int32_t i = 0; i < a->capacity; i++)
+        {
+            if (a->nodes[i].hash == 0xFFFFFFFFu) continue;
+            bool in_b = set_contains(b, a->nodes[i].key);
+            if (kind == 0 || (kind == 1 && in_b) || (kind == 2 && !in_b) || (kind == 3 && !in_b))
+                set_add(gc, out, a->nodes[i].key);
+        }
+        if (kind == 0 || kind == 3)
+            for (int32_t i = 0; i < b->capacity; i++)
+            {
+                if (b->nodes[i].hash == 0xFFFFFFFFu) continue;
+                if (kind == 0 || !set_contains(a, b->nodes[i].key))
+                    set_add(gc, out, b->nodes[i].key);
+            }
+        return out;
     }
 
     static void print_value_py(Value v, bool repr)
@@ -1155,6 +1179,12 @@ namespace zen
             {
                 NUM_BINOP(-);
             }
+            else if (is_set(vb) && is_set(vc))
+            {
+                gc_pause(&gc_);
+                R[ZEN_A(i)] = val_obj((Obj *)set_binop(&gc_, as_set(vb), as_set(vc), 2));
+                gc_resume(&gc_);
+            }
             else if (is_instance(vb) || is_instance(vc))
             {
                 Value result;
@@ -1796,18 +1826,39 @@ namespace zen
         CASE(OP_BAND)
         {
             uint32_t i = *ip;
+            if (__builtin_expect(is_set(R[ZEN_B(i)]) && is_set(R[ZEN_C(i)]), 0))
+            {
+                gc_pause(&gc_);
+                R[ZEN_A(i)] = val_obj((Obj *)set_binop(&gc_, as_set(R[ZEN_B(i)]), as_set(R[ZEN_C(i)]), 1));
+                gc_resume(&gc_);
+                NEXT();
+            }
             R[ZEN_A(i)] = val_int(to_integer(R[ZEN_B(i)]) & to_integer(R[ZEN_C(i)]));
             NEXT();
         }
         CASE(OP_BOR)
         {
             uint32_t i = *ip;
+            if (__builtin_expect(is_set(R[ZEN_B(i)]) && is_set(R[ZEN_C(i)]), 0))
+            {
+                gc_pause(&gc_);
+                R[ZEN_A(i)] = val_obj((Obj *)set_binop(&gc_, as_set(R[ZEN_B(i)]), as_set(R[ZEN_C(i)]), 0));
+                gc_resume(&gc_);
+                NEXT();
+            }
             R[ZEN_A(i)] = val_int(to_integer(R[ZEN_B(i)]) | to_integer(R[ZEN_C(i)]));
             NEXT();
         }
         CASE(OP_BXOR)
         {
             uint32_t i = *ip;
+            if (__builtin_expect(is_set(R[ZEN_B(i)]) && is_set(R[ZEN_C(i)]), 0))
+            {
+                gc_pause(&gc_);
+                R[ZEN_A(i)] = val_obj((Obj *)set_binop(&gc_, as_set(R[ZEN_B(i)]), as_set(R[ZEN_C(i)]), 3));
+                gc_resume(&gc_);
+                NEXT();
+            }
             R[ZEN_A(i)] = val_int(to_integer(R[ZEN_B(i)]) ^ to_integer(R[ZEN_C(i)]));
             NEXT();
         }
@@ -3092,8 +3143,18 @@ namespace zen
             }
             else if (is_map(iterable))
             {
-                /* Map/dict iteration not yet implemented */
-                RT_ERROR("'for' on dicts requires calling .items(), .keys(), or .values()");
+                /* for k in d: the keys, in table order */
+                ObjMap *m = as_map(iterable);
+                int32_t idx = (int32_t)R[b + 1].as.integer;
+                while (idx < m->capacity && m->nodes[idx].hash == 0xFFFFFFFFu)
+                    idx++;
+                if (idx < m->capacity)
+                {
+                    R[a] = m->nodes[idx].key;
+                    R[b + 1] = val_int(idx + 1);
+                    ip += offset;
+                }
+                DISPATCH();
             }
             else
             {
@@ -3260,6 +3321,15 @@ namespace zen
                     RT_ERROR("module has no attribute '%s'", name->chars);
                 R[ZEN_A(i)] = v;
                 goto getfield_done;
+            }
+            if (name->length == 8 && memcmp(name->chars, "__name__", 8) == 0)
+            {
+                /* type(x).__name__ (a string), f.__name__, Cls.__name__ */
+                if (is_string(receiver)) { R[ZEN_A(i)] = receiver; goto getfield_done; }
+                ObjString *nm = is_closure(receiver) ? as_closure(receiver)->func->name
+                              : is_native(receiver) ? as_native(receiver)->name
+                              : is_class(receiver) ? as_class(receiver)->name : nullptr;
+                if (nm) { R[ZEN_A(i)] = val_obj((Obj *)nm); goto getfield_done; }
             }
             RT_ERROR("cannot access field '%s' on this type", name->chars);
         getfield_done:

@@ -623,6 +623,32 @@ GC) já eram próprias.
   escalares; um módulo importado, que tem nativos, continua a ser
   re-importado pelo loader). `--bytecode` 79/79.
 
+### Ronda 8 (2026-09-07, noite: zen_bind.hpp + caça a bugs)
+
+- `libzen/include/zen/zen_bind.hpp`: bindings gerados a partir da assinatura
+  C++ (header-only, C++17, sem STL). `bind::def_fn<&f>(vm, "nome")` e
+  `bind::def_class<T>(vm, "Cls").ctor<A...>()|.ctor<&factory>().dtor()
+  .method<&T::m>("m", flags).end()`. Converte bool/inteiros/float/double/
+  `const char *`/`Value`/`T *`/`T &`, injecta um `VM *` inicial, tira a
+  aridade da assinatura e produz o erro com o nome e o índice do argumento
+  (`twice: argument 1 must be an int`). Uma função livre cujo 1.º parâmetro
+  é `T *`/`T &` regista-se como método (o receptor entra nesse slot).
+  A API crua (`def_native`, `ClassBuilder`) fica igual e é o que o header usa
+  por baixo: varargs, kwargs e retornos múltiplos continuam à mão.
+  Cobertura: teste 18 do test_embedding (98 checks); `tex_zen.cpp` e
+  `glue_zen.cpp` portados como prova (números iguais: glue native 6,70
+  ms/frame contra 3,38 do C++; texmark 55 400 sprites a 60 fps).
+- Caça a bugs (ASan/UBSan + libFuzzer + fuzzer de mutação): `fuzz_zen`
+  804 k execuções e `fuzz_embedding` 167 k sem uma única falha; a suite
+  passa 79/79 nos quatro modos. O fuzzer de mutação encontrou um caso real
+  de UB: `memcpy(dst, nullptr, 0)` ao crescer os campos de uma instância sem
+  campos nenhuns (dois sítios no `vm_dispatch.cpp`) e a mesma forma em
+  `array_copy`. Corrigido com guarda `n > 0 && src`.
+- O critério do fuzzer de mutação estava errado: contava `[zen runtime
+  error]` (erro de script, que é o comportamento certo) como crash, o que
+  enterrava o achado real em 70 falsos positivos. Agora só sinais e relatórios
+  do sanitizer contam.
+
 ### Plano para a próxima sessão (por ordem)
 
 1. Validar: `cd build_release && ninja`, suite normal + `--stress-gc`, bench

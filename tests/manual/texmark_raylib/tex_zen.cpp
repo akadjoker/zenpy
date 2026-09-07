@@ -97,9 +97,9 @@ int main(int argc, char **argv)
     vm.def_class("Texture")
         .ctor(tex_ctor)
         .dtor(tex_dtor)
-        .method("draw", tex_draw, 2)
-        .method("width", tex_width, 0)
-        .method("height", tex_height, 0)
+        .method("draw", tex_draw, 2, ZEN_NATIVE_GC_SAFE)
+        .method("width", tex_width, 0, ZEN_NATIVE_GC_SAFE)
+        .method("height", tex_height, 0, ZEN_NATIVE_GC_SAFE)
         .end();
     vm.def_native("draw_texture", n_draw_texture, 3, ZEN_NATIVE_GC_SAFE);
     vm.def_native("rand", n_rand, 2, ZEN_NATIVE_GC_SAFE);

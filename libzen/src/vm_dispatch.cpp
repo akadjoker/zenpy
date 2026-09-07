@@ -3894,27 +3894,7 @@ namespace zen
                     args[ai].as.obj->flags |= OBJ_FLAG_SHARED;
             }
 
-            if (is_array(receiver))
-            {
-#include "invoke_array.inl"
-            }
-            else if (is_string(receiver))
-            {
-#include "invoke_string.inl"
-            }
-            else if (is_map(receiver))
-            {
-#include "invoke_map.inl"
-            }
-            else if (is_set(receiver))
-            {
-#include "invoke_set.inl"
-            }
-            else if (is_buffer(receiver))
-            {
-#include "invoke_buffer.inl"
-            }
-            else if (is_instance(receiver))
+            if (is_instance(receiver))
             {
                 /* Vtable dispatch using compile-time selector slot */
                 ObjInstance *inst = as_instance(receiver);
@@ -4056,6 +4036,26 @@ namespace zen
                 {
                     RT_ERROR("'%s.%s' is not callable", klass->name->chars, mname);
                 }
+            }
+            else if (is_array(receiver))
+            {
+#include "invoke_array.inl"
+            }
+            else if (is_string(receiver))
+            {
+#include "invoke_string.inl"
+            }
+            else if (is_map(receiver))
+            {
+#include "invoke_map.inl"
+            }
+            else if (is_set(receiver))
+            {
+#include "invoke_set.inl"
+            }
+            else if (is_buffer(receiver))
+            {
+#include "invoke_buffer.inl"
             }
             else
             {
@@ -4317,7 +4317,35 @@ namespace zen
                 goto op_invoke_entry;
             Value mval = klass->vtable[slot];
             if (__builtin_expect(!is_closure(mval), 0))
+            {
+                /* A native method (ClassBuilder) in the slot: call it right
+                ** here — the engine's `tree.count(...)`, `tex.draw(...)`
+                ** path — instead of re-entering OP_INVOKE's by-type chain.
+                ** Same convention as the general path: args[-1] = self,
+                ** results copied back over the base register. */
+                if (is_native(mval) && as_native(mval)->generic_arity == 0)
+                {
+                    ObjNative *nat = as_native(mval);
+                    for (int ai = 0; ai < arg_count; ai++)
+                    {
+                        Value av = R[base + 1 + ai];
+                        if (__builtin_expect(is_string(av), 0))
+                            av.as.obj->flags |= OBJ_FLAG_SHARED;
+                    }
+                    ip += 2;
+                    SAVE_IP();
+                    int nret = call_native(this, nat, &R[base + 1], arg_count);
+                    if (__builtin_expect(nret < 0, 0))
+                    {
+                        if (had_error_)
+                            return;
+                        RT_ERROR("native method '%s' returned error", nat->name ? nat->name->chars : "?");
+                    }
+                    copy_native_results(&R[base], &R[base + 1], nret, nresults);
+                    DISPATCH();
+                }
                 goto op_invoke_entry;
+            }
             ObjClosure *cl = as_closure(mval);
             ObjFunc *fn = cl->func;
             if (__builtin_expect(fn->arity != arg_count || fn->generic_arity > 0 || fn->is_generator, 0))

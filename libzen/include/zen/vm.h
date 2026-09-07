@@ -148,7 +148,7 @@ namespace zen
             ClassBuilder(VM *vm, const char *name);
             ClassBuilder &parent(const char *parent_name);
             ClassBuilder &field(const char *name);
-            ClassBuilder &method(const char *name, NativeFn fn, int arity);
+            ClassBuilder &method(const char *name, NativeFn fn, int arity, int flags = 0); /* flags: ZEN_NATIVE_GC_SAFE */
             /* entity.get_component<Transform>(): a native method taking
             ** `generic_arity` type arguments ahead of `arity` value
             ** arguments. Variadic value arity (-1, like plain method()) is

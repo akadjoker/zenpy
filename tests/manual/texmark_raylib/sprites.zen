@@ -2,6 +2,7 @@
 # and drawn through the native object: self.tex.draw(x, y).
 
 class Sprite:
+    tex: Texture    # native class: self.tex.draw() takes the vtable slot straight to the NativeFn
     def __init__(self, tex: Texture, x, y, vx, vy):
         self.tex = tex
         self.x = x

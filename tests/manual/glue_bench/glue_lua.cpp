@@ -57,10 +57,16 @@ int main(int argc, char **argv)
     lua_register(L, "QuadTree", l_new);
     if (luaL_dostring(L, src) != LUA_OK) { fprintf(stderr, "lua: %s\n", lua_tostring(L, -1)); return 1; }
     long checksum; double secs;
-    if (!run_mode(L, "run_script", a, checksum, secs)) return 1;
-    bench_result("lua", "script", a, secs, checksum);
-    if (!run_mode(L, "run_native", a, checksum, secs)) return 1;
-    bench_result("lua", "native", a, secs, checksum);
+    if (bench_wants(a, "script"))
+    {
+        if (!run_mode(L, "run_script", a, checksum, secs)) return 1;
+        bench_result("lua", "script", a, secs, checksum);
+    }
+    if (bench_wants(a, "native"))
+    {
+        if (!run_mode(L, "run_native", a, checksum, secs)) return 1;
+        bench_result("lua", "native", a, secs, checksum);
+    }
     lua_close(L);
     free(src);
     return 0;

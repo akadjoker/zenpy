@@ -1309,11 +1309,12 @@ namespace zen
         return *this;
     }
 
-    VM::ClassBuilder &VM::ClassBuilder::method(const char *name, NativeFn fn, int arity)
+    VM::ClassBuilder &VM::ClassBuilder::method(const char *name, NativeFn fn, int arity, int flags)
     {
         ObjString *s = intern_string(&vm_->gc_, name, (int)strlen(name),
                                      hash_string(name, (int)strlen(name)));
         ObjNative *nat = new_native(&vm_->gc_, fn, arity, s);
+        nat->flags = flags;
         map_set(&vm_->gc_, klass_->methods, val_obj((Obj *)s), val_obj((Obj *)nat));
 
         int name_len = (int)strlen(name);

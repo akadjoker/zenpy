@@ -76,10 +76,16 @@ int main(int argc, char **argv)
     wrenGetVariable(vm, "main", "Game", 0);
     WrenHandle *game = wrenGetSlotHandle(vm, 0);
     long checksum; double secs;
-    if (!run_mode(vm, game, "runScript(_,_)", a, checksum, secs)) return 1;
-    bench_result("wren", "script", a, secs, checksum);
-    if (!run_mode(vm, game, "runNative(_,_)", a, checksum, secs)) return 1;
-    bench_result("wren", "native", a, secs, checksum);
+    if (bench_wants(a, "script"))
+    {
+        if (!run_mode(vm, game, "runScript(_,_)", a, checksum, secs)) return 1;
+        bench_result("wren", "script", a, secs, checksum);
+    }
+    if (bench_wants(a, "native"))
+    {
+        if (!run_mode(vm, game, "runNative(_,_)", a, checksum, secs)) return 1;
+        bench_result("wren", "native", a, secs, checksum);
+    }
     wrenReleaseHandle(vm, game);
     wrenFreeVM(vm);
     free(src);

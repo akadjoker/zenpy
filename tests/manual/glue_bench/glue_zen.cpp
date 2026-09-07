@@ -48,9 +48,9 @@ int main(int argc, char **argv)
     vm.def_class("QuadTree")
         .ctor(qt_ctor)
         .dtor(qt_dtor)
-        .method("clear", qt_clear, 0)
-        .method("insert", qt_insert, 2)
-        .method("count", qt_count, 4)
+        .method("clear", qt_clear, 0, ZEN_NATIVE_GC_SAFE)
+        .method("insert", qt_insert, 2, ZEN_NATIVE_GC_SAFE)
+        .method("count", qt_count, 4, ZEN_NATIVE_GC_SAFE)
         .end();
 
     Compiler compiler;
@@ -60,10 +60,16 @@ int main(int argc, char **argv)
     if (vm.had_error()) return 1;
 
     long checksum; double secs;
-    if (!run_mode(vm, "run_script", a, checksum, secs)) return 1;
-    bench_result("zen", "script", a, secs, checksum);
-    if (!run_mode(vm, "run_native", a, checksum, secs)) return 1;
-    bench_result("zen", "native", a, secs, checksum);
+    if (bench_wants(a, "script"))
+    {
+        if (!run_mode(vm, "run_script", a, checksum, secs)) return 1;
+        bench_result("zen", "script", a, secs, checksum);
+    }
+    if (bench_wants(a, "native"))
+    {
+        if (!run_mode(vm, "run_native", a, checksum, secs)) return 1;
+        bench_result("zen", "native", a, secs, checksum);
+    }
     free(src);
     return 0;
 }

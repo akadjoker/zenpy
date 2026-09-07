@@ -4,18 +4,21 @@
 #include <cstdlib>
 #include <cstring>
 
-struct BenchArgs { int n; int frames; };
+struct BenchArgs { int n; int frames; const char *mode; /* script | native | both */ };
 
 inline BenchArgs bench_args(int argc, char **argv)
 {
-    BenchArgs a = { 10000, 30 };
+    BenchArgs a = { 10000, 30, "both" };
     for (int i = 1; i < argc; i++)
     {
         if (!strcmp(argv[i], "--n") && i + 1 < argc) a.n = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) a.frames = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--mode") && i + 1 < argc) a.mode = argv[++i];
     }
     return a;
 }
+
+inline bool bench_wants(const BenchArgs &a, const char *mode) { return !strcmp(a.mode, "both") || !strcmp(a.mode, mode); }
 
 inline void bench_result(const char *lang, const char *mode, const BenchArgs &a, double seconds, long checksum)
 {

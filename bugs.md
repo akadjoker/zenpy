@@ -596,6 +596,29 @@ GC) já eram próprias.
   objectos Zen (sem árvore `ct::Json` intermédia), porque é o caminho mais
   rápido e já não tem dependências.
 
+### Ronda 7 (2026-09-07, noite: docs internos + testes de cobertura)
+
+- `docs/internals/` (README, dispatch-and-frames, calling-convention,
+  natives-and-embedding, compiler-conditions-and-peepholes, gc-and-roots,
+  testing): uma página por subsistema, em PT, com os nomes reais do código.
+  Regra: quem muda o código muda a página no mesmo commit.
+- `run_tests.sh`: `--bytecode` (cada script via `--dump` + `.zbc`, saída
+  igual), `--switch-dispatch` (rebuild com `-DZEN_DISPATCH_MODE=1`, o
+  caminho do MSVC), e `tests/errors/*.py` (`# expect: <substring>` na 1.ª
+  linha; exit != 0 e a substring no stderr). 10 casos de erro.
+- `tools/speed_gate.sh <baseline.md> [%]`: falha se um benchmark regredir
+  mais do que o limiar.
+- test_embedding: kwargs em nativos via `vm->kwargs()` (incl. `sorted(key=,
+  reverse=)`), e `ClassBuilder::method(..., ZEN_NATIVE_GC_SAFE)` com receptor
+  tipado sob 200k chamadas com lixo pelo meio, dtor no fim.
+- Bugs apanhados pelos modos novos: (1) o carregador de `.zbc` chamava
+  `resolve_native_globals()` (re-importa módulos, cujas classes internam
+  selectores) ANTES de `read_selectors`, logo qualquer script que usasse um
+  método cujo selector caísse num slot já ocupado (`xml.parse`, `d.update`)
+  carregava com "selector mismatch"; ordem trocada no loader, formato igual.
+  (2) `None + 1` (e qualquer não-número) via `ADDI`/`SUBI` dava float em vez
+  de erro; agora erro como no `OP_ADD`.
+
 ### Plano para a próxima sessão (por ordem)
 
 1. Validar: `cd build_release && ninja`, suite normal + `--stress-gc`, bench

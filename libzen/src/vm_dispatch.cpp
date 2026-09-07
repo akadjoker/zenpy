@@ -1735,8 +1735,10 @@ namespace zen
                 R[ZEN_A(i)] = val_int((int64_t)((uint64_t)vb.as.integer + (int64_t)imm));
             else if (vb.type == VAL_BOOL)
                 R[ZEN_A(i)] = val_int((int64_t)(vb.as.boolean ? 1 : 0) + (int64_t)imm);
-            else if (__builtin_expect(!is_obj(vb), 1))
-                R[ZEN_A(i)] = val_float(to_number(vb) + imm);
+            else if (__builtin_expect(vb.type == VAL_FLOAT, 1))
+                R[ZEN_A(i)] = val_float(vb.as.number + imm);
+            else if (!is_obj(vb))
+                RT_ERROR("unsupported operand type(s) for +: %s and int", zen_type_name_of(vb));
             else if (is_instance(vb))
             {
                 Value vc = val_int((int64_t)imm);
@@ -1798,8 +1800,10 @@ namespace zen
                 R[ZEN_A(i)] = val_int((int64_t)((uint64_t)vb.as.integer - (int64_t)imm));
             else if (vb.type == VAL_BOOL)
                 R[ZEN_A(i)] = val_int((int64_t)(vb.as.boolean ? 1 : 0) - (int64_t)imm);
-            else if (__builtin_expect(!is_obj(vb), 1))
-                R[ZEN_A(i)] = val_float(to_number(vb) - imm);
+            else if (__builtin_expect(vb.type == VAL_FLOAT, 1))
+                R[ZEN_A(i)] = val_float(vb.as.number - imm);
+            else if (!is_obj(vb))
+                RT_ERROR("unsupported operand type(s) for -: %s and int", zen_type_name_of(vb));
             else if (is_instance(vb))
             {
                 Value result;

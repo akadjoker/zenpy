@@ -651,7 +651,7 @@ namespace
                 const char *existing = vm->selector_name((int)i);
                 if (!existing || strcmp(existing, name->chars) != 0)
                 {
-                    set_error(err, err_len, "selector mismatch at slot %u", (unsigned)i);
+                    set_error(err, err_len, "selector mismatch at slot %u: file '%s', vm '%s'", (unsigned)i, name ? name->chars : "?", existing);
                     return false;
                 }
                 continue;
@@ -1320,16 +1320,20 @@ ObjFunc *load_bytecode_buffer(VM *vm, const uint8_t *data, size_t size, char *er
         return nullptr;
     }
 
-    /* Resolve native functions/constants that weren't serialized.
-       Imports (math, os, etc.) register natives as globals at compile time,
-       but native objects can't be serialized into bytecode. */
-    vm->resolve_native_globals();
-
+    /* The selector table first: resolving native globals below re-imports
+       modules, whose class registrations intern selectors of their own
+       (io's File: seek, tell, ...). Those must land AFTER the file's slots,
+       or the compiled INVOKEs point at the wrong names. */
     if (!read_selectors(vm, r, err, err_len))
     {
         gc.vm = saved_vm;
         return nullptr;
     }
+
+    /* Resolve native functions/constants that weren't serialized.
+       Imports (math, os, etc.) register natives as globals at compile time,
+       but native objects can't be serialized into bytecode. */
+    vm->resolve_native_globals();
 
     ObjFunc *fn = read_func(vm, r, minor, err, err_len);
     gc.vm = saved_vm;

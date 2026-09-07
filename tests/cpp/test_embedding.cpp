@@ -1232,6 +1232,116 @@ Locked.value = replacement
 /* =========================================================
 ** MAIN
 ** ========================================================= */
+
+/* =========================================================
+** TEST 16: keyword arguments reach a native through vm->kwargs()
+** (compiler packs name=value into a trailing map, flag 0x40 in nargs).
+** ========================================================= */
+static int native_config(VM *vm, Value *args, int nargs)
+{
+    /* config(base, scale=2, name="x") -> base * scale, and records the name */
+    int64_t base = nargs > 0 && is_int(args[0]) ? args[0].as.integer : 0;
+    int64_t scale = 1;
+    ObjMap *kw = vm->kwargs();
+    if (kw)
+    {
+        bool found = false;
+        Value v = map_get(kw, val_obj((Obj *)vm->make_string("scale")), &found);
+        if (found && is_int(v))
+            scale = v.as.integer;
+        v = map_get(kw, val_obj((Obj *)vm->make_string("name")), &found);
+        if (found && is_string(v))
+            vm->set_global("seen_name", v);
+    }
+    args[0] = val_int(base * scale);
+    return 1;
+}
+
+static void test_native_keyword_arguments()
+{
+    printf("\n[Test 16] keyword arguments to natives (vm->kwargs)\n");
+    VM vm;
+    vm.open_lib_globals(&zen_lib_base);
+    vm.def_native("config", native_config, -1);
+    vm.def_global("seen_name", val_nil());
+
+    TEST("Positional only: kwargs() is null");
+    run_source(vm, "r1 = config(21)\n");
+    Value r1 = vm.get_global("r1");
+    CHECK(is_int(r1) && r1.as.integer == 21, "expected 21");
+
+    TEST("name=value pairs arrive in the map");
+    run_source(vm, "r2 = config(21, scale=2, name=\"tex\")\n");
+    Value r2 = vm.get_global("r2");
+    Value nm = vm.get_global("seen_name");
+    CHECK(is_int(r2) && r2.as.integer == 42 && is_string(nm) && strcmp(as_string(nm)->chars, "tex") == 0,
+          "expected 42 and seen_name == 'tex'");
+
+    TEST("kwargs() is cleared after the call");
+    CHECK(vm.kwargs() == nullptr, "kwargs_ must be null outside a native call");
+
+    TEST("Builtin sorted(key=, reverse=) through the same channel");
+    run_source(vm, "r3 = sorted([3, 1, 2], reverse=True)\nr4 = sorted([\"bb\", \"a\", \"ccc\"], key=len)\n");
+    Value r3 = vm.get_global("r3"), r4 = vm.get_global("r4");
+    CHECK(is_array(r3) && as_array(r3)->data[0].as.integer == 3 &&
+          is_array(r4) && strcmp(as_string(as_array(r4)->data[0])->chars, "a") == 0,
+          "expected [3,2,1] and ['a','bb','ccc']");
+}
+
+/* =========================================================
+** TEST 17: ClassBuilder::method flags — a GC_SAFE method runs with the
+** collector live, is called straight from the vtable slot (INVOKE_VT on a
+** typed receiver), and native_data survives heavy allocation in the script.
+** ========================================================= */
+static int g_counter_alive = 0;
+struct CounterData { int64_t n; };
+static void *counter_ctor(VM *, int, Value *) { CounterData *c = (CounterData *)malloc(sizeof(CounterData)); c->n = 0; g_counter_alive++; return c; }
+static void counter_dtor(VM *, void *d) { free(d); g_counter_alive--; }
+static int counter_tick(VM *, Value *args, int) { CounterData *c = zen_instance_data<CounterData>(args[-1]); c->n++; args[0] = val_int(c->n); return 1; }
+static int counter_value(VM *, Value *args, int) { args[0] = val_int(zen_instance_data<CounterData>(args[-1])->n); return 1; }
+
+static void test_method_flags_and_gc()
+{
+    printf("\n[Test 17] ClassBuilder method flags (GC_SAFE) under allocation pressure\n");
+    g_counter_alive = 0;
+    {
+        VM vm;
+        vm.open_lib_globals(&zen_lib_base);
+        vm.def_class("Counter")
+            .ctor(counter_ctor)
+            .dtor(counter_dtor)
+            .method("tick", counter_tick, 0, ZEN_NATIVE_GC_SAFE)
+            .method("value", counter_value, 0, ZEN_NATIVE_GC_SAFE)
+            .end();
+
+        TEST("GC_SAFE methods on a typed receiver, 200k calls with garbage in between");
+        run_source(vm, R"(
+c: Counter = Counter()
+junk = []
+i = 0
+while i < 200000:
+    c.tick()
+    junk.append([i, str(i)])
+    if len(junk) > 1000:
+        junk = []
+    i += 1
+v = c.value()
+)");
+        Value v = vm.get_global("v");
+        CHECK(is_int(v) && v.as.integer == 200000, "expected value() == 200000");
+
+        TEST("Untyped receiver goes through INVOKE and reaches the same native");
+        run_source(vm, "d = Counter()\nd.tick()\nd.tick()\nw = d.value()\n");
+        Value w = vm.get_global("w");
+        CHECK(is_int(w) && w.as.integer == 2, "expected 2");
+
+        TEST("Two instances alive");
+        CHECK(g_counter_alive == 2, "expected 2 counters alive");
+    }
+    TEST("Destructors ran when the VM died");
+    CHECK(g_counter_alive == 0, "expected 0 counters alive");
+}
+
 int main()
 {
     printf("=== Zen Embedding Tests (C++ <-> Script) ===\n");
@@ -1251,6 +1361,8 @@ int main()
     test_resume_fiber_error_handling();
     test_generic_native_method();
     test_closed_script_class();
+    test_native_keyword_arguments();
+    test_method_flags_and_gc();
 
     printf("\n========================================\n");
     printf("Results: %d passed, %d failed\n", g_tests_passed, g_tests_failed);

@@ -489,11 +489,11 @@ if (STR_METHOD("title") || STR_METHOD("capitalize") || STR_METHOD("swapcase"))
     {
         unsigned char ch = (unsigned char)p[k];
         if (title)
-            p[k] = (char)(std::isalpha(ch) ? (start ? std::toupper(ch) : std::tolower(ch)) : ch), start = !std::isalpha(ch);
+            p[k] = (char)(isalpha(ch) ? (start ? toupper(ch) : tolower(ch)) : ch), start = !isalpha(ch);
         else if (cap)
-            p[k] = (char)(k == 0 ? std::toupper(ch) : std::tolower(ch));
+            p[k] = (char)(k == 0 ? toupper(ch) : tolower(ch));
         else
-            p[k] = (char)(std::isupper(ch) ? std::tolower(ch) : (std::islower(ch) ? std::toupper(ch) : ch));
+            p[k] = (char)(isupper(ch) ? tolower(ch) : (islower(ch) ? toupper(ch) : ch));
     }
     gc_resume(&gc_);
     R[base] = val_obj((Obj *)out);
@@ -509,12 +509,12 @@ if (STR_METHOD("isalpha") || STR_METHOD("isdigit") || STR_METHOD("isalnum") || S
         unsigned char ch = (unsigned char)str->chars[k];
         switch (kind)
         {
-        case 0: ok = std::isalpha(ch); break;
-        case 1: ok = std::isdigit(ch); break;
-        case 2: ok = std::isalnum(ch); break;
-        case 3: ok = std::isspace(ch); break;
-        case 4: ok = !std::islower(ch); if (std::isupper(ch)) cased = true; break;
-        default: ok = !std::isupper(ch); if (std::islower(ch)) cased = true; break;
+        case 0: ok = isalpha(ch); break;
+        case 1: ok = isdigit(ch); break;
+        case 2: ok = isalnum(ch); break;
+        case 3: ok = isspace(ch); break;
+        case 4: ok = !islower(ch); if (isupper(ch)) cased = true; break;
+        default: ok = !isupper(ch); if (islower(ch)) cased = true; break;
         }
     }
     if (kind >= 4) ok = ok && cased;

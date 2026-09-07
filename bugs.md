@@ -556,6 +556,36 @@ generators em `list()/sum()`; iter/next/hash/id/slice/frozenset;
 str.format/encode; atributos novos em instâncias (classes seladas);
 `Base.who(obj)` (método sem bind); `counts.get` como valor.
 
+### Ronda 6 (2026-09-07, noite: port std → ct::containers, branch port/containers)
+
+Pedido: retirar todo o `std::` do libzen e usar https://github.com/akadjoker/containers
+(header-only, `ct::`). Antes: `tools/speed_report.sh <label>` grava em
+`tests/manual/baseline/<label>.md` tempos de build limpo (release e debug),
+tamanhos, tempo da suite, cross_lang, microbench, algo_bench e tempo de
+compilação de scripts (`zen --check`, novo). Baseline: `baseline-1aaa13b.md`;
+binários originais em `zenpy_backups/baseline-1aaa13b/`.
+
+Âmbito real do `std::` no libzen: pequeno e quase todo da ronda 5
+(`std::vector`/`std::string`/`std::pair`/`stable_sort` em builtin_base.cpp e
+invoke_array.inl), mais `std::string` no bytecode.cpp, um `std::vector` no
+vm.cpp (`call_args`), `numeric_limits` em bytecode/math, e prefixos `std::`
+em funções C (cctype/cstdio/cmath). Os headers `ct` usados (vector, string,
+sort, span, detail/utils) estão vendorizados em `libzen/third_party/ct` com
+o commit de origem em VERSION; `third_party` entrou no include path privado
+do zen_static. `ct::sort` não é estável: a ordenação Python (sorted, list.sort)
+usa uma struct `{key, val, index}` e desempata pelo índice original.
+`isnan/isinf/isfinite` viraram `zen_isnan/...` em value.h (os de <cmath> só
+existem como `std::`). `grep std:: libzen/src libzen/include` → 0.
+
+Resultado (mesma janela, best of 3): tempos de execução iguais dentro do
+ruído (fib 0,131/0,131, dijkstra 0,187/0,188, suite 2,1 s); build limpo
+igual (9,5→9,8 s release, 8,7→8,9 s debug: o std nunca esteve no caminho
+quente da compilação); tamanho: `zen` 653 128 → 628 792 bytes (−3,7 %),
+libzen.a release 978 → 958 KB, libzen.a debug 18,9 → 17,7 MB (−6 %).
+Conclusão: o port limpa dependências e encolhe o binário; não muda
+velocidade, porque as estruturas quentes da VM (arrays, maps, strings do
+GC) já eram próprias.
+
 ### Plano para a próxima sessão (por ordem)
 
 1. Validar: `cd build_release && ninja`, suite normal + `--stress-gc`, bench

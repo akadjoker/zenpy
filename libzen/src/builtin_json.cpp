@@ -316,7 +316,7 @@ namespace zen
         case VAL_FLOAT:
         {
             double d = val.as.number;
-            if (!std::isfinite(d))
+            if (!zen_isfinite(d))
             {
                 snprintf(ctx->error, sizeof(ctx->error), "cannot serialize NaN or Infinity");
                 return false;
@@ -691,7 +691,7 @@ namespace zen
         errno = 0;
         char *end = nullptr;
         double d = strtod(tmp, &end);
-        if (!end || *end != '\0' || errno == ERANGE || !std::isfinite(d))
+        if (!end || *end != '\0' || errno == ERANGE || !zen_isfinite(d))
         {
             jp_error(p, "number out of range");
             return false;

@@ -1,13 +1,12 @@
 #ifdef ZEN_OPCODE_PROFILE
 #include "debug.h"
 #include <x86intrin.h>
-#include <algorithm>
 #include <cstdlib>
 #include <cstdio>
 #endif
 #include <cctype>
-#include <vector>
-#include <algorithm>
+#include <ct/vector.hpp>
+#include <ct/sort.hpp>
 #include "vm.h"
 #include "compiler.h"
 #include "debug.h"
@@ -579,7 +578,7 @@ namespace zen
                 total += g_prof_cycles[i];
             }
         }
-        std::sort(order, order + n, [](int a, int b) { return g_prof_cycles[a] > g_prof_cycles[b]; });
+        ct::sort(order, order + n, [](int a, int b) { return g_prof_cycles[a] > g_prof_cycles[b]; });
         fprintf(stderr, "\n%-18s %12s %14s %7s %8s\n", "opcode", "count", "cycles", "%", "avg");
         for (int k = 0; k < n && k < 40; k++)
         {
@@ -1352,7 +1351,7 @@ namespace zen
                     {
                         RT_ERROR("floor division by zero");
                     }
-                    R[ZEN_A(i)] = val_float(std::floor(a / b));
+                    R[ZEN_A(i)] = val_float(floor(a / b));
                 }
             }
             else
@@ -1362,7 +1361,7 @@ namespace zen
                 {
                     RT_ERROR("floor division by zero");
                 }
-                R[ZEN_A(i)] = val_float(std::floor(a / b));
+                R[ZEN_A(i)] = val_float(floor(a / b));
             }
             NEXT();
         }
@@ -1467,7 +1466,7 @@ namespace zen
                     NEXT();
                 }
             }
-            R[ZEN_A(i)] = val_float(std::pow(to_number(vb), to_number(vc)));
+            R[ZEN_A(i)] = val_float(pow(to_number(vb), to_number(vc)));
             NEXT();
         }
         CASE(OP_NEG)

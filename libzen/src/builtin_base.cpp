@@ -14,9 +14,9 @@
 **   range(a,b?,step?)→ array [a..b) with step
 ** ========================================================= */
 
-#include <vector>
-#include <string>
-#include <algorithm>
+#include <ct/vector.hpp>
+#include <ct/string.hpp>
+#include <ct/sort.hpp>
 #include <cmath>
 #include "module.h"
 #include "vm.h"
@@ -207,10 +207,10 @@ namespace zen
     /* =========================================================
     ** str(val) → string
     ** ========================================================= */
-    static void py_append_value(VM *vm, std::string &out, Value v, bool repr);
+    static void py_append_value(VM *vm, ct::String &out, Value v, bool repr);
     static bool kwarg_get(VM *vm, const char *name, Value *out);
     static bool py_truthy(Value v);
-    static bool py_collect(VM *vm, Value v, std::vector<Value> &out, const char *who);
+    static bool py_collect(VM *vm, Value v, ct::Vector<Value> &out, const char *who);
 
     static int nat_str(VM *vm, Value *args, int nargs)
     {
@@ -225,7 +225,7 @@ namespace zen
             args[0] = v;
             return 1;
         }
-        std::string out;
+        ct::String out;
         py_append_value(vm, out, v, false); /* str(x) == what print(x) shows */
         args[0] = val_obj((Obj *)vm->make_string(out.c_str(), (int)out.size()));
         return 1;
@@ -960,7 +960,7 @@ namespace zen
                     return -1;
                 }
                 /* %s: the text print() shows; %r: repr (strings quoted) */
-                std::string pys;
+                ct::String pys;
                 py_append_value(vm, pys, args[arg_idx], conv == 'r');
                 const char *sv = pys.c_str();
                 int sl = (int)pys.size();
@@ -1144,7 +1144,8 @@ namespace zen
         GC *gc = &vm->get_gc();
 
         /* Any iterables (lists, strings, dicts, sets, ranges) */
-        std::vector<std::vector<Value>> cols(nargs);
+        ct::Vector<ct::Vector<Value>> cols;
+        cols.resize((size_t)nargs);
         size_t min_len = SIZE_MAX;
         for (int a = 0; a < nargs; a++)
         {
@@ -1281,6 +1282,23 @@ namespace zen
     ** maps (keys) and sets.
     ** ========================================================= */
 #define ZEN_INTLIKE_V(v) ((v).type == VAL_INT || (v).type == VAL_BOOL)
+    /* Element plus its sort key and original position: ct::sort is not
+    ** stable, the position breaks ties the way Python's stable sort does. */
+    struct KeyedValue
+    {
+        Value key;
+        Value val;
+        uint32_t index;
+    };
+    static void py_reverse(ct::Vector<Value> &v)
+    {
+        for (size_t i = 0, j = v.size(); i + 1 < j; i++, j--)
+        {
+            Value t = v[i];
+            v[i] = v[j - 1];
+            v[j - 1] = t;
+        }
+    }
     static bool py_truthy(Value v)
     {
         if (is_array(v)) return arr_count(as_array(v)) > 0;
@@ -1295,12 +1313,15 @@ namespace zen
         return is_truthy(v);
     }
 
-    static bool py_collect(VM *vm, Value v, std::vector<Value> &out, const char *who)
+    static bool py_collect(VM *vm, Value v, ct::Vector<Value> &out, const char *who)
     {
         if (is_array(v))
         {
             ObjArray *a = as_array(v);
-            out.assign(a->data, a->data + arr_count(a));
+            out.clear();
+            out.reserve((size_t)arr_count(a));
+            for (int32_t i = 0; i < arr_count(a); i++)
+                out.push_back(a->data[i]);
             return true;
         }
         if (is_string(v))
@@ -1339,7 +1360,7 @@ namespace zen
         return false;
     }
 
-    static Value py_array_from(VM *vm, const std::vector<Value> &items)
+    static Value py_array_from(VM *vm, const ct::Vector<Value> &items)
     {
         GC *gc = &vm->get_gc();
         ObjArray *r = new_array(gc);
@@ -1349,7 +1370,7 @@ namespace zen
     }
 
     /* Text of a value exactly as print() shows it (repr: strings quoted). */
-    static void py_append_value(VM *vm, std::string &out, Value v, bool repr)
+    static void py_append_value(VM *vm, ct::String &out, Value v, bool repr)
     {
         char buf[64];
         if (is_nil(v)) out += "None";
@@ -1422,7 +1443,7 @@ namespace zen
 
     static int nat_repr(VM *vm, Value *args, int nargs)
     {
-        std::string out;
+        ct::String out;
         py_append_value(vm, out, nargs > 0 ? args[0] : val_nil(), true);
         args[0] = val_obj((Obj *)vm->make_string(out.c_str(), (int)out.size()));
         return 1;
@@ -1441,7 +1462,7 @@ namespace zen
 
     static int nat_minmax(VM *vm, Value *args, int nargs, bool want_max)
     {
-        std::vector<Value> items;
+        ct::Vector<Value> items;
         if (nargs == 1)
         {
             if (!py_collect(vm, args[0], items, want_max ? "max" : "min")) return -1;
@@ -1503,17 +1524,18 @@ namespace zen
     static int nat_sum(VM *vm, Value *args, int nargs)
     {
         if (nargs < 1) { vm->runtime_error("sum() takes at least one argument"); return -1; }
-        std::vector<Value> items;
+        ct::Vector<Value> items;
         if (!py_collect(vm, args[0], items, "sum")) return -1;
         Value acc = nargs >= 2 ? args[1] : val_int(0);
         for (const Value &x : items)
         {
             if (is_array(acc) && is_array(x))
             {
-                std::vector<Value> joined;
+                ct::Vector<Value> joined;
                 py_collect(vm, acc, joined, "sum");
                 ObjArray *xa = as_array(x);
-                joined.insert(joined.end(), xa->data, xa->data + arr_count(xa));
+                for (int32_t k = 0; k < arr_count(xa); k++)
+                    joined.push_back(xa->data[k]);
                 acc = py_array_from(vm, joined);
                 continue;
             }
@@ -1530,27 +1552,34 @@ namespace zen
     static int nat_sorted(VM *vm, Value *args, int nargs)
     {
         if (nargs < 1) { vm->runtime_error("sorted() takes one argument"); return -1; }
-        std::vector<Value> items;
+        ct::Vector<Value> items;
         if (!py_collect(vm, args[0], items, "sorted")) return -1;
         Value kv;
         bool reverse = (nargs >= 2 && py_truthy(args[1])) || (kwarg_get(vm, "reverse", &kv) && py_truthy(kv));
         Value keyfn;
-        if (kwarg_get(vm, "key", &keyfn) && !is_nil(keyfn))
+        bool has_key = kwarg_get(vm, "key", &keyfn) && !is_nil(keyfn);
+        ct::Vector<KeyedValue> keyed;
+        keyed.reserve(items.size());
+        for (size_t i = 0; i < items.size(); i++)
         {
-            std::vector<std::pair<Value, Value>> keyed;
-            keyed.reserve(items.size());
-            for (const Value &x : items)
+            KeyedValue kv;
+            kv.val = items[i];
+            kv.key = items[i];
+            kv.index = (uint32_t)i;
+            if (has_key)
             {
-                Value arg = x;
-                keyed.emplace_back(vm->call_fn(keyfn, &arg, 1), x);
+                Value arg = items[i];
+                kv.key = vm->call_fn(keyfn, &arg, 1);
                 if (vm->had_error()) return -1;
             }
-            std::stable_sort(keyed.begin(), keyed.end(), [vm](const std::pair<Value, Value> &a, const std::pair<Value, Value> &b) { return zen_compare_vm(vm, a.first, b.first) < 0; });
-            for (size_t i = 0; i < keyed.size(); i++) items[i] = keyed[i].second;
+            keyed.push_back(kv);
         }
-        else
-            std::stable_sort(items.begin(), items.end(), [vm](const Value &a, const Value &b) { return zen_compare_vm(vm, a, b) < 0; });
-        if (reverse) std::reverse(items.begin(), items.end());
+        ct::sort(keyed.begin(), keyed.end(), [vm](const KeyedValue &a, const KeyedValue &b) {
+            int c = zen_compare_vm(vm, a.key, b.key);
+            return c < 0 || (c == 0 && a.index < b.index); /* stable, as Python's sort */
+        });
+        for (size_t i = 0; i < keyed.size(); i++) items[i] = keyed[i].val;
+        if (reverse) py_reverse(items);
         args[0] = py_array_from(vm, items);
         return 1;
     }
@@ -1558,16 +1587,16 @@ namespace zen
     static int nat_reversed(VM *vm, Value *args, int nargs)
     {
         if (nargs < 1) { vm->runtime_error("reversed() takes one argument"); return -1; }
-        std::vector<Value> items;
+        ct::Vector<Value> items;
         if (!py_collect(vm, args[0], items, "reversed")) return -1;
-        std::reverse(items.begin(), items.end());
+        py_reverse(items);
         args[0] = py_array_from(vm, items);
         return 1;
     }
 
     static int nat_any(VM *vm, Value *args, int nargs)
     {
-        std::vector<Value> items;
+        ct::Vector<Value> items;
         if (nargs < 1 || !py_collect(vm, args[0], items, "any")) return -1;
         for (const Value &x : items) if (py_truthy(x)) { args[0] = val_bool(true); return 1; }
         args[0] = val_bool(false);
@@ -1575,7 +1604,7 @@ namespace zen
     }
     static int nat_all(VM *vm, Value *args, int nargs)
     {
-        std::vector<Value> items;
+        ct::Vector<Value> items;
         if (nargs < 1 || !py_collect(vm, args[0], items, "all")) return -1;
         for (const Value &x : items) if (!py_truthy(x)) { args[0] = val_bool(false); return 1; }
         args[0] = val_bool(true);
@@ -1584,14 +1613,14 @@ namespace zen
 
     static int nat_list(VM *vm, Value *args, int nargs)
     {
-        std::vector<Value> items;
+        ct::Vector<Value> items;
         if (nargs >= 1 && !py_collect(vm, args[0], items, "list")) return -1;
         args[0] = py_array_from(vm, items);
         return 1;
     }
     static int nat_set(VM *vm, Value *args, int nargs)
     {
-        std::vector<Value> items;
+        ct::Vector<Value> items;
         if (nargs >= 1 && !py_collect(vm, args[0], items, "set")) return -1;
         GC *gc = &vm->get_gc();
         ObjSet *st = new_set(gc);
@@ -1614,7 +1643,7 @@ namespace zen
             }
             else
             {
-                std::vector<Value> items;
+                ct::Vector<Value> items;
                 if (!py_collect(vm, args[0], items, "dict")) return -1;
                 for (const Value &pair : items)
                 {
@@ -1647,7 +1676,7 @@ namespace zen
         int n = 0;
         uint64_t u = v < 0 ? (uint64_t)(-(v + 1)) + 1 : (uint64_t)v;
         do { int d = (int)(u % (uint64_t)base); digits[n++] = (char)(d < 10 ? '0' + d : 'a' + d - 10); u /= (uint64_t)base; } while (u);
-        std::string out;
+        ct::String out;
         if (v < 0) out += '-';
         out += prefix;
         while (n) out += digits[--n];
@@ -1662,7 +1691,7 @@ namespace zen
     {
         if (nargs < 2) { vm->runtime_error("divmod() takes two arguments"); return -1; }
         Value a = args[0], b = args[1];
-        std::vector<Value> pair;
+        ct::Vector<Value> pair;
         if (ZEN_INTLIKE_V(a) && ZEN_INTLIKE_V(b))
         {
             int64_t x = to_integer(a), y = to_integer(b);
@@ -1736,12 +1765,13 @@ namespace zen
     /* "fmt" % rhs for OP_MOD: rhs is one value or a tuple (array) of them. */
     Value zen_percent_format(VM *vm, Value fmt, Value rhs)
     {
-        std::vector<Value> a;
+        ct::Vector<Value> a;
         a.push_back(fmt);
         if (is_array(rhs))
         {
             ObjArray *arr = as_array(rhs);
-            a.insert(a.end(), arr->data, arr->data + arr_count(arr));
+            for (int32_t k = 0; k < arr_count(arr); k++)
+                a.push_back(arr->data[k]);
         }
         else
             a.push_back(rhs);

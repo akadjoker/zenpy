@@ -12,7 +12,6 @@
 #include "vm.h"
 #include "memory.h"
 #include <cmath>
-#include <limits>
 #include <cstdlib>
 
 namespace zen
@@ -173,10 +172,10 @@ namespace zen
             return 1;
         }
 
-        double wrapped = std::fmod(t, length * 2.0);
+        double wrapped = fmod(t, length * 2.0);
         if (wrapped < 0.0)
             wrapped += length * 2.0;
-        args[0] = val_float(length - std::fabs(wrapped - length));
+        args[0] = val_float(length - fabs(wrapped - length));
         return 1;
     }
 
@@ -240,21 +239,21 @@ namespace zen
         return 1;
     }
 
-    /* isnan(x) */
+    /* zen_isnan(x) */
     static int nat_math_isnan(VM *vm, Value *args, int nargs)
     {
         (void)vm;
         (void)nargs;
-        args[0] = val_bool(std::isnan(to_number(args[0])));
+        args[0] = val_bool(zen_isnan(to_number(args[0])));
         return 1;
     }
 
-    /* isinf(x) */
+    /* zen_isinf(x) */
     static int nat_math_isinf(VM *vm, Value *args, int nargs)
     {
         (void)vm;
         (void)nargs;
-        args[0] = val_bool(std::isinf(to_number(args[0])));
+        args[0] = val_bool(zen_isinf(to_number(args[0])));
         return 1;
     }
 
@@ -327,8 +326,8 @@ namespace zen
         math_constants[2] = {"tau", val_float(6.28318530717958647692)};
         /* MSVC rejects a literal 1.0/0.0 outright (C2124) — take inf and nan
         ** from <limits> instead of relying on the GCC/Clang extension. */
-        math_constants[3] = {"inf", val_float(std::numeric_limits<double>::infinity())};
-        math_constants[4] = {"nan", val_float(std::numeric_limits<double>::quiet_NaN())};
+        math_constants[3] = {"inf", val_float(HUGE_VAL)};
+        math_constants[4] = {"nan", val_float((double)NAN)};
         math_constants_inited = true;
     }
 

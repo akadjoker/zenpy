@@ -8,8 +8,8 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
-#include <limits>
-#include <string>
+#include <cstdint>
+#include <ct/string.hpp>
 
 namespace zen
 {
@@ -306,7 +306,7 @@ namespace
             }
 
             size_t len = strlen(name);
-            if (len > (size_t)std::numeric_limits<uint32_t>::max())
+            if (len > (size_t)UINT32_MAX)
             {
                 set_error(err, err_len, "global name is too large");
                 return false;
@@ -343,7 +343,7 @@ namespace
                 return false;
             }
             size_t len = strlen(name);
-            if (len > (size_t)std::numeric_limits<uint32_t>::max())
+            if (len > (size_t)UINT32_MAX)
             {
                 set_error(err, err_len, "selector name is too large");
                 return false;
@@ -585,15 +585,15 @@ namespace
             set_error(err, err_len, "failed to read string length");
             return false;
         }
-        if (len > (uint32_t)std::numeric_limits<int32_t>::max())
+        if (len > (uint32_t)INT32_MAX)
         {
             set_error(err, err_len, "string is too large");
             return false;
         }
 
-        std::string buffer;
+        ct::String buffer;
         buffer.resize((size_t)len);
-        if (len > 0 && !r.read_raw(&buffer[0], (size_t)len))
+        if (len > 0 && !r.read_raw(buffer.data(), (size_t)len))
         {
             set_error(err, err_len, "truncated string");
             return false;
@@ -1203,7 +1203,8 @@ bool dump_bytecode_file(VM *vm, ObjFunc *func, const char *path, bool strip_debu
         return false;
     }
 
-    std::string temp_path = std::string(path) + ".tmp";
+    ct::String temp_path(path);
+    temp_path += ".tmp";
     FILE *file = fopen(temp_path.c_str(), "wb");
     if (!file)
     {

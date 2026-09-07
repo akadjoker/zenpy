@@ -7,7 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <vector>
+#include <ct/vector.hpp>
 
 /* Dynamic loading */
 #if defined(__linux__) || defined(__APPLE__)
@@ -362,7 +362,8 @@ namespace zen
         ** bytecode invocation exactly. */
         const size_t offset = has_receiver ? 1u : 0u;
         const size_t value_slots = nargs > 0 ? (size_t)nargs : 1u;
-        std::vector<Value> call_args(offset + value_slots);
+        ct::Vector<Value> call_args;
+        call_args.resize(offset + value_slots);
         if (has_receiver)
             call_args[0] = receiver;
         for (int i = 0; i < nargs; i++)

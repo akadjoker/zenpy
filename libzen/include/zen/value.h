@@ -1,6 +1,7 @@
 #ifndef ZEN_VALUE_H
 #define ZEN_VALUE_H
 
+#include <cmath>
 #include "common.h"
 
 namespace zen
@@ -149,6 +150,11 @@ namespace zen
             return v.as.boolean ? 1.0 : 0.0; /* bool is a number, as in Python */
         return 0.0;
     }
+
+    /* NaN/inf tests without <cmath>'s std:: overloads. */
+    inline bool zen_isnan(double d) { return d != d; }
+    inline bool zen_isinf(double d) { return d == HUGE_VAL || d == -HUGE_VAL; }
+    inline bool zen_isfinite(double d) { return d == d && d != HUGE_VAL && d != -HUGE_VAL; }
 
     /* int, float or bool: the operands arithmetic and == accept as numbers. */
     inline bool is_numeric_like(Value v)

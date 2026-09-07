@@ -347,10 +347,10 @@ int main() {
     vm.run(fn);
 
     // Register native functions
-    vm.def_native("greet", 1, [](zen::VM *vm, zen::Value *args, int) -> int {
+    vm.def_native("greet", [](zen::VM *vm, zen::Value *args, int) -> int {
         printf("Hello, %s!\n", zen::as_cstring(args[0]));
         return 0;
-    });
+    }, 1);
 }
 ```
 

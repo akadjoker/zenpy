@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 /* Dynamic loading */
 #if defined(__linux__) || defined(__APPLE__)
@@ -330,21 +331,150 @@ namespace zen
         return slot;
     }
 
+    Value VM::call_native_from_cpp(ObjNative *nat, Value receiver,
+                                   Value *args, int nargs, bool has_receiver)
+    {
+        if (nargs < 0 || (nargs > 0 && !args))
+        {
+            runtime_error("native call received invalid arguments");
+            return val_nil();
+        }
+        if (nat->generic_arity > 0)
+        {
+            runtime_error("'%s' is a generic native function/method and cannot be called this way",
+                          nat->name ? nat->name->chars : "?");
+            return val_nil();
+        }
+
+        /* ClassBuilder native methods count self in their registered arity,
+        ** while NativeFn receives it at args[-1]. */
+        const int expected = has_receiver ? nat->arity - 1 : nat->arity;
+        if (nat->arity >= 0 && nargs != expected)
+        {
+            runtime_error("'%s' expected %d args but got %d",
+                          nat->name ? nat->name->chars : "?", expected, nargs);
+            return val_nil();
+        }
+
+        /* A zero-argument native still returns through args[0]. The public
+        ** API commonly receives args=nullptr in that case, so reserve a
+        ** writable result slot. Methods receive self at args[-1], matching
+        ** bytecode invocation exactly. */
+        const size_t offset = has_receiver ? 1u : 0u;
+        const size_t value_slots = nargs > 0 ? (size_t)nargs : 1u;
+        std::vector<Value> call_args(offset + value_slots);
+        if (has_receiver)
+            call_args[0] = receiver;
+        for (int i = 0; i < nargs; i++)
+            call_args[offset + (size_t)i] = args[i];
+
+        /* This is C++ storage, not a VM root. Even a GC_SAFE native must run
+        ** paused through an embedding entry point. */
+        gc_pause(&gc_);
+        int nret = nat->fn(this, call_args.data() + offset, nargs);
+        gc_resume(&gc_);
+        /* Preserve the long-standing free-function embedding convention:
+        ** callers that supplied args also receive the first native result in
+        ** args[0]. invoke() historically used a private copy, so methods do
+        ** not write back into the host's argument array. */
+        if (!has_receiver && nret > 0 && nargs > 0)
+            args[0] = call_args[0];
+        return nret > 0 ? call_args[offset] : val_nil();
+    }
+
+    /* Run a closure from an external C++ entry point. This cannot use
+    ** call_closure(): that helper intentionally assumes an active caller
+    ** frame in order to calculate ret_reg. A native called directly by C++
+    ** may call back into Zen while main_fiber_ has no frames at all. */
+    Value VM::call_closure_from_cpp(ObjClosure *cl, Value *args, int nargs)
+    {
+        ObjFunc *func = cl->func;
+        if (func->arity >= 0)
+        {
+            int required = func->arity - func->default_count;
+            if (nargs < required || nargs > func->arity)
+            {
+                if (func->default_count > 0)
+                    runtime_error("expected %d to %d args but got %d", required, func->arity, nargs);
+                else
+                    runtime_error("expected %d args but got %d", func->arity, nargs);
+                return val_nil();
+            }
+        }
+        else if (nargs < (-func->arity) - 1)
+        {
+            runtime_error("expected at least %d args but got %d", (-func->arity) - 1, nargs);
+            return val_nil();
+        }
+
+        ObjFiber *fiber = main_fiber_;
+        Value *base = fiber->stack;
+        if (nargs > fiber->stack_capacity || func->num_regs > fiber->stack_capacity)
+        {
+            runtime_error("stack overflow (data)");
+            return val_nil();
+        }
+        for (int i = 0; i < nargs; i++)
+            base[i] = args[i];
+        for (int i = nargs; i < func->num_regs; i++)
+            base[i] = val_nil();
+
+        if (func->arity >= 0 && nargs < func->arity)
+        {
+            int required = func->arity - func->default_count;
+            for (int i = nargs; i < func->arity; i++)
+                base[i] = func->defaults[i - required];
+        }
+        else if (func->arity < 0)
+        {
+            int min_args = (-func->arity) - 1;
+            gc_pause(&gc_);
+            ObjArray *packed = new_array(&gc_);
+            if (nargs > min_args)
+                array_push_n(&gc_, packed, base + min_args, nargs - min_args);
+            base[min_args] = val_obj((Obj *)packed);
+            gc_resume(&gc_);
+        }
+
+        fiber->frame_count = 1;
+        CallFrame *frame = &fiber->frames[0];
+        frame->closure = cl;
+        frame->constants = func->constants;
+        frame->upvalues = cl->upvalues;
+        frame->func = func;
+        frame->ip = func->code;
+        frame->base = base;
+        frame->ret_reg = 0;
+        frame->ret_count = 1;
+        fiber->stack_top = base + func->num_regs;
+        fiber->state = FIBER_RUNNING;
+        current_fiber_ = fiber;
+
+        execute(fiber);
+        Value result = base[0];
+        fiber->stack_top = base;
+        fiber->state = FIBER_RUNNING;
+        return result;
+    }
+
     Value VM::call_global(int idx, Value *args, int nargs)
     {
         had_error_ = false;
+        if (nargs < 0 || (nargs > 0 && !args))
+        {
+            runtime_error("call_global received invalid arguments");
+            return val_nil();
+        }
+        if (idx < 0 || idx >= num_globals_)
+        {
+            runtime_error("global index %d is out of range", idx);
+            return val_nil();
+        }
         Value callee = globals_[idx];
         if (is_native(callee))
         {
             ObjNative *nat = as_native(callee);
-            if (nat->generic_arity > 0)
-            {
-                runtime_error("'%s' is a generic native function and cannot be called this way",
-                              nat->name ? nat->name->chars : "?");
-                return val_nil();
-            }
-            int nret = nat->fn(this, args, nargs);
-            return (nret > 0) ? args[0] : val_nil();
+            return call_native_from_cpp(nat, val_nil(), args, nargs, false);
         }
         if (is_closure(callee))
         {
@@ -358,32 +488,7 @@ namespace zen
                               cl->func->name ? cl->func->name->chars : "?");
                 return val_nil();
             }
-            /* Place callee + args on main fiber stack, call, return result */
-            ObjFiber *fiber = main_fiber_;
-            Value *base = fiber->stack;
-            for (int i = 0; i < nargs; i++)
-                base[i] = args[i];
-            /* Every frame starts with its unused registers nil, so the GC
-            ** never scans a stale pointer left above an earlier stack top. */
-            for (int i = nargs; i < cl->func->num_regs; i++)
-                base[i] = val_nil();
-
-            fiber->frame_count = 1;
-            CallFrame *frame = &fiber->frames[0];
-            frame->closure = cl;
-            frame->constants = cl->func->constants;
-            frame->upvalues = cl->upvalues;
-            frame->func = cl->func;
-            frame->ip = cl->func->code;
-            frame->base = base;
-            frame->ret_reg = 0;
-            frame->ret_count = 1;
-            fiber->stack_top = base + cl->func->num_regs;
-            fiber->state = FIBER_RUNNING;
-            current_fiber_ = fiber;
-
-            execute(fiber);
-            return base[0];
+            return call_closure_from_cpp(cl, args, nargs);
         }
         runtime_error("global %d is not callable", idx);
         return val_nil();
@@ -404,17 +509,15 @@ namespace zen
     Value VM::call_fn(Value callee, Value *args, int nargs)
     {
         had_error_ = false;
+        if (nargs < 0 || (nargs > 0 && !args))
+        {
+            runtime_error("call_fn received invalid arguments");
+            return val_nil();
+        }
         if (is_native(callee))
         {
             ObjNative *nat = as_native(callee);
-            if (nat->generic_arity > 0)
-            {
-                runtime_error("'%s' is a generic native function and cannot be called this way",
-                              nat->name ? nat->name->chars : "?");
-                return val_nil();
-            }
-            int nret = nat->fn(this, args, nargs);
-            return nret > 0 ? args[0] : val_nil();
+            return call_native_from_cpp(nat, val_nil(), args, nargs, false);
         }
         if (is_closure(callee))
         {
@@ -426,21 +529,26 @@ namespace zen
                 return val_nil();
             }
             ObjFiber *fiber = current_fiber_;
+            if (fiber->frame_count == 0)
+                return call_closure_from_cpp(cl, args, nargs);
             Value *base = fiber->stack_top;
+            int required_slots = nargs > cl->func->num_regs ? nargs : cl->func->num_regs;
+            if (fiber->frame_count >= fiber->frame_capacity ||
+                base + required_slots > fiber->stack + fiber->stack_capacity)
+            {
+                runtime_error("stack overflow while calling function from native");
+                return val_nil();
+            }
             for (int i = 0; i < nargs; i++)
                 base[i] = args[i];
-            for (int i = nargs; i < cl->func->num_regs; i++)
-                base[i] = val_nil(); /* same entry-clear invariant as OP_CALL */
-            fiber->stack_top = base + cl->func->num_regs;
-            CallFrame *frame = &fiber->frames[fiber->frame_count++];
-            frame->closure = cl;
-            frame->constants = cl->func->constants;
-            frame->upvalues = cl->upvalues;
-            frame->func = cl->func;
-            frame->ip = cl->func->code;
-            frame->base = base;
-            frame->ret_reg = (int)(base - fiber->frames[fiber->frame_count - 2].base);
-            frame->ret_count = 1;
+            /* call_closure owns the common script-call contract: arity,
+            ** defaults, *args packing and clearing unused registers. */
+            fiber->stack_top = base + nargs;
+            if (!call_closure(fiber, cl, nargs, 1))
+            {
+                fiber->stack_top = base;
+                return val_nil();
+            }
             int prev = external_call_stop_depth_;
             external_call_stop_depth_ = fiber->frame_count - 1;
             execute(fiber);
@@ -1627,6 +1735,21 @@ namespace zen
 
     Value VM::invoke(Value instance, const char *method_name, Value *args, int nargs)
     {
+        if (nargs < 0 || (nargs > 0 && !args))
+        {
+            runtime_error("invoke received invalid arguments");
+            return val_nil();
+        }
+        if (!is_instance(instance))
+        {
+            runtime_error("cannot invoke a method on a non-instance");
+            return val_nil();
+        }
+        if (!method_name)
+        {
+            runtime_error("method name is null");
+            return val_nil();
+        }
         int name_len = (int)strlen(method_name);
         int op_slot = operator_slot_for_name(method_name, name_len);
         if (op_slot >= 0)
@@ -1698,18 +1821,7 @@ namespace zen
                 if (is_native(method))
                 {
                     ObjNative *nat = as_native(method);
-                    if (nat->generic_arity > 0)
-                    {
-                        runtime_error("'%s' is a generic native method and cannot be invoked this way",
-                                      method_name);
-                        return val_nil();
-                    }
-                    Value call_args[17];
-                    call_args[0] = instance;
-                    for (int i = 0; i < nargs && i < 16; i++)
-                        call_args[i + 1] = args[i];
-                    int nret = nat->fn(this, call_args, nargs + 1);
-                    return nret > 0 ? call_args[0] : val_nil();
+                    return call_native_from_cpp(nat, instance, args, nargs, true);
                 }
             }
         }
@@ -1720,6 +1832,11 @@ namespace zen
 
     Value VM::invoke(Value instance, int slot, Value *args, int nargs)
     {
+        if (!is_instance(instance))
+        {
+            runtime_error("cannot invoke a method on a non-instance");
+            return val_nil();
+        }
         ObjInstance *inst = as_instance(instance);
         ObjClass *klass = inst->klass;
 
@@ -1735,18 +1852,7 @@ namespace zen
         if (is_native(method))
         {
             ObjNative *nat = as_native(method);
-            if (nat->generic_arity > 0)
-            {
-                runtime_error("'%s' is a generic native method and cannot be invoked this way",
-                              nat->name ? nat->name->chars : "?");
-                return val_nil();
-            }
-            Value call_args[17];
-            call_args[0] = instance;
-            for (int i = 0; i < nargs && i < 16; i++)
-                call_args[i + 1] = args[i];
-            int nret = nat->fn(this, call_args, nargs + 1);
-            return nret > 0 ? call_args[0] : val_nil();
+            return call_native_from_cpp(nat, instance, args, nargs, true);
         }
         else if (is_closure(method))
         {
@@ -1798,6 +1904,11 @@ namespace zen
 
     Value VM::invoke_operator(Value instance, int slot, Value *args, int nargs)
     {
+        if (!is_instance(instance))
+        {
+            runtime_error("cannot invoke an operator on a non-instance");
+            return val_nil();
+        }
         ObjInstance *inst = as_instance(instance);
         ObjClass *klass = inst->klass;
 
@@ -1812,25 +1923,7 @@ namespace zen
         if (is_native(method))
         {
             ObjNative *nat = as_native(method);
-            /* Unreachable today (generic_method() never populates
-            ** operator_slots), but guard anyway — reading ->fn through the
-            ** union while generic_arity>0 is undefined behavior, not just a
-            ** wrong result, and every other ObjNative call site got this
-            ** same check. */
-            if (nat->generic_arity > 0)
-            {
-                runtime_error("'%s' is a generic native operator and cannot be called this way",
-                              nat->name ? nat->name->chars : "?");
-                return val_nil();
-            }
-            Value call_args[17];
-            call_args[0] = instance;
-            for (int i = 0; i < nargs && i < 16; i++)
-                call_args[i + 1] = args[i];
-            gc_pause(&gc_);
-            int nret = nat->fn(this, call_args, nargs + 1);
-            gc_resume(&gc_);
-            return nret > 0 ? call_args[0] : val_nil();
+            return call_native_from_cpp(nat, instance, args, nargs, true);
         }
 
         if (is_closure(method))

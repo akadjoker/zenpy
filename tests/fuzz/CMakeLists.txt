@@ -9,7 +9,18 @@ if(ZEN_BUILD_FUZZ AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     target_compile_definitions(fuzz_zen PRIVATE ZEN_DEBUG_STRESS_GC)
     set_target_properties(fuzz_zen PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${ZEN_BIN_DIR})
-    message(STATUS "Fuzzer target 'fuzz_zen' enabled")
+
+    # Exercises public C++ embedding APIs and native re-entrancy rather than
+    # source parsing. Keep it independent from fuzz_zen so either corpus can
+    # minimize a crash on its own.
+    add_executable(fuzz_embedding fuzz_embedding.cpp)
+    target_link_libraries(fuzz_embedding zen_static)
+    target_compile_options(fuzz_embedding PRIVATE -fsanitize=fuzzer,address,undefined -g -O1)
+    target_link_options(fuzz_embedding PRIVATE -fsanitize=fuzzer,address,undefined)
+    target_compile_definitions(fuzz_embedding PRIVATE ZEN_DEBUG_STRESS_GC)
+    set_target_properties(fuzz_embedding PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${ZEN_BIN_DIR})
+    message(STATUS "Fuzzer targets 'fuzz_zen' and 'fuzz_embedding' enabled")
 else()
     if(ZEN_BUILD_FUZZ)
         message(WARNING "Fuzzer requires Clang — skipping fuzz_zen target")

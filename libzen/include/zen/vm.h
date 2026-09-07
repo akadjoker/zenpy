@@ -302,6 +302,11 @@ namespace zen
         void close_upvalues(ObjFiber *fiber, Value *last);
         bool call_value(ObjFiber *fiber, Value callee, int nargs, int nresults);
         bool call_closure(ObjFiber *fiber, ObjClosure *closure, int nargs, int nresults);
+        /* C++ entry points do not put their arguments on a GC-marked VM
+        ** stack. Keep the public native-call convention in one place. */
+        Value call_native_from_cpp(ObjNative *native, Value receiver,
+                                   Value *args, int nargs, bool has_receiver);
+        Value call_closure_from_cpp(ObjClosure *closure, Value *args, int nargs);
         void run_nested(ObjClosure *closure);
         char *try_read_cb(const char *path, long *out_size); /* read file via callbacks */
 

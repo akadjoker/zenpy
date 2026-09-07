@@ -103,6 +103,87 @@ static void test_native_from_script()
 }
 
 /* =========================================================
+** TEST 1b: C++ -> native boundary hardening
+** ========================================================= */
+static int native_zero_result(VM *vm, Value *args, int nargs)
+{
+    (void)vm; (void)nargs;
+    args[0] = val_int(42);
+    return 1;
+}
+
+static int g_native_method_calls = 0;
+static int g_cpp_native_was_paused = 0;
+
+static int native_sum_many(VM *vm, Value *args, int nargs)
+{
+    (void)vm;
+    if (!is_instance(args[-1]))
+        return -1;
+    g_native_method_calls++;
+    int64_t total = 0;
+    for (int i = 0; i < nargs; i++)
+        total += args[i].as.integer;
+    args[0] = val_int(total);
+    return 1;
+}
+
+static int native_gc_safe_probe(VM *vm, Value *args, int nargs)
+{
+    (void)nargs;
+    g_cpp_native_was_paused = vm->get_gc().pause_depth > 0;
+    args[0] = val_bool(g_cpp_native_was_paused != 0);
+    return 1;
+}
+
+static void test_cpp_native_boundary()
+{
+    printf("\n[Test 1b] C++ -> native call boundary\n");
+
+    VM vm;
+    vm.open_lib_globals(&zen_lib_base);
+    vm.def_native("zero_result", native_zero_result, 0);
+    vm.def_native("gc_safe_probe", native_gc_safe_probe, 0, ZEN_NATIVE_GC_SAFE);
+
+    TEST("zero-arg native returns safely through call_global");
+    Value r = vm.call_global("zero_result", nullptr, 0);
+    CHECK(!vm.had_error() && is_int(r) && r.as.integer == 42, "expected 42");
+
+    TEST("GC_SAFE native is paused through C++ call_global");
+    g_cpp_native_was_paused = 0;
+    r = vm.call_global("gc_safe_probe", nullptr, 0);
+    CHECK(!vm.had_error() && is_bool(r) && r.as.boolean && g_cpp_native_was_paused,
+          "C++ argument storage was not protected from GC");
+
+    ObjClass *klass = vm.def_class("ManyArgs")
+        .method("sum_many", native_sum_many, -1)
+        .end();
+    Value instance = vm.make_instance(klass);
+    Value args[20];
+    for (int i = 0; i < 20; i++)
+        args[i] = val_int(i + 1);
+
+    TEST("native method receives self at args[-1] and all 20 arguments");
+    g_native_method_calls = 0;
+    r = vm.invoke(instance, "sum_many", args, 20);
+    CHECK(!vm.had_error() && is_int(r) && r.as.integer == 210 && g_native_method_calls == 1,
+          "receiver convention or arguments beyond 16 were lost");
+
+    TEST("invalid C++ native arguments report an error, not a crash");
+    r = vm.invoke(instance, "sum_many", nullptr, 1);
+    CHECK(vm.had_error() && is_nil(r) && g_native_method_calls == 1,
+          "invalid argument window reached the native");
+
+    TEST("invalid C++ receiver reports an error, not a cast");
+    r = vm.invoke(val_int(1), "sum_many", nullptr, 0);
+    CHECK(vm.had_error() && is_nil(r), "non-instance receiver was accepted");
+
+    TEST("out-of-range C++ global index reports an error");
+    r = vm.call_global(vm.num_globals() + 1, nullptr, 0);
+    CHECK(vm.had_error() && is_nil(r), "out-of-range global index was accepted");
+}
+
+/* =========================================================
 ** TEST 2: Script defines function, C++ calls it
 ** ========================================================= */
 static void test_call_script_from_cpp()
@@ -123,6 +204,9 @@ def fib(n):
     if n < 2:
         return n
     return fib(n - 1) + fib(n - 2)
+
+def first_plus_rest(first, *rest):
+    return first + len(rest)
 )");
 
     TEST("call_global('square', 7) == 49");
@@ -146,6 +230,16 @@ def fib(n):
     args[0] = val_int(10);
     result = vm.call_global("fib", args, 1);
     CHECK(result.type == VAL_INT && result.as.integer == 55, "expected 55");
+
+    TEST("call_global packs *args like a script call");
+    Value varargs[4] = { val_int(10), val_int(1), val_int(2), val_int(3) };
+    result = vm.call_global("first_plus_rest", varargs, 4);
+    CHECK(!vm.had_error() && result.type == VAL_INT && result.as.integer == 13,
+          "expected first + 3 packed args");
+
+    TEST("call_global validates script arity before entering the VM");
+    result = vm.call_global("square", nullptr, 0);
+    CHECK(vm.had_error() && is_nil(result), "wrong arity was accepted");
 }
 
 /* =========================================================
@@ -194,6 +288,12 @@ result = apply_twice(inc, 10)
 )");
     r = vm.get_global("result");
     CHECK(r.type == VAL_INT && r.as.integer == 12, "expected 12");
+
+    TEST("C++ -> native -> Zen callback has no synthetic caller frame");
+    Value callback_args[2] = { vm.get_global("double"), val_int(5) };
+    r = vm.call_global("apply_twice", callback_args, 2);
+    CHECK(!vm.had_error() && r.type == VAL_INT && r.as.integer == 20,
+          "direct native callback did not return 20");
 }
 
 /* =========================================================
@@ -1137,6 +1237,7 @@ int main()
     printf("=== Zen Embedding Tests (C++ <-> Script) ===\n");
 
     test_native_from_script();
+    test_cpp_native_boundary();
     test_call_script_from_cpp();
     test_bidirectional_callback();
     test_shared_globals();

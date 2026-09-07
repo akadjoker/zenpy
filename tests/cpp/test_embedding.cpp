@@ -1374,6 +1374,10 @@ static BindGauge *gauge_make(VM *vm, double level)
 }
 static double gauge_level(BindGauge &g) { return g.level; }
 static int64_t b_sum(BindCounter *a, BindCounter &b) { return a->n + b.n; }
+struct BindPlain { int64_t a = 7; int64_t get() const { return a; } };
+static int64_t b_many(int64_t a, int64_t b, int64_t c, double d, bool e, const char *f)
+{ return a + b + c + (int64_t)d + (e ? 1 : 0) + (int64_t)f[0]; }
+static void b_touch(VM *vm) { vm->set_global("touched", val_int(1)); }
 
 static void test_zen_bind()
 {
@@ -1459,6 +1463,16 @@ r_sum = csum(c, d)
         CHECK(vm.had_error(), "small(1) must fail: expected 2 arguments");
         run_source(vm, "e5 = Gauge(-1)\n");
         CHECK(vm.had_error(), "Gauge(-1) must fail via the factory");
+
+        TEST("Zero-argument ctor, six-argument function, VM-only function");
+        bind::def_class<BindPlain>(vm, "Plain").ctor<>().dtor().method<&BindPlain::get>("get").end();
+        bind::def_fn<&b_many>(vm, "many");
+        bind::def_fn<&b_touch>(vm, "touch");
+        vm.def_global("touched", val_int(0));
+        run_source(vm, "p = Plain()\nr_p = p.get()\nr_many = many(1, 2, 3, 4.9, True, \"Z\")\ntouch()\n");
+        r = vm.get_global("r_p");    CHECK(is_int(r) && r.as.integer == 7, "Plain().get() == 7");
+        r = vm.get_global("r_many"); CHECK(is_int(r) && r.as.integer == 101, "many(...) == 101");
+        r = vm.get_global("touched");CHECK(is_int(r) && r.as.integer == 1, "VM-only function ran");
 
         TEST("GC_SAFE typed method under allocation pressure");
         run_source(vm, R"(

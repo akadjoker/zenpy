@@ -438,6 +438,7 @@ namespace zen
         /* Branch-on-condition for if/while: fuses a trailing LT/LE into the
         ** two-word compare-and-jump. Returns the offset to patch; `fused`
         ** says which patch routine to use. */
+        void comprehension_into(int reg, int kind, const LexerState &body_lex, Token body_cur, Token body_prev, int line);
         int emit_cond_jump(int cond, bool &fused);
         void patch_cond_jump(int offset, bool fused);
         /* emit_cond_jump plus: a condition that is exactly `not x` branches

@@ -208,6 +208,7 @@ namespace zen
     ** str(val) → string
     ** ========================================================= */
     static void py_append_value(VM *vm, std::string &out, Value v, bool repr);
+    static bool kwarg_get(VM *vm, const char *name, Value *out);
 
     static int nat_str(VM *vm, Value *args, int nargs)
     {
@@ -1419,12 +1420,24 @@ namespace zen
         }
         else
             items.assign(args, args + nargs);
-        if (items.empty()) { vm->runtime_error("%s() arg is an empty sequence", want_max ? "max" : "min"); return -1; }
+        Value dflt;
+        if (items.empty())
+        {
+            if (kwarg_get(vm, "default", &dflt)) { args[0] = dflt; return 1; }
+            vm->runtime_error("%s() arg is an empty sequence", want_max ? "max" : "min");
+            return -1;
+        }
+        Value keyfn;
+        bool has_key = kwarg_get(vm, "key", &keyfn) && !is_nil(keyfn);
         Value best = items[0];
+        Value best_key = best;
+        if (has_key) { best_key = vm->call_fn(keyfn, &best, 1); if (vm->had_error()) return -1; }
         for (size_t i = 1; i < items.size(); i++)
         {
-            int c = values_compare(items[i], best);
-            if (want_max ? c > 0 : c < 0) best = items[i];
+            Value k = items[i];
+            if (has_key) { Value arg = items[i]; k = vm->call_fn(keyfn, &arg, 1); if (vm->had_error()) return -1; }
+            int c = values_compare(k, best_key);
+            if (want_max ? c > 0 : c < 0) { best = items[i]; best_key = k; }
         }
         args[0] = best;
         return 1;
@@ -1481,8 +1494,24 @@ namespace zen
         if (nargs < 1) { vm->runtime_error("sorted() takes one argument"); return -1; }
         std::vector<Value> items;
         if (!py_collect(vm, args[0], items, "sorted")) return -1;
-        bool reverse = nargs >= 2 && py_truthy(args[1]); /* sorted(xs, True) until keywords reach natives */
-        std::stable_sort(items.begin(), items.end(), [](const Value &a, const Value &b) { return values_compare(a, b) < 0; });
+        Value kv;
+        bool reverse = (nargs >= 2 && py_truthy(args[1])) || (kwarg_get(vm, "reverse", &kv) && py_truthy(kv));
+        Value keyfn;
+        if (kwarg_get(vm, "key", &keyfn) && !is_nil(keyfn))
+        {
+            std::vector<std::pair<Value, Value>> keyed;
+            keyed.reserve(items.size());
+            for (const Value &x : items)
+            {
+                Value arg = x;
+                keyed.emplace_back(vm->call_fn(keyfn, &arg, 1), x);
+                if (vm->had_error()) return -1;
+            }
+            std::stable_sort(keyed.begin(), keyed.end(), [](const std::pair<Value, Value> &a, const std::pair<Value, Value> &b) { return values_compare(a.first, b.first) < 0; });
+            for (size_t i = 0; i < keyed.size(); i++) items[i] = keyed[i].second;
+        }
+        else
+            std::stable_sort(items.begin(), items.end(), [](const Value &a, const Value &b) { return values_compare(a, b) < 0; });
         if (reverse) std::reverse(items.begin(), items.end());
         args[0] = py_array_from(vm, items);
         return 1;
@@ -1559,6 +1588,13 @@ namespace zen
                     map_set(gc, m, as_array(pair)->data[0], as_array(pair)->data[1]);
                 }
             }
+        }
+        if (vm->kwargs()) /* dict(a=1, b=2) */
+        {
+            ObjMap *kw = vm->kwargs();
+            for (int32_t i = 0; i < kw->capacity; i++)
+                if (kw->nodes[i].hash != 0xFFFFFFFFu)
+                    map_set(gc, m, kw->nodes[i].key, kw->nodes[i].value);
         }
         args[0] = val_obj((Obj *)m);
         return 1;
@@ -1637,6 +1673,35 @@ namespace zen
         Value v = nargs >= 1 ? args[0] : val_nil();
         args[0] = val_bool(is_closure(v) || is_native(v) || is_class(v));
         return 1;
+    }
+
+    /* "fmt" % rhs for OP_MOD: rhs is one value or a tuple (array) of them. */
+    Value zen_percent_format(VM *vm, Value fmt, Value rhs)
+    {
+        std::vector<Value> a;
+        a.push_back(fmt);
+        if (is_array(rhs))
+        {
+            ObjArray *arr = as_array(rhs);
+            a.insert(a.end(), arr->data, arr->data + arr_count(arr));
+        }
+        else
+            a.push_back(rhs);
+        int n = nat_format(vm, a.data(), (int)a.size());
+        return n > 0 ? a[0] : val_nil();
+    }
+
+    /* Keyword arguments of the native call in progress (vm->kwargs()). */
+    static bool kwarg_get(VM *vm, const char *name, Value *out)
+    {
+        ObjMap *kw = vm->kwargs();
+        if (!kw)
+            return false;
+        bool found = false;
+        Value v = map_get(kw, val_obj((Obj *)vm->make_string(name)), &found);
+        if (found)
+            *out = v;
+        return found;
     }
 
     static const NativeReg base_functions[] = {

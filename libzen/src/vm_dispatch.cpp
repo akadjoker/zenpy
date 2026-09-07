@@ -1392,13 +1392,19 @@ namespace zen
                     }
                 }
             }
+            else if (is_string(vb))
+            {
+                /* "fmt" % value and "fmt" % (a, b): printf-style formatting */
+                SAVE_IP();
+                Value r = zen_percent_format(this, vb, vc);
+                if (had_error_)
+                    return;
+                LOAD_STATE();
+                R[ZEN_A(i)] = r;
+            }
             else
             {
-                double a = to_number(vb), b = to_number(vc);
-                if (b == 0.0)
-                    RT_ERROR("modulo by zero");
-                else
-                    R[ZEN_A(i)] = val_float(a - (int64_t)(a / b) * b);
+                RT_ERROR("unsupported operand type(s) for %%: %s and %s", zen_type_name_of(vb), zen_type_name_of(vc));
             }
             NEXT();
         }
@@ -2076,7 +2082,19 @@ namespace zen
                 nargs = fixed + arr_len;
             }
 
+            /* Keyword arguments for a callee without a visible signature
+            ** travel as a map in the last argument slot (flag 0x40). Only
+            ** natives can take them at run time. */
+            ObjMap *kwmap = nullptr;
+            if (__builtin_expect(nargs & 0x40, 0))
+            {
+                nargs &= 0x3F;
+                nargs--;
+                kwmap = as_map(R[a + 1 + nargs]);
+            }
             Value callee = R[a];
+            if (__builtin_expect(kwmap != nullptr && !is_native(callee), 0))
+                RT_ERROR("keyword arguments need a function the compiler can see (or a native function)");
             /* Mark string args as shared — protects against in-place
                mutation in the callee corrupting the caller's copies. */
             for (int ai = 0; ai < nargs; ai++) {
@@ -2192,7 +2210,9 @@ namespace zen
             if (is_native(callee))
             {
                 ObjNative *nat = as_native(callee);
+                kwargs_ = kwmap;
                 int nret = call_native(this, nat, &R[a + 1], nargs);
+                kwargs_ = nullptr;
                 if (had_error_)
                     return;
                 copy_native_results(&R[a], &R[a + 1], nret, nresults);
@@ -3961,6 +3981,13 @@ namespace zen
                     args[fixed + si] = arr->data[si];
                 arg_count = fixed + arr_len;
             }
+            ObjMap *kwmap = nullptr;
+            if (__builtin_expect(arg_count & 0x40, 0))
+            {
+                arg_count &= 0x3F;
+                arg_count--;
+                kwmap = as_map(args[arg_count]);
+            }
 
             /* Mark string args as shared — matches OP_CALL behaviour */
             for (int ai = 0; ai < arg_count; ai++) {
@@ -3997,6 +4024,8 @@ namespace zen
                 {
                     ObjClosure *cl = as_closure(mval);
                     ObjFunc *fn = cl->func;
+                    if (__builtin_expect(kwmap != nullptr, 0))
+                        RT_ERROR("keyword arguments need a method the compiler can see (or a native method)");
                     /* Common case first: exact arity, no defaults/*args, not
                     ** generic, not a generator — see OP_CALL. */
                     if (__builtin_expect((fn->generic_arity | fn->default_count | (int32_t)fn->is_generator) == 0 &&
@@ -4100,7 +4129,9 @@ namespace zen
                 {
                     ObjNative *nat = as_native(mval);
                     /* ClassBuilder convention: args[-1]=self, args[0..n-1]=arguments */
+                    kwargs_ = kwmap;
                     int nret = call_native(this, nat, &R[base + 1], arg_count);
+                    kwargs_ = nullptr;
                     if (nret >= 0)
                         copy_native_results(&R[base], &R[base + 1], nret, nresults);
                     else
@@ -4384,8 +4415,8 @@ namespace zen
             uint8_t nresults = (uint8_t)invoke_nresults;
             uint16_t slot = (uint16_t)(ip[1] >> 16);
             Value receiver = R[base];
-            if (__builtin_expect(!is_instance(receiver), 0))
-                goto op_invoke_entry;
+            if (__builtin_expect(!is_instance(receiver) || (arg_count & 0xC0), 0))
+                goto op_invoke_entry; /* not an instance, or spread/keyword arguments */
             ObjClass *klass = as_instance(receiver)->klass;
             if (__builtin_expect(slot >= klass->vtable_size, 0))
                 goto op_invoke_entry;
@@ -4482,6 +4513,8 @@ namespace zen
                 arg_count = fixed + arr_len;
             }
 
+            if (__builtin_expect(arg_count & 0x40, 0))
+                RT_ERROR("keyword arguments in a super() call need a method the compiler can see");
             /* Resolve parent class from globals table */
             Value parent_val = globals_[parent_gidx];
             if (!is_class(parent_val))

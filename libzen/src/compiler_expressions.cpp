@@ -973,7 +973,7 @@ namespace zen
         /* dest=-1, not reg — same reasoning as logical_and()/logical_or():
         ** avoids forcing a premature MOVE of a bare self/local before a
         ** following `.field` can use OP_GETFIELD_IDX's O(1) path. */
-        int false_val = parse_precedence(PREC_TERNARY + 1, -1);
+        int false_val = parse_precedence(PREC_TERNARY, -1); /* `a if c else b if d else e` nests to the right */
         if (false_val != reg)
             emit_move(reg, false_val);
 
@@ -1237,6 +1237,7 @@ namespace zen
         ** call. */
         uint64_t filled = 0;
         int highest = -1;
+        bool native_kw = false; /* keyword map for a callee without a signature */
         bool saw_keyword = false;
 
         if (!check(TOK_RPAREN))
@@ -1248,16 +1249,44 @@ namespace zen
                     /* `name = value` inside a call is a keyword argument, never
                     ** an assignment expression.  Saying so out loud beats
                     ** compiling it as one and passing the wrong positional. */
-                    if (!sig)
-                    {
-                        error("Keyword argument needs a signature the compiler "
-                              "can see (a def or method in this file).");
-                        return nargs;
-                    }
                     if (has_spread)
                     {
                         error("Keyword argument cannot follow '*' spread.");
                         return nargs;
+                    }
+                    if (!sig)
+                    {
+                        /* No signature in sight (a native such as sorted(),
+                        ** print-like helpers, a value held in a variable):
+                        ** `name=value` pairs go into a map passed as the
+                        ** last argument, flagged with 0x40 in the count. The
+                        ** VM hands it to a native through vm->kwargs() and
+                        ** refuses it for a script function. */
+                        int map_reg = base + 1 + nargs;
+                        if (map_reg >= kMaxRegisters)
+                        {
+                            error("Too many arguments.");
+                            return nargs;
+                        }
+                        if (!native_kw)
+                        {
+                            while (state_->next_reg <= map_reg)
+                                alloc_reg();
+                            state_->emitter.emit_abc(OP_NEWMAP, map_reg, 0, 0, current_.line);
+                            state_->next_reg = map_reg + 1;
+                            native_kw = true;
+                        }
+                        advance(); /* the parameter name */
+                        Token key = previous_;
+                        advance(); /* '=' */
+                        int kreg = alloc_reg();
+                        int name_ki = state_->emitter.add_string_constant(key.start, key.length);
+                        state_->emitter.emit_abx(OP_LOADK, kreg, name_ki, key.line);
+                        int v = expression(-1);
+                        state_->emitter.emit_abc(OP_SETINDEX, map_reg, kreg, v, key.line);
+                        state_->next_reg = map_reg + 1;
+                        saw_keyword = true;
+                        continue;
                     }
                     if (!sig->takes_keywords)
                     {
@@ -1339,7 +1368,25 @@ namespace zen
                 ** live arguments, where "nothing above is live" doesn't hold. */
                 while (state_->next_reg < arg_reg)
                     alloc_reg();
+                /* `f(x for x in xs)`: a generator expression as the only
+                ** argument compiles as the equivalent list. */
+                LexerState gen_lex = lexer_.save_state();
+                Token gen_cur = current_, gen_prev = previous_;
+                int gen_off = state_->emitter.current_offset();
+                int gen_regs = state_->next_reg;
+                int gen_globals = vm_->num_globals();
                 int r = expression(-1);
+                if (check(TOK_FOR))
+                {
+                    state_->emitter.shrink_to(gen_off);
+                    state_->next_reg = gen_regs;
+                    vm_->shrink_globals(gen_globals);
+                    while (state_->next_reg <= arg_reg)
+                        alloc_reg();
+                    state_->emitter.emit_abc(OP_NEWARRAY, arg_reg, 0, 0, gen_cur.line);
+                    comprehension_into(arg_reg, 0, gen_lex, gen_cur, gen_prev, gen_cur.line);
+                    r = arg_reg;
+                }
                 if (r != arg_reg)
                 {
                     while (state_->next_reg <= arg_reg)
@@ -1353,7 +1400,7 @@ namespace zen
             } while (match(TOK_COMMA));
         }
 
-        if (saw_keyword)
+        if (saw_keyword && !native_kw)
         {
             /* Fill the gaps the keywords jumped over.  Parameters past the
             ** last one named are left to the VM, which already tops a call
@@ -1376,9 +1423,11 @@ namespace zen
             nargs = highest + 1;
         }
 
-        /* Encode spread flag in bit 7 of nargs */
+        /* Encode spread flag in bit 7 of nargs; a keyword map in bit 6. */
         if (has_spread)
             nargs |= 0x80;
+        if (native_kw)
+            nargs = (nargs + 1) | 0x40; /* the map is one more argument slot */
         return nargs;
     }
 
@@ -1857,7 +1906,7 @@ namespace zen
                 ** dynamic receiver keeps the checked call semantics. */
                 const bool exact_typed_array_call = receiver_is_typed_subscript &&
                     method_sig && method_sig->takes_keywords &&
-                    !method_has_type_params && !(nargs & 0x80) &&
+                    !method_has_type_params && !(nargs & 0xC0) &&
                     nargs == method_sig->param_count && sel <= 255;
                 if (exact_typed_array_call)
                 {
@@ -2237,6 +2286,124 @@ namespace zen
     ** Array literal: [a, b, c]  or  [expr for var in iterable [if cond]]
     ** ========================================================= */
 
+
+    /* Shared by list/set/dict comprehensions and by a generator expression
+    ** used as a call argument. On entry the caller has: parsed the body once
+    ** and found `for` (current_ is TOK_FOR), rolled the emitter, registers
+    ** and speculative globals back to before it, saved the lexer state at
+    ** the body's start, and emitted the empty container into `reg`. Any
+    ** number of `for` clauses (nested loops, tuple targets allowed), each
+    ** with any number of `if` filters; the body is re-parsed inside the
+    ** innermost loop. kind: 0 list, 1 set, 2 dict (`key: value` body). */
+    void Compiler::comprehension_into(int reg, int kind, const LexerState &body_lex, Token body_cur, Token body_prev, int line)
+    {
+        struct Clause
+        {
+            int iter_reg, var_reg, entry_jump, loop_start, nnames;
+            CondJump filters[8];
+            int nfilters;
+        };
+        static const int kMaxClauses = 4;
+        Clause clauses[kMaxClauses];
+        int nc = 0;
+        while (check(TOK_FOR))
+        {
+            if (nc >= kMaxClauses)
+            {
+                error("Too many 'for' clauses in a comprehension.");
+                return;
+            }
+            advance();
+            Clause &c = clauses[nc++];
+            c.nfilters = 0;
+            begin_scope();
+            Token names[8];
+            int nnames = 0;
+            do
+            {
+                if (!match(TOK_UNDERSCORE)) consume(TOK_IDENTIFIER, "Expected variable name after 'for'.");
+                if (nnames < 8) names[nnames++] = previous_;
+            } while (match(TOK_COMMA) && !check(TOK_IN));
+            consume(TOK_IN, "Expected 'in' after variable name.");
+            c.nnames = nnames;
+
+            c.iter_reg = alloc_reg();
+            int ir = parse_precedence(PREC_OR, c.iter_reg); /* PREC_OR: a following `if` is a filter */
+            if (ir != c.iter_reg)
+                emit_move(c.iter_reg, ir);
+            state_->next_reg = c.iter_reg + 1; /* the index MUST be iter_reg + 1 */
+            int idx_reg = alloc_reg();
+            state_->emitter.emit_asbx(OP_LOADI, idx_reg, 0, line);
+            if (nnames == 1)
+                c.var_reg = add_local(names[0]);
+            else
+            {
+                c.var_reg = alloc_reg(); /* the tuple; the names follow it */
+                for (int vi = 0; vi < nnames; vi++)
+                    add_local(names[vi]);
+            }
+            c.entry_jump = state_->emitter.emit_jump(OP_JMP, 0, line);
+            c.loop_start = state_->emitter.current_offset();
+            if (nnames > 1)
+            {
+                int idx_tmp = alloc_reg();
+                for (int vi = 0; vi < nnames; vi++)
+                {
+                    state_->emitter.emit_asbx(OP_LOADI, idx_tmp, vi, line);
+                    state_->emitter.emit_abc(OP_GETINDEX, c.var_reg + 1 + vi, c.var_reg, idx_tmp, line);
+                }
+                free_reg(idx_tmp);
+            }
+            while (match(TOK_IF))
+            {
+                int cond = parse_precedence(PREC_OR, -1); /* `if a if b`: two filters, not a ternary */
+                bool fused = false;
+                int j = cond_false_jump(cond, fused);
+                if (c.nfilters < 8)
+                {
+                    c.filters[c.nfilters].offset = j;
+                    c.filters[c.nfilters].fused = fused;
+                    c.nfilters++;
+                }
+            }
+        }
+
+        /* The body, re-parsed here so it runs inside the innermost loop. */
+        LexerState lex_after = lexer_.save_state();
+        Token cur_after = current_;
+        Token prev_after = previous_;
+        lexer_.restore_state(body_lex);
+        current_ = body_cur;
+        previous_ = body_prev;
+        if (kind == 2)
+        {
+            int k = expression(-1);
+            consume(TOK_COLON, "Expected ':' in dict comprehension.");
+            int v = expression(-1);
+            state_->emitter.emit_abc(OP_SETINDEX, reg, k, v, line);
+            free_reg(v);
+            free_reg(k);
+        }
+        else
+        {
+            int body = expression(-1);
+            state_->emitter.emit_abc(kind == 1 ? OP_SETADD : OP_APPEND, reg, body, 0, line);
+            free_reg(body);
+        }
+        lexer_.restore_state(lex_after);
+        current_ = cur_after;
+        previous_ = prev_after;
+
+        for (int k = nc - 1; k >= 0; k--)
+        {
+            Clause &c = clauses[k];
+            patch_cond_jumps(c.filters, c.nfilters);
+            state_->emitter.patch_jump(c.entry_jump);
+            state_->emitter.emit_for_next(c.var_reg, c.iter_reg, c.loop_start, line);
+            end_scope();
+        }
+    }
+
     int Compiler::array_literal(int dest)
     {
         int reg;
@@ -2279,72 +2446,7 @@ namespace zen
                     state_->next_reg = reg_save;
                     vm_->shrink_globals(glob_save);
 
-                    advance(); /* consume 'for' */
-                    begin_scope();
-
-                    if (!match(TOK_UNDERSCORE)) consume(TOK_IDENTIFIER, "Expected variable name after 'for'.");
-                    Token var_name = previous_;
-                    consume(TOK_IN, "Expected 'in' after variable name.");
-
-                    int iter_reg = alloc_reg();
-                    /* Parse iter at PREC_OR so the comprehension 'if' filter token
-                       is not treated as a ternary operator. */
-                    int iter_result = parse_precedence(PREC_OR, iter_reg);
-                    if (iter_result != iter_reg)
-                        emit_move(iter_reg, iter_result);
-                    state_->next_reg = iter_reg + 1; /* index must be iter_reg + 1 */
-
-                    /* Same loop shape as for_statement: the iterator's index
-                    ** in R[iter_reg+1], OP_FOR_NEXT at the bottom entered by
-                    ** a jump — one dispatch per element instead of LT +
-                    ** JMPIFNOT + GETINDEX + ADDI + JMP, and every iterable
-                    ** FOR_NEXT knows (ranges, strings, generators), not only
-                    ** the indexable ones. */
-                    int idx_reg = alloc_reg(); /* must be iter_reg + 1 */
-                    state_->emitter.emit_asbx(OP_LOADI, idx_reg, 0, line);
-
-                    int var_reg = add_local(var_name);
-
-                    int entry_jump = state_->emitter.emit_jump(OP_JMP, 0, line);
-                    int loop_start = state_->emitter.current_offset();
-
-                    /* Optional `if cond` filter */
-                    int filter_jump = -1;
-                    if (match(TOK_IF))
-                    {
-                        int cond = expression(-1);
-                        bool fused = false;
-                        filter_jump = emit_cond_jump(cond, fused); /* `if x > 0` as one branch */
-                        free_reg(cond);
-                    }
-
-                    /* Save lex state AFTER filter — this is where we continue after the body */
-                    LexerState lex_after_filter = lexer_.save_state();
-                    Token cur_after = current_;
-                    Token prev_after = previous_;
-
-                    /* Restore lex to before the body expression and re-parse it inside the loop */
-                    lexer_.restore_state(lex_save);
-                    current_ = cur_save;
-                    previous_ = prev_save;
-                    (void)first; /* was emitted speculatively — discarded */
-
-                    int body = expression(-1);
-                    state_->emitter.emit_abc(OP_APPEND, reg, body, 0, line);
-                    free_reg(body);
-
-                    /* Restore lex to after the filter (skip re-scanning for/in/iter/if) */
-                    lexer_.restore_state(lex_after_filter);
-                    current_ = cur_after;
-                    previous_ = prev_after;
-
-                    if (filter_jump >= 0)
-                        state_->emitter.patch_jump(filter_jump);
-
-                    state_->emitter.patch_jump(entry_jump);
-                    state_->emitter.emit_for_next(var_reg, iter_reg, loop_start, line);
-
-                    end_scope();
+                    comprehension_into(reg, 0, lex_save, cur_save, prev_save, line);
                     /* Restore next_reg to just above the result array reg */
                     state_->next_reg = reg_save;
                     while (match(TOK_NEWLINE))
@@ -2437,59 +2539,7 @@ namespace zen
                 /* NEWMAP was rolled back — re-emit it */
                 state_->emitter.emit_abc(OP_NEWMAP, reg, 0, 0, line);
 
-                advance(); /* consume 'for' */
-                begin_scope();
-                if (!match(TOK_UNDERSCORE)) consume(TOK_IDENTIFIER, "Expected variable name after 'for'.");
-                Token var_name = previous_;
-                consume(TOK_IN, "Expected 'in' after variable name.");
-
-                int iter_reg = alloc_reg();
-                int ir = parse_precedence(PREC_OR, iter_reg);
-                if (ir != iter_reg)
-                    emit_move(iter_reg, ir);
-                state_->next_reg = iter_reg + 1; /* index must be iter_reg + 1 */
-                int idx_reg = alloc_reg(); /* must be iter_reg + 1 (OP_FOR_NEXT) */
-                state_->emitter.emit_asbx(OP_LOADI, idx_reg, 0, line);
-                int var_reg = add_local(var_name);
-
-                int entry_jump = state_->emitter.emit_jump(OP_JMP, 0, line);
-                int loop_start = state_->emitter.current_offset();
-
-                int filter_jump = -1;
-                if (match(TOK_IF))
-                {
-                    int cond = expression(-1);
-                    bool fused = false;
-                    filter_jump = emit_cond_jump(cond, fused);
-                    free_reg(cond);
-                }
-
-                LexerState lex_after = lexer_.save_state();
-                Token cur_after = current_;
-                Token prev_after = previous_;
-
-                lexer_.restore_state(lex_save);
-                current_ = cur_save;
-                previous_ = prev_save;
-                (void)first_key;
-                (void)first_val;
-
-                int k = expression(-1);
-                consume(TOK_COLON, "Expected ':' in dict comprehension.");
-                int v = expression(-1);
-                state_->emitter.emit_abc(OP_SETINDEX, reg, k, v, line);
-                free_reg(v);
-                free_reg(k);
-
-                lexer_.restore_state(lex_after);
-                current_ = cur_after;
-                previous_ = prev_after;
-
-                if (filter_jump >= 0)
-                    state_->emitter.patch_jump(filter_jump);
-                state_->emitter.patch_jump(entry_jump);
-                state_->emitter.emit_for_next(var_reg, iter_reg, loop_start, line);
-                end_scope();
+                comprehension_into(reg, 2, lex_save, cur_save, prev_save, line);
                 while (match(TOK_NEWLINE))
                 {
                 }
@@ -2547,54 +2597,7 @@ namespace zen
             state_->next_reg = reg_save;
             (void)elem0;
 
-            advance(); /* consume 'for' */
-            begin_scope();
-            if (!match(TOK_UNDERSCORE)) consume(TOK_IDENTIFIER, "Expected variable name after 'for'.");
-            Token var_name = previous_;
-            consume(TOK_IN, "Expected 'in' after variable name.");
-
-            int iter_reg = alloc_reg();
-            int ir = parse_precedence(PREC_OR, iter_reg);
-            if (ir != iter_reg)
-                emit_move(iter_reg, ir);
-            state_->next_reg = iter_reg + 1; /* index must be iter_reg + 1 */
-            int idx_reg = alloc_reg(); /* must be iter_reg + 1 (OP_FOR_NEXT) */
-            state_->emitter.emit_asbx(OP_LOADI, idx_reg, 0, line);
-            int var_reg = add_local(var_name);
-
-            int entry_jump = state_->emitter.emit_jump(OP_JMP, 0, line);
-            int loop_start = state_->emitter.current_offset();
-
-            int filter_jump = -1;
-            if (match(TOK_IF))
-            {
-                int cond = expression(-1);
-                bool fused = false;
-                filter_jump = emit_cond_jump(cond, fused);
-                free_reg(cond);
-            }
-
-            LexerState lex_after = lexer_.save_state();
-            Token cur_after = current_;
-            Token prev_after = previous_;
-
-            lexer_.restore_state(lex_before_first);
-            current_ = cur_before;
-            previous_ = prev_before;
-
-            int body = expression(-1);
-            state_->emitter.emit_abc(OP_SETADD, reg, body, 0, line);
-            free_reg(body);
-
-            lexer_.restore_state(lex_after);
-            current_ = cur_after;
-            previous_ = prev_after;
-
-            if (filter_jump >= 0)
-                state_->emitter.patch_jump(filter_jump);
-            state_->emitter.patch_jump(entry_jump);
-            state_->emitter.emit_for_next(var_reg, iter_reg, loop_start, line);
-            end_scope();
+            comprehension_into(reg, 1, lex_before_first, cur_before, prev_before, line);
             while (match(TOK_NEWLINE))
             {
             }

@@ -129,6 +129,11 @@ namespace zen
 
         /* --- Natives --- */
         int def_native(const char *name, NativeFn fn, int arity, int flags = 0);
+        /* Keyword arguments of the native call in progress (nullptr when
+        ** none): the compiler passes `f(x, key=v)` to a native as a trailing
+        ** map, the VM parks it here around the call. */
+        ObjMap *kwargs() const { return kwargs_; }
+        ObjMap *kwargs_ = nullptr;
 
         /* --- Module registry --- */
         void register_lib(const NativeLib *lib);  /* make available for import */
@@ -364,6 +369,9 @@ namespace zen
         int num_selectors() const { return num_selectors_; }
         const char *selector_name(int idx) const { return (idx >= 0 && idx < num_selectors_ && selectors_[idx]) ? selectors_[idx]->chars : nullptr; }
     };
+
+    /* builtin_base.cpp: printf-style "fmt" % rhs (rhs: one value or an array of them) */
+    Value zen_percent_format(VM *vm, Value fmt, Value rhs);
 
 } /* namespace zen */
 

@@ -104,6 +104,23 @@ cmake --build build
 ./bin/zen tests/01_print.py
 ```
 
+#### Profile-guided build (faster interpreter)
+
+The interpreter is one very large function, so the compiler has to guess
+which of its branches are hot. `tools/build_pgo.sh` replaces the guess with
+counts from a real run — it builds instrumented, runs the benchmarks, then
+rebuilds using those counts. Same source, better code layout:
+
+```bash
+tools/build_pgo.sh            # or: tools/build_pgo.sh my_workload.py ...
+./run_tests.sh                # verify before trusting it
+```
+
+Measured against the plain Release build: -10% on integer arithmetic, -7% on
+native calls, -4% on script-driving-natives, -2% on the game benchmark. Worth
+it for a binary you ship; re-run it after substantial interpreter changes,
+since a stale profile helps less.
+
 ### Getting Started
 
 Try the interactive REPL:

@@ -43,29 +43,30 @@ jobs:
           name: zen-linux-x86_64
           path: bin/zen
 
-  # Fuzz the public C++ host boundary on every PR. The target combines
-  # libFuzzer with ASan/UBSan and ZEN_DEBUG_STRESS_GC; the short budget is a
-  # regression gate, while longer exploratory runs stay local/nightly.
-  fuzz-embedding:
-    name: fuzz-embedding-asan-ubsan
+  # Feeds arbitrary bytes to the compiler + VM under ASan+UBSan, with GC
+  # forced on every allocation (ZEN_DEBUG_STRESS_GC) so marking bugs surface
+  # immediately instead of waiting for a real threshold-triggered collection.
+  # Bounded to a smoke run — deep fuzzing is a local/scheduled concern, not
+  # every PR's.
+  linux-fuzz:
+    name: linux-fuzz (clang, ASan+UBSan, stress-GC)
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    env:
+      ASAN_OPTIONS: halt_on_error=1:detect_leaks=0
+      UBSAN_OPTIONS: halt_on_error=1
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y ninja-build clang
-      - name: Configure fuzz target
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Configure
         run: |
-          cmake -S . -B build-fuzz -G Ninja \
+          cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
             -DZEN_BUILD_FUZZ=ON
-      - name: Build embedding fuzzer
-        run: cmake --build build-fuzz --target fuzz_embedding
-      - name: Fuzz C++ embedding boundary
-        run: |
-          ./bin/fuzz_embedding tests/fuzz/corpus_embedding/ \
-            -max_total_time=45 -timeout=5 -rss_limit_mb=2048 \
-            -print_final_stats=1
+      - name: Build
+        run: cmake --build build --target fuzz_zen -j"$(nproc)"
+      - name: Fuzz the compiler + VM (bounded)
+        run: ./bin/fuzz_zen -max_total_time=60 -max_len=4096 -timeout=5
 
   # The switch dispatch path is what MSVC and any non-GNU compiler take, and it
   # is dead code under gcc/clang — build it here so it cannot rot unnoticed.

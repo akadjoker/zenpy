@@ -27,14 +27,7 @@ bin/zen_gl
 bin/zen
 bin/test_*
 bin/zen_*
-bin/fuzz_*
-
-# libFuzzer artifacts generated at the repository root.
-/crash-*
-
-# libFuzzer grows its working corpus; only the curated seed is versioned.
-/tests/fuzz/corpus_embedding/*
-!/tests/fuzz/corpus_embedding/seed
+bin/fuzz_zen
 
 # Ignorar tudo dentro de bin/
 #bin/*

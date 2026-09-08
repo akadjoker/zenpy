@@ -870,6 +870,7 @@ namespace zen
             &&lbl_OP_INVOKE_VT_R,
             &&lbl_OP_EQJMPIFNOT,
             &&lbl_OP_NEJMPIFNOT,
+            &&lbl_OP_NEXT,
             &&lbl_OP_RETURNNIL,
         };
 
@@ -2651,6 +2652,65 @@ namespace zen
                 }
             }
             goto op_call_shared;
+        }
+
+        CASE(OP_NEXT)
+        {
+            /* next(gen) — advance a generator one step and yield its value.
+            ** Generators are fibers here, and `for v in gen()` already knows
+            ** how to resume one; this is the same sequence, reached from an
+            ** expression instead of a loop header, so a generator can be
+            ** consumed as a stream. A finished generator raises rather than
+            ** returning nil, so the caller can tell "no more" from a yielded
+            ** nil. */
+            uint32_t i = *ip;
+            Value it = R[ZEN_B(i)];
+            if (!is_fiber(it))
+            {
+                RT_ERROR("next() expects a generator, got %s", val_type_str(it));
+            }
+            ObjFiber *target = as_fiber(it);
+            if (target->state == FIBER_DONE)
+            {
+                RT_ERROR("next() on an exhausted generator");
+            }
+            if (target->state == FIBER_RUNNING)
+            {
+                RT_ERROR("next() on a running generator");
+            }
+
+            target->transfer_value = val_nil();
+            target->caller = fiber;
+            target->state = FIBER_RUNNING;
+            fiber->state = FIBER_SUSPENDED;
+            current_fiber_ = target;
+
+            if (target->yield_dest >= 0)
+            {
+                CallFrame &tf = target->frames[target->frame_count - 1];
+                tf.base[target->yield_dest] = val_nil();
+                target->yield_dest = -1;
+            }
+
+            ++fiber_depth_;
+            SAVE_IP();
+            execute(target);
+            --fiber_depth_;
+
+            fiber->state = FIBER_RUNNING;
+            current_fiber_ = fiber;
+
+            if (had_error_ || target->state == FIBER_ERROR)
+                return;
+
+            LOAD_STATE();
+
+            if (target->state == FIBER_DONE)
+            {
+                RT_ERROR("next() on an exhausted generator");
+            }
+            R[ZEN_A(i)] = target->transfer_value;
+            NEXT();
         }
 
         CASE(OP_RETURNNIL)

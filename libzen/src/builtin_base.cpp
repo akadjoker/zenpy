@@ -1335,6 +1335,17 @@ namespace zen
                 for (int64_t x = r->start; x > r->stop; x += r->step) out.push_back(val_int(x));
             return true;
         }
+        if (is_fiber(v))
+        {
+            /* Consuming a generator means resuming it, which re-enters
+            ** execute() — a native cannot do that. Say so instead of
+            ** "not iterable", which sends people looking for the wrong
+            ** thing when the generator is perfectly iterable in a loop. */
+            vm->runtime_error("%s: cannot consume a generator here — "
+                              "use a comprehension ([x for x in gen()]) or "
+                              "next() in a loop", who);
+            return false;
+        }
         vm->runtime_error("%s: object is not iterable", who);
         return false;
     }

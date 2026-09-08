@@ -133,6 +133,7 @@ namespace zen
         "INVOKE_VT_R",
         "EQJMPIFNOT",
         "NEJMPIFNOT",
+        "NEXT",
         "RETURNNIL",
     };
 

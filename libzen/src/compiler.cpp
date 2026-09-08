@@ -1017,6 +1017,22 @@ namespace zen
             return r;
         }
 
+        /* Intrinsic: next(g) → OP_NEXT. Generators are fibers and resuming
+        ** one has to re-enter execute(), which a native cannot do, so this
+        ** is an opcode rather than a builtin function. */
+        if (name.length == 4 && memcmp(name.start, "next", 4) == 0 && check(TOK_LPAREN))
+        {
+            advance(); /* consume '(' */
+            int r = (dest >= 0) ? dest : alloc_reg();
+            int arg = expression(-1);
+            consume(TOK_RPAREN, "Expected ')' after argument to next().");
+            state_->emitter.emit_abc(OP_NEXT, r, arg, 0, previous_.line);
+            free_reg(arg);
+            state_->next_reg = r + 1;
+            if (state_->next_reg > state_->max_reg) state_->max_reg = state_->next_reg;
+            return r;
+        }
+
         /* Intrinsic: len(x) → OP_LEN */
         if (name.length == 3 && memcmp(name.start, "len", 3) == 0 && check(TOK_LPAREN))
         {

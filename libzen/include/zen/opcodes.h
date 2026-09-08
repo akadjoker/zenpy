@@ -266,6 +266,7 @@ namespace zen
 
         /* `return` with no value and the implicit end of a function:
         ** LOADNIL R[0] + RETURN R[0] as one dispatch (R[0] is dead here). */
+        OP_NEXT,     /* R[A] = next(R[B]) — advance a generator/fiber one step */
         OP_RETURNNIL, /* LAST opcode — s_opnames (debug.cpp) and
                        ** dispatch_table (vm_dispatch.cpp) are sized against
                        ** this one and static_assert on it. Add new opcodes

@@ -651,3 +651,52 @@ str.format/encode; atributos novos em instâncias (classes seladas);
     embedding: `def_native` + `call_global`; padrão de script recomendado:
     `typed: Array[Bunny] = lista` + loop por índice, parâmetros anotados
     (`p: P`) para campos/métodos O(1).
+
+## Round 9 — edge cases contra CPython (2026-09-08)
+
+Encontrados a testar limites numéricos e strings contra o CPython. Nenhum
+está corrigido.
+
+### 1. Ternário avalia sempre os dois ramos (GRAVE)
+
+```python
+def boom():
+    print("BOOM")
+    return 1
+x = boom() if False else 2     # imprime BOOM; CPython não
+```
+
+Python garante avaliação preguiçosa, e código real depende disso:
+`x[0] if x else default`, `n // d if d else 0` — o segundo rebenta com
+divisão por zero no zenpy.
+
+Causa: em `a if c else b` o parser chega ao `if` com `a` **já emitido** —
+`ternary_expr()` recebe `left` como registo pronto. Corrigir implica
+descartar o código de `a` (`shrink_to`) e re-emitir dentro do ramo
+verdadeiro, o que precisa da posição do lexer **antes** de `a`, não a que
+está guardada (que é depois do `if`). Tentado e revertido: a posição errada
+faz o ramo verdadeiro reavaliar a condição.
+
+O zenvm está correcto aqui (`x != 0 ? 10 / x : "safe"` não rebenta).
+
+### 2. `-9223372036854775808` parseado como `-9223372036854775807`
+
+O literal do mínimo de int64 perde uma unidade. O lexer lê o valor absoluto
+(9223372036854775808, que não cabe em int64 com sinal) antes de aplicar o
+menos unário. O zenvm acerta.
+
+### 3. Overflow de int silencioso, e diferente do CPython
+
+`9223372036854775807 + 1` dá `-9223372036854775808` (wrap). O CPython
+promove a inteiro arbitrário. Decisão de desenho legítima — o zen não tem
+bignums — mas não está documentada e não há aviso.
+
+### 4. Strings são bytes, não caracteres
+
+`len("héllo")` dá 6 (CPython: 5), e `"héllo"[1]` devolve meio byte UTF-8.
+O zenvm tem o mesmo comportamento, portanto é consistente entre os dois,
+mas diverge do Python. Há um módulo `utf8`; o que falta é `len`/indexação
+serem conscientes de UTF-8, ou a divergência ficar documentada.
+
+Testes usados: tmp/ (não commitado) — reproduzir com
+`print(len("héllo"))` e o exemplo do ternário acima.

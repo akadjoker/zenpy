@@ -109,6 +109,8 @@ namespace zen
         num_selectors_ = 0;
         init_selector_ = -1;
 
+        init_builtin_selectors();
+
         /* Criar main fiber */
         main_fiber_ = new_fiber(nullptr, kMaxFrames * 16);
         current_fiber_ = main_fiber_;
@@ -703,6 +705,119 @@ namespace zen
         if (len == 8 && memcmp(name, "__init__", 8) == 0)
             init_selector_ = idx; /* constructors are found through this slot */
         return idx;
+    }
+
+    /* One intern_selector() call per builtin method name, run once at
+    ** construction. See BuiltinSelectors in vm.h and
+    ** docs/plano-selector-dispatch-builtins.md. */
+    void VM::init_builtin_selectors()
+    {
+#define SEL(field, name) bsel_.field = intern_selector(name, (int)(sizeof(name) - 1))
+        SEL(str_len, "len");
+        SEL(str_sub, "sub");
+        SEL(str_find, "find");
+        SEL(str_upper, "upper");
+        SEL(str_lower, "lower");
+        SEL(str_split, "split");
+        SEL(str_trim, "trim");
+        SEL(str_strip, "strip");
+        SEL(str_replace, "replace");
+        SEL(str_starts_with, "starts_with");
+        SEL(str_startswith, "startswith");
+        SEL(str_ends_with, "ends_with");
+        SEL(str_endswith, "endswith");
+        SEL(str_char_at, "char_at");
+        SEL(str_byte_at, "byte_at");
+        SEL(str_repeat, "repeat");
+        SEL(str_count, "count");
+        SEL(str_pad_left, "pad_left");
+        SEL(str_pad_right, "pad_right");
+        SEL(str_contains, "contains");
+        SEL(str_reverse, "reverse");
+        SEL(str_join, "join");
+        SEL(str_lstrip, "lstrip");
+        SEL(str_rstrip, "rstrip");
+        SEL(str_title, "title");
+        SEL(str_capitalize, "capitalize");
+        SEL(str_swapcase, "swapcase");
+        SEL(str_isalpha, "isalpha");
+        SEL(str_isdigit, "isdigit");
+        SEL(str_isalnum, "isalnum");
+        SEL(str_isspace, "isspace");
+        SEL(str_isupper, "isupper");
+        SEL(str_islower, "islower");
+        SEL(str_index, "index");
+        SEL(str_rfind, "rfind");
+        SEL(str_rindex, "rindex");
+        SEL(str_center, "center");
+        SEL(str_ljust, "ljust");
+        SEL(str_rjust, "rjust");
+        SEL(str_zfill, "zfill");
+        SEL(str_splitlines, "splitlines");
+        SEL(str_rsplit, "rsplit");
+        SEL(str_partition, "partition");
+        SEL(str_rpartition, "rpartition");
+
+        SEL(arr_push, "push");
+        SEL(arr_append, "append");
+        SEL(arr_pop, "pop");
+        SEL(arr_len, "len");
+        SEL(arr_remove, "remove");
+        SEL(arr_insert, "insert");
+        SEL(arr_slice, "slice");
+        SEL(arr_reverse, "reverse");
+        SEL(arr_clear, "clear");
+        SEL(arr_contains, "contains");
+        SEL(arr_join, "join");
+        SEL(arr_sort, "sort");
+        SEL(arr_index_of, "index_of");
+        SEL(arr_index, "index");
+        SEL(arr_dump, "dump");
+        SEL(arr_count, "count");
+        SEL(arr_extend, "extend");
+        SEL(arr_copy, "copy");
+
+        SEL(map_set, "set");
+        SEL(map_get, "get");
+        SEL(map_has, "has");
+        SEL(map_delete, "delete");
+        SEL(map_keys, "keys");
+        SEL(map_values, "values");
+        SEL(map_items, "items");
+        SEL(map_size, "size");
+        SEL(map_clear, "clear");
+        SEL(map_dump, "dump");
+        SEL(map_update, "update");
+        SEL(map_setdefault, "setdefault");
+        SEL(map_pop, "pop");
+        SEL(map_copy, "copy");
+
+        SEL(set_add, "add");
+        SEL(set_has, "has");
+        SEL(set_delete, "delete");
+        SEL(set_size, "size");
+        SEL(set_clear, "clear");
+        SEL(set_values, "values");
+        SEL(set_dump, "dump");
+        SEL(set_discard, "discard");
+        SEL(set_remove, "remove");
+        SEL(set_issubset, "issubset");
+        SEL(set_issuperset, "issuperset");
+        SEL(set_isdisjoint, "isdisjoint");
+        SEL(set_union, "union");
+        SEL(set_intersection, "intersection");
+        SEL(set_difference, "difference");
+        SEL(set_symmetric_difference, "symmetric_difference");
+        SEL(set_copy, "copy");
+
+        SEL(buf_len, "len");
+        SEL(buf_fill, "fill");
+        SEL(buf_byte_len, "byte_len");
+        SEL(buf_tolist, "tolist");
+        SEL(buf_copy, "copy");
+        SEL(buf_slice, "slice");
+        SEL(buf_type_name, "type_name");
+#undef SEL
     }
 
     int VM::def_native(const char *name, NativeFn fn, int arity, int flags)

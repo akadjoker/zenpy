@@ -11,15 +11,15 @@
 **   args      — pointer to first argument (R[base+1])
 **   R         — register file
 **   K         — constant pool
+**   sel_slot  — compile-time-resolved method selector (see BuiltinSelectors
+**               in vm.h and docs/plano-selector-dispatch-builtins.md)
 */
 
 ObjArray *arr = as_array(receiver);
 
-#define ARRAY_METHOD(lit) (method->length == (int)(sizeof(lit) - 1) && memcmp(mname, lit, sizeof(lit) - 1) == 0)
-
 do
 {
-if (ARRAY_METHOD("push") || ARRAY_METHOD("append"))
+if (sel_slot == bsel_.arr_push || sel_slot == bsel_.arr_append)
 {
     /* arr.push(val) → append, returns new length */
     if (arg_count < 1)
@@ -31,7 +31,7 @@ if (ARRAY_METHOD("push") || ARRAY_METHOD("append"))
     R[base] = val_int(arr_count(arr));
     break;
 }
-if (ARRAY_METHOD("pop"))
+if (sel_slot == bsel_.arr_pop)
 {
     /* arr.pop() → remove+return last element; arr.pop(i) → at index i */
     if (arr_count(arr) == 0)
@@ -51,13 +51,13 @@ if (ARRAY_METHOD("pop"))
     R[base] = *--arr->end;
     break;
 }
-if (ARRAY_METHOD("len"))
+if (sel_slot == bsel_.arr_len)
 {
     /* arr.len() → length */
     R[base] = val_int(arr_count(arr));
     break;
 }
-if (ARRAY_METHOD("remove"))
+if (sel_slot == bsel_.arr_remove)
 {
     /* arr.remove(idx) → remove at index, return removed value */
     if (arg_count != 1 || !is_int(args[0]))
@@ -76,7 +76,7 @@ if (ARRAY_METHOD("remove"))
     R[base] = removed;
     break;
 }
-if (ARRAY_METHOD("insert"))
+if (sel_slot == bsel_.arr_insert)
 {
     /* arr.insert(idx, val) → insert at position */
     if (arg_count != 2 || !is_int(args[0]))
@@ -96,7 +96,7 @@ if (ARRAY_METHOD("insert"))
     R[base] = val_int(arr_count(arr));
     break;
 }
-if (ARRAY_METHOD("slice"))
+if (sel_slot == bsel_.arr_slice)
 {
     /* arr.slice(start, end?) → new array [start, end) */
     int32_t count = arr_count(arr);
@@ -125,21 +125,21 @@ if (ARRAY_METHOD("slice"))
     }
     break;
 }
-if (ARRAY_METHOD("reverse"))
+if (sel_slot == bsel_.arr_reverse)
 {
     /* arr.reverse() → in-place reverse, returns arr */
     array_reverse(arr);
     R[base] = receiver;
     break;
 }
-if (ARRAY_METHOD("clear"))
+if (sel_slot == bsel_.arr_clear)
 {
     /* arr.clear() → empty the array */
     array_clear(arr);
     R[base] = val_nil();
     break;
 }
-if (ARRAY_METHOD("contains"))
+if (sel_slot == bsel_.arr_contains)
 {
     /* arr.contains(val) → bool */
     if (arg_count != 1)
@@ -149,7 +149,7 @@ if (ARRAY_METHOD("contains"))
     R[base] = val_bool(array_contains(arr, args[0]));
     break;
 }
-if (ARRAY_METHOD("join"))
+if (sel_slot == bsel_.arr_join)
 {
     /* arr.join(sep?) → string */
     const char *sep = "";
@@ -231,7 +231,7 @@ if (ARRAY_METHOD("join"))
     free(buf);
     break;
 }
-if (ARRAY_METHOD("sort"))
+if (sel_slot == bsel_.arr_sort)
 {
     /* arr.sort() / arr.sort("desc") / arr.sort(key=f, reverse=True): stable,
     ** in place, __lt__ on instances. */
@@ -274,7 +274,7 @@ if (ARRAY_METHOD("sort"))
     R[base] = val_nil();
     break;
 }
-if (ARRAY_METHOD("index_of") || ARRAY_METHOD("index"))
+if (sel_slot == bsel_.arr_index_of || sel_slot == bsel_.arr_index)
 {
     /* arr.index_of(val) → index or -1 */
     if (arg_count != 1)
@@ -284,7 +284,7 @@ if (ARRAY_METHOD("index_of") || ARRAY_METHOD("index"))
     R[base] = val_int(array_find(arr, args[0]));
     break;
 }
-if (ARRAY_METHOD("dump"))
+if (sel_slot == bsel_.arr_dump)
 {
     /* arr.dump() → pretty-print contents recursively */
     dump_value_rec(receiver, 0);
@@ -293,7 +293,7 @@ if (ARRAY_METHOD("dump"))
     break;
 }
 /* ---- Python list methods ---- */
-if (ARRAY_METHOD("count"))
+if (sel_slot == bsel_.arr_count)
 {
     if (arg_count != 1) RT_ERROR("count() expects 1 argument");
     int32_t n = 0;
@@ -302,7 +302,7 @@ if (ARRAY_METHOD("count"))
     R[base] = val_int(n);
     break;
 }
-if (ARRAY_METHOD("extend"))
+if (sel_slot == bsel_.arr_extend)
 {
     if (arg_count != 1) RT_ERROR("extend() expects 1 argument");
     if (is_array(args[0]))
@@ -331,7 +331,7 @@ if (ARRAY_METHOD("extend"))
     R[base] = val_nil();
     break;
 }
-if (ARRAY_METHOD("copy"))
+if (sel_slot == bsel_.arr_copy)
 {
     gc_pause(&gc_);
     ObjArray *copy = new_array(&gc_);
@@ -345,5 +345,3 @@ if (ARRAY_METHOD("copy"))
     RT_ERROR("array has no method '%s'", mname);
 }
 } while (0);
-
-#undef ARRAY_METHOD

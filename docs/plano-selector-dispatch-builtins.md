@@ -58,24 +58,33 @@ same call.
 
 ## Design
 
-At VM init, capture the selector slot for every known builtin method name
-once, as a named constant:
+At VM construction, capture the selector slot for every known builtin method
+name once, as a `VM::BuiltinSelectors` member (`vm.h`) populated by
+`VM::init_builtin_selectors()` (`vm.cpp`) via `intern_selector("len", 3)` etc.
+— one call per method, per type.
 
-```cpp
-static const int SEL_STR_LEN = vm.intern_selector("len", 3);
-static const int SEL_STR_SUB = vm.intern_selector("sub", 3);
-// ... one per method, per type
-```
+**Revised from the original plan:** `switch (sel_slot) { case bsel_.str_len:
+... }` does not compile — C++ requires `case` labels to be compile-time
+constant expressions, and `bsel_.str_len` is a value resolved at VM
+construction (a runtime object member), not a `constexpr`. Went with an
+`if (sel_slot == bsel_.str_len) { ... } else if (...) { ... }` chain instead
+— same `do { if (...) { ...; break; } ... } while (0)` skeleton the old
+`STR_METHOD` code used, just testing `sel_slot == bsel_.field` instead of
+`STR_METHOD("literal")`. Methods that shared one block via
+`STR_METHOD("a") || STR_METHOD("b")` share it the same way via
+`sel_slot == bsel_.a || sel_slot == bsel_.b`; internal re-checks used to pick
+behavior within a shared block (`title`/`capitalize`/`swapcase`,
+`index`/`rfind`/`rindex`, `union`/`intersection`/`difference`/...) became
+`sel_slot ==` comparisons the same way, in place.
 
-Replace each `invoke_*.inl`'s `if (STR_METHOD("...")) { ... } if (...) { ... }`
-chain with `switch (sel_slot) { case SEL_STR_LEN: ...; case SEL_STR_SUB: ...;
-default: goto not_found; }`. A switch this dense compiles to a jump table on
-every compiler we target — no hand-rolled array, no bookkeeping for the
-global selector table's growth (that's `intern_selector`'s problem already,
-solved, untouched by this change).
+A true O(1) jump table (computed goto, matching what `OP_INVOKE`'s own opcode
+dispatch already uses) is possible but needs a portable fallback for the
+existing MSVC "switch dispatch" build mode (`ZEN_DISPATCH_MODE`,
+`linux-switch-dispatch` in CI) — parked, see Results below for whether it's
+worth the complexity.
 
 `mname`/`mlen` stay available for error messages (`"'%s' has no method
-'%s'"`) — only the resolution path changes, not the diagnostics.
+'%s'"`) — only the resolution path changed, not the diagnostics.
 
 ## Rollout order (biggest win first)
 
@@ -104,6 +113,44 @@ repos on the first (string) step in case the approach needs adjusting.
   API — a real regression net for this change, already wired, no new
   infrastructure needed. zenvm doesn't have an equivalent fuzz harness yet;
   worth porting before or alongside this work rather than after.
+
+## Results (zenpy, 2026-09-08)
+
+All five `invoke_*.inl` done (string, array, map, set, buffer) — see
+`libzen/include/zen/vm.h` (`BuiltinSelectors`), `vm.cpp`
+(`init_builtin_selectors`). Full test suite green (68 tests; the only 2
+failures, `27_io.py`/`28_os.py`, are pre-existing sandbox file-permission
+issues, unrelated). 30s ASan fuzz run on `fuzz_zen`: no crashes.
+
+**Measured, not assumed — the win is real but uneven, not uniform:**
+`STR_METHOD`'s own `length == N` check already fast-rejects most
+non-matching candidates before ever calling `memcmp`, so a chain position
+alone doesn't predict the cost — name-*length collisions* with earlier
+entries do.
+
+- `rpartition()` (last of 42 names in the old string chain, the "worst case"
+  by position): **no measurable difference** — 0.664s vs 0.653s / 3M calls.
+  Almost every candidate before it differs in length, so the old chain
+  barely touched `memcmp` for this one.
+- `islower()` — collides in length (7 bytes) with 9 other names earlier in
+  the chain (`replace`, `char_at`, `byte_at`, `reverse`, `isalpha`,
+  `isdigit`, `isalnum`, `isspace`, `isupper`): **~18% faster** — 0.221s vs
+  0.180s / 5M calls. This is where the old chain actually paid for real
+  `memcmp` calls.
+
+Decision (asked, answered 2026-09-08): keep the if/else-chain approach as
+committed, apply the same pattern to zenvm — the true jump-table path is not
+worth its added complexity (computed-goto + MSVC switch-mode fallback) for a
+gain this uneven. Revisit only if profiling on a real workload shows builtin
+dispatch is still hot after this.
+
+**zenvm: not started yet** — same plan, same design revision applies
+(if/else-chain, not switch). Port `BuiltinSelectors` + the five
+`invoke_*.inl` rewrites there next, same order (string → set → array → map →
+buffer), then re-run the string microbenchmark to sanity-check the
+measured-improvement pattern holds (zenvm's shorter chains mean fewer
+absolute length collisions, so the win may be smaller in relative terms
+too — worth checking rather than assuming it transfers).
 
 ## Out of scope for this pass
 

@@ -2,50 +2,50 @@
 ** invoke_set.inl — Set method dispatch for OP_INVOKE.
 ** Included inside CASE(OP_INVOKE) when receiver is OBJ_SET.
 **
-** Available variables: base, arg_count, receiver, mname, mlen, args, R, K
+** Available variables: base, arg_count, receiver, mname, mlen, args, R, K,
+** sel_slot (compile-time-resolved method selector — see BuiltinSelectors in
+** vm.h and docs/plano-selector-dispatch-builtins.md).
 */
 
 ObjSet *set = as_set(receiver);
 
-#define SET_METHOD(lit) (method->length == (int)(sizeof(lit) - 1) && memcmp(mname, lit, sizeof(lit) - 1) == 0)
-
 do
 {
-if (SET_METHOD("add"))
+if (sel_slot == bsel_.set_add)
 {
     /* set.add(val) → returns true if newly added */
     if (arg_count != 1) { RT_ERROR("add() expects 1 argument"); }
     R[base] = val_bool(set_add(&gc_, set, args[0]));
     break;
 }
-if (SET_METHOD("has"))
+if (sel_slot == bsel_.set_has)
 {
     /* set.has(val) → bool */
     if (arg_count != 1) { RT_ERROR("has() expects 1 argument"); }
     R[base] = val_bool(set_contains(set, args[0]));
     break;
 }
-if (SET_METHOD("delete"))
+if (sel_slot == bsel_.set_delete)
 {
     /* set.delete(val) → returns true if was present */
     if (arg_count != 1) { RT_ERROR("delete() expects 1 argument"); }
     R[base] = val_bool(set_remove(set, args[0]));
     break;
 }
-if (SET_METHOD("size"))
+if (sel_slot == bsel_.set_size)
 {
     /* set.size() → number of elements */
     R[base] = val_int(set->count);
     break;
 }
-if (SET_METHOD("clear"))
+if (sel_slot == bsel_.set_clear)
 {
     /* set.clear() → remove all elements */
     set_clear(&gc_, set);
     R[base] = val_nil();
     break;
 }
-if (SET_METHOD("values"))
+if (sel_slot == bsel_.set_values)
 {
     /* set.values() → array of all values */
     ObjArray *result = new_array(&gc_);
@@ -57,7 +57,7 @@ if (SET_METHOD("values"))
     }
     break;
 }
-if (SET_METHOD("dump"))
+if (sel_slot == bsel_.set_dump)
 {
     /* set.dump() → pretty-print contents recursively */
     dump_value_rec(receiver, 0);
@@ -66,34 +66,34 @@ if (SET_METHOD("dump"))
     break;
 }
 /* ---- Python set methods ---- */
-if (SET_METHOD("discard") || SET_METHOD("remove"))
+if (sel_slot == bsel_.set_discard || sel_slot == bsel_.set_remove)
 {
     if (arg_count != 1) RT_ERROR("%s() expects 1 argument", mname);
     bool was = set_remove(set, args[0]);
-    if (!was && SET_METHOD("remove")) RT_ERROR("remove(): element not in set");
+    if (!was && sel_slot == bsel_.set_remove) RT_ERROR("remove(): element not in set");
     R[base] = val_nil();
     break;
 }
-if (SET_METHOD("issubset") || SET_METHOD("issuperset") || SET_METHOD("isdisjoint"))
+if (sel_slot == bsel_.set_issubset || sel_slot == bsel_.set_issuperset || sel_slot == bsel_.set_isdisjoint)
 {
     if (arg_count != 1 || !is_set(args[0])) RT_ERROR("%s() expects a set", mname);
     ObjSet *other = as_set(args[0]);
-    ObjSet *walk = SET_METHOD("issuperset") ? other : set;
-    ObjSet *look = SET_METHOD("issuperset") ? set : other;
+    ObjSet *walk = sel_slot == bsel_.set_issuperset ? other : set;
+    ObjSet *look = sel_slot == bsel_.set_issuperset ? set : other;
     bool ok = true;
     for (int32_t si = 0; si < walk->capacity && ok; si++)
     {
         if (walk->nodes[si].hash == 0xFFFFFFFFu) continue;
         bool in = set_contains(look, walk->nodes[si].key);
-        ok = SET_METHOD("isdisjoint") ? !in : in;
+        ok = sel_slot == bsel_.set_isdisjoint ? !in : in;
     }
     R[base] = val_bool(ok);
     break;
 }
-if (SET_METHOD("union") || SET_METHOD("intersection") || SET_METHOD("difference") ||
-    SET_METHOD("symmetric_difference") || SET_METHOD("copy"))
+if (sel_slot == bsel_.set_union || sel_slot == bsel_.set_intersection || sel_slot == bsel_.set_difference ||
+    sel_slot == bsel_.set_symmetric_difference || sel_slot == bsel_.set_copy)
 {
-    int kind = SET_METHOD("union") ? 0 : SET_METHOD("intersection") ? 1 : SET_METHOD("difference") ? 2 : SET_METHOD("symmetric_difference") ? 3 : 4;
+    int kind = sel_slot == bsel_.set_union ? 0 : sel_slot == bsel_.set_intersection ? 1 : sel_slot == bsel_.set_difference ? 2 : sel_slot == bsel_.set_symmetric_difference ? 3 : 4;
     gc_pause(&gc_);
     ObjSet *out = new_set(&gc_);
     for (int32_t si = 0; si < set->capacity; si++)
@@ -143,5 +143,3 @@ if (SET_METHOD("union") || SET_METHOD("intersection") || SET_METHOD("difference"
     RT_ERROR("set has no method '%s'", mname);
 }
 } while (0);
-
-#undef SET_METHOD

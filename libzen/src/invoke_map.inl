@@ -2,7 +2,9 @@
 ** invoke_map.inl — Map method dispatch for OP_INVOKE.
 ** Included inside CASE(OP_INVOKE) when receiver is OBJ_MAP.
 **
-** Available variables: base, arg_count, receiver, mname, mlen, args, R, K
+** Available variables: base, arg_count, receiver, mname, mlen, args, R, K,
+** sel_slot (compile-time-resolved method selector — see BuiltinSelectors in
+** vm.h and docs/plano-selector-dispatch-builtins.md).
 */
 
 ObjMap *map = as_map(receiver);
@@ -12,11 +14,9 @@ ObjMap *map = as_map(receiver);
 if (map->is_module)
     goto map_key_lookup;
 
-#define MAP_METHOD(lit) (method->length == (int)(sizeof(lit) - 1) && memcmp(mname, lit, sizeof(lit) - 1) == 0)
-
 do
 {
-if (MAP_METHOD("set"))
+if (sel_slot == bsel_.map_set)
 {
     /* map.set(key, val) → sets key, returns val */
     if (arg_count != 2)
@@ -27,7 +27,7 @@ if (MAP_METHOD("set"))
     R[base] = args[1];
     break;
 }
-if (MAP_METHOD("get"))
+if (sel_slot == bsel_.map_get)
 {
     /* map.get(key) or map.get(key, default) → value or nil/default */
     if (arg_count < 1)
@@ -42,7 +42,7 @@ if (MAP_METHOD("get"))
         R[base] = (arg_count >= 2) ? args[1] : val_nil();
     break;
 }
-if (MAP_METHOD("has"))
+if (sel_slot == bsel_.map_has)
 {
     /* map.has(key) → bool */
     if (arg_count != 1)
@@ -52,7 +52,7 @@ if (MAP_METHOD("has"))
     R[base] = val_bool(map_contains(map, args[0]));
     break;
 }
-if (MAP_METHOD("delete"))
+if (sel_slot == bsel_.map_delete)
 {
     /* map.delete(key) → removes key, returns true if existed */
     if (arg_count != 1)
@@ -62,7 +62,7 @@ if (MAP_METHOD("delete"))
     R[base] = val_bool(map_delete(map, args[0]));
     break;
 }
-if (MAP_METHOD("keys"))
+if (sel_slot == bsel_.map_keys)
 {
     /* map.keys() → array of keys */
     ObjArray *result = new_array(&gc_);
@@ -70,7 +70,7 @@ if (MAP_METHOD("keys"))
     map_keys(&gc_, map, as_array(R[base]));
     break;
 }
-if (MAP_METHOD("values"))
+if (sel_slot == bsel_.map_values)
 {
     /* map.values() → array of values */
     ObjArray *result = new_array(&gc_);
@@ -78,7 +78,7 @@ if (MAP_METHOD("values"))
     map_values(&gc_, map, as_array(R[base]));
     break;
 }
-if (MAP_METHOD("items"))
+if (sel_slot == bsel_.map_items)
 {
     /* map.items() → array of [key, value] pairs */
     gc_pause(&gc_);
@@ -97,20 +97,20 @@ if (MAP_METHOD("items"))
     gc_resume(&gc_);
     break;
 }
-if (MAP_METHOD("size"))
+if (sel_slot == bsel_.map_size)
 {
     /* map.size() → number of entries */
     R[base] = val_int(map->count);
     break;
 }
-if (MAP_METHOD("clear"))
+if (sel_slot == bsel_.map_clear)
 {
     /* map.clear() → remove all entries */
     map_clear(&gc_, map);
     R[base] = val_nil();
     break;
 }
-if (MAP_METHOD("dump"))
+if (sel_slot == bsel_.map_dump)
 {
     /* map.dump() → pretty-print contents recursively */
     dump_value_rec(receiver, 0);
@@ -163,7 +163,7 @@ map_key_lookup:
         DISPATCH();
     }
     /* ---- Python dict methods ---- */
-    if (MAP_METHOD("update"))
+    if (sel_slot == bsel_.map_update)
     {
         if (arg_count != 1 || !is_map(args[0])) RT_ERROR("update() expects a dict");
         ObjMap *src = as_map(args[0]);
@@ -175,7 +175,7 @@ map_key_lookup:
         R[base] = val_nil();
         break;
     }
-    if (MAP_METHOD("setdefault"))
+    if (sel_slot == bsel_.map_setdefault)
     {
         if (arg_count < 1) RT_ERROR("setdefault() expects a key");
         bool found;
@@ -190,7 +190,7 @@ map_key_lookup:
         }
         break;
     }
-    if (MAP_METHOD("pop"))
+    if (sel_slot == bsel_.map_pop)
     {
         if (arg_count < 1) RT_ERROR("pop() expects a key");
         bool found;
@@ -206,7 +206,7 @@ map_key_lookup:
             RT_ERROR("pop(): key not found");
         break;
     }
-    if (MAP_METHOD("copy"))
+    if (sel_slot == bsel_.map_copy)
     {
         gc_pause(&gc_);
         ObjMap *copy = new_map(&gc_);
@@ -220,5 +220,3 @@ map_key_lookup:
     RT_ERROR("map has no method or key '%s'", mname);
 }
 } while (0);
-
-#undef MAP_METHOD

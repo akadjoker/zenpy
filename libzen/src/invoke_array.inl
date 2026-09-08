@@ -33,10 +33,20 @@ if (ARRAY_METHOD("push") || ARRAY_METHOD("append"))
 }
 if (ARRAY_METHOD("pop"))
 {
-    /* arr.pop() → remove+return last element */
+    /* arr.pop() → remove+return last element; arr.pop(i) → at index i */
     if (arr_count(arr) == 0)
     {
         RT_ERROR("pop() on empty array");
+    }
+    if (arg_count >= 1 && is_int(args[0]))
+    {
+        int64_t pi = args[0].as.integer;
+        if (pi < 0) pi += arr_count(arr);
+        if (pi < 0 || pi >= arr_count(arr))
+            RT_ERROR("pop index out of range");
+        R[base] = arr->data[pi];
+        array_remove(arr, (int32_t)pi);
+        break;
     }
     R[base] = *--arr->end;
     break;
@@ -223,50 +233,45 @@ if (ARRAY_METHOD("join"))
 }
 if (ARRAY_METHOD("sort"))
 {
-    /* arr.sort() or arr.sort("desc") → in-place sort using qsort */
-    if (arg_count > 1)
-    {
-        RT_ERROR("sort() expects 0 or 1 argument");
-    }
+    /* arr.sort() / arr.sort("desc") / arr.sort(key=f, reverse=True): stable,
+    ** in place, __lt__ on instances. */
     bool descending = false;
-    if (arg_count == 1)
+    if (arg_count >= 1 && is_string(args[0]) && as_string(args[0])->length == 4 && memcmp(as_string(args[0])->chars, "desc", 4) == 0)
+        descending = true;
+    Value keyfn = val_nil();
+    if (kwmap)
     {
-        if (!is_string(args[0]))
-        {
-            RT_ERROR("sort() argument must be a string (\"asc\" or \"desc\")");
-        }
-        ObjString *order = as_string(args[0]);
-        if (order->length == 4 && memcmp(order->chars, "desc", 4) == 0)
-            descending = true;
+        bool found;
+        Value v = map_get(kwmap, val_obj((Obj *)make_string("reverse")), &found);
+        if (found && is_truthy_full(v)) descending = true;
+        v = map_get(kwmap, val_obj((Obj *)make_string("key")), &found);
+        if (found) keyfn = v;
     }
     int32_t count = arr_count(arr);
     if (count > 1)
     {
-        /* qsort with static comparator — store direction in a thread-local (ok for single-threaded VM) */
-        static bool s_desc;
-        s_desc = descending;
-        qsort(arr->data, (size_t)count, sizeof(Value), [](const void *pa, const void *pb) -> int
-              {
-            Value a = *(const Value *)pa, b = *(const Value *)pb;
-            int cmp = 0;
-            double da = 0, db = 0;
-            bool a_num = is_int(a) || is_float(a);
-            bool b_num = is_int(b) || is_float(b);
-            if (a_num && b_num) {
-                da = is_int(a) ? (double)a.as.integer : a.as.number;
-                db = is_int(b) ? (double)b.as.integer : b.as.number;
-                cmp = (da > db) - (da < db);
-            } else if (is_string(a) && is_string(b)) {
-                int minlen = as_string(a)->length < as_string(b)->length ? as_string(a)->length : as_string(b)->length;
-                cmp = memcmp(as_cstring(a), as_cstring(b), minlen);
-                if (cmp == 0) cmp = as_string(a)->length - as_string(b)->length;
-            } else {
-                /* numbers before strings before others */
-                cmp = (int)a.type - (int)b.type;
+        SAVE_IP();
+        std::vector<std::pair<Value, Value>> keyed((size_t)count);
+        for (int32_t k = 0; k < count; k++)
+        {
+            keyed[k].second = arr->data[k];
+            if (is_nil(keyfn))
+                keyed[k].first = arr->data[k];
+            else
+            {
+                Value arg = arr->data[k];
+                keyed[k].first = call_fn(keyfn, &arg, 1);
+                if (had_error_) return;
             }
-            return s_desc ? -cmp : cmp; });
+        }
+        VM *self_vm = this;
+        std::stable_sort(keyed.begin(), keyed.end(), [self_vm](const std::pair<Value, Value> &x, const std::pair<Value, Value> &y) { return zen_compare_vm(self_vm, x.first, y.first) < 0; });
+        if (had_error_) return;
+        for (int32_t k = 0; k < count; k++)
+            arr->data[descending ? count - 1 - k : k] = keyed[k].second;
+        LOAD_STATE();
     }
-    R[base] = receiver;
+    R[base] = val_nil();
     break;
 }
 if (ARRAY_METHOD("index_of") || ARRAY_METHOD("index"))
@@ -285,6 +290,55 @@ if (ARRAY_METHOD("dump"))
     dump_value_rec(receiver, 0);
     putchar('\n');
     R[base] = val_nil();
+    break;
+}
+/* ---- Python list methods ---- */
+if (ARRAY_METHOD("count"))
+{
+    if (arg_count != 1) RT_ERROR("count() expects 1 argument");
+    int32_t n = 0;
+    for (int32_t k = 0; k < arr_count(arr); k++)
+        if (values_deep_equal(arr->data[k], args[0])) n++;
+    R[base] = val_int(n);
+    break;
+}
+if (ARRAY_METHOD("extend"))
+{
+    if (arg_count != 1) RT_ERROR("extend() expects 1 argument");
+    if (is_array(args[0]))
+    {
+        ObjArray *src = as_array(args[0]);
+        int32_t n = arr_count(src);
+        if (n > 0)
+        {
+            gc_pause(&gc_);
+            ObjArray *copy = new_array(&gc_); /* src may be arr itself */
+            array_push_n(&gc_, copy, src->data, n);
+            array_push_n(&gc_, arr, copy->data, n);
+            gc_resume(&gc_);
+        }
+    }
+    else if (is_string(args[0]))
+    {
+        ObjString *s = as_string(args[0]);
+        gc_pause(&gc_);
+        for (int k = 0; k < s->length; k++)
+            array_push(&gc_, arr, val_obj((Obj *)create_string(&gc_, s->chars + k, 1)));
+        gc_resume(&gc_);
+    }
+    else
+        RT_ERROR("extend() expects a list or a string");
+    R[base] = val_nil();
+    break;
+}
+if (ARRAY_METHOD("copy"))
+{
+    gc_pause(&gc_);
+    ObjArray *copy = new_array(&gc_);
+    if (arr_count(arr) > 0)
+        array_push_n(&gc_, copy, arr->data, arr_count(arr));
+    gc_resume(&gc_);
+    R[base] = val_obj((Obj *)copy);
     break;
 }
 {

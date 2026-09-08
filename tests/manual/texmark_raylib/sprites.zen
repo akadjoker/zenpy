@@ -1,0 +1,43 @@
+# ZenPy texmark script. The texture is loaded HERE, kept in every sprite,
+# and drawn through the native object: self.tex.draw(x, y).
+
+class Sprite:
+    tex: Texture    # native class: self.tex.draw() takes the vtable slot straight to the NativeFn
+    def __init__(self, tex: Texture, x, y, vx, vy):
+        self.tex = tex
+        self.x = x
+        self.y = y
+        self.vx = vx
+        self.vy = vy
+
+    def update(self, dt):
+        self.x = self.x + self.vx * dt
+        self.y = self.y + self.vy * dt
+        if self.x > max_x or self.x < 0:
+            self.vx = -self.vx
+        if self.y > max_y or self.y < 0:
+            self.vy = -self.vy
+        self.tex.draw(self.x, self.y)
+
+wabbit = Texture("wabbit_alpha.png")
+sprites = []
+max_x = screen_width() - wabbit.width()
+max_y = screen_height() - wabbit.height()
+
+def add_sprites(n, x, y):
+    # x, y < 0: random positions; otherwise spawn at the cursor
+    i = 0
+    while i < n:
+        if x < 0:
+            sprites.append(Sprite(wabbit, rand(0, max_x), rand(0, max_y), rand(-250, 250), rand(-250, 250)))
+        else:
+            sprites.append(Sprite(wabbit, x, y, rand(-250, 250), rand(-250, 250)))
+        i = i + 1
+
+def update_all(dt):
+    typed: Array[Sprite] = sprites
+    n = len(sprites)
+    i = 0
+    while i < n:
+        typed[i].update(dt)
+        i = i + 1

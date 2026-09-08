@@ -153,6 +153,47 @@ namespace zen
     **     body
     ** ========================================================= */
 
+    /* `param: Type` — a simple class name or Array[Class] becomes the
+    ** parameter's static type, exactly like an annotated local; any other
+    ** annotation (dotted, quoted, generic) is accepted and skipped. */
+    void Compiler::param_type_hint(int param_reg)
+    {
+        if (!match(TOK_COLON))
+            return;
+        if (check(TOK_STRING) || check(TOK_FSTRING))
+        {
+            advance(); /* e.g. 'list[int]' */
+            return;
+        }
+        consume(TOK_IDENTIFIER, "Expected type name.");
+        Token type_tok = previous_;
+        bool simple = !check(TOK_DOT) && !check(TOK_LBRACKET);
+        while (match(TOK_DOT)) consume(TOK_IDENTIFIER, "Expected type name.");
+        if (simple)
+            skip_nullable_suffix();
+        if (match(TOK_LBRACKET))
+        {
+            const bool is_array = type_tok.length == 5 && memcmp(type_tok.start, "Array", 5) == 0;
+            if (is_array && check(TOK_IDENTIFIER))
+            {
+                Token elem = current_;
+                advance();
+                if (check(TOK_RBRACKET) && param_reg >= 0)
+                    set_local_array_element_type(param_reg, elem);
+            }
+            int depth = 1;
+            while (depth > 0 && !check(TOK_EOF))
+            {
+                if (match(TOK_LBRACKET)) depth++;
+                else if (match(TOK_RBRACKET)) depth--;
+                else advance();
+            }
+            return;
+        }
+        if (simple && param_reg >= 0)
+            set_local_type_hint(param_reg, type_tok);
+    }
+
     void Compiler::fun_declaration(bool force_async)
     {
         consume(TOK_IDENTIFIER, "Expected function name.");
@@ -212,12 +253,14 @@ namespace zen
 
         /* Parameters */
         consume(TOK_LPAREN, "Expected '(' after function name.");
-        int arity = 0;
+        /* Type params occupy registers R[0..generic_count-1], ahead of the
+        ** value params — but count separately (ObjFunc::generic_arity), NOT
+        ** folded into `arity`. A generic call validates the two counts
+        ** independently (OP_CALL_GENERIC), unlike the old f<T>(x)==f(T,x)
+        ** sugar where they were indistinguishable. */
         for (int gi = 0; gi < generic_count; gi++)
-        {
             add_local(generic_params[gi]);
-            arity++;
-        }
+        int arity = 0;
         bool is_vararg = false;
         static const int kMaxDefaults = 32;
         Value default_vals[kMaxDefaults];
@@ -247,31 +290,8 @@ namespace zen
                     break; /* *args must be last */
                 }
                 consume(TOK_IDENTIFIER, "Expected parameter name.");
-                add_local(previous_);
-                /* Ignore type hint: param: Type */
-                if (match(TOK_COLON))
-                {
-                    /* consume the type expression: string literal or dotted identifier */
-                    if (check(TOK_STRING) || check(TOK_FSTRING))
-                    {
-                        advance(); /* e.g. 'list[int]' */
-                    }
-                    else
-                    {
-                        consume(TOK_IDENTIFIER, "Expected type name.");
-                        while (match(TOK_DOT)) consume(TOK_IDENTIFIER, "Expected type name.");
-                        if (match(TOK_LBRACKET))
-                        {
-                            int depth = 1;
-                            while (depth > 0 && !check(TOK_EOF))
-                            {
-                                if (match(TOK_LBRACKET)) depth++;
-                                else if (match(TOK_RBRACKET)) depth--;
-                                else advance();
-                            }
-                        }
-                    }
-                }
+                int param_reg = add_local(previous_);
+                param_type_hint(param_reg);
                 if (match(TOK_EQ))
                 {
                     if (default_start_idx < 0) default_start_idx = arity;
@@ -334,8 +354,7 @@ namespace zen
         colon_block();
 
         /* Implicit return None */
-        state_->emitter.emit_abc(OP_LOADNIL, 0, 0, 0, previous_.line);
-        state_->emitter.emit_abc(OP_RETURN, 0, 1, 0, previous_.line);
+        state_->emitter.emit_abc(OP_RETURNNIL, 0, 1, 0, previous_.line);
 
         ObjFunc *fn = state_->emitter.end(state_->max_reg);
         fn->is_generator = state_->is_generator;
@@ -343,6 +362,7 @@ namespace zen
            e.g. def f(*args) -> arity=-1 (0 required)
                 def f(a, *args) -> arity=-2 (1 required) */
         fn->arity = is_vararg ? -(arity) : arity;
+        fn->generic_arity = generic_count;
 
         /* Store default values */
         fn->default_count = default_count;
@@ -561,12 +581,10 @@ namespace zen
 
                 /* Parameters */
                 consume(TOK_LPAREN, "Expected '(' after method name.");
-                int arity = 0;
+                /* Type params counted separately — see fun_declaration. */
                 for (int gi = 0; gi < generic_count; gi++)
-                {
                     add_local(generic_params[gi]);
-                    arity++;
-                }
+                int arity = 0;
                 /* Skip 'self' if user wrote it explicitly as first param */
                 if (check(TOK_SELF))
                 {
@@ -597,28 +615,8 @@ namespace zen
                             break;
                         }
                         consume(TOK_IDENTIFIER, "Expected parameter name.");
-                        add_local(previous_);
-                        /* Ignore type hint */
-                        if (match(TOK_COLON))
-                        {
-                            if (check(TOK_STRING) || check(TOK_FSTRING))
-                                advance();
-                            else
-                            {
-                                consume(TOK_IDENTIFIER, "Expected type name.");
-                                while (match(TOK_DOT)) consume(TOK_IDENTIFIER, "Expected type name.");
-                                if (match(TOK_LBRACKET))
-                                {
-                                    int depth = 1;
-                                    while (depth > 0 && !check(TOK_EOF))
-                                    {
-                                        if (match(TOK_LBRACKET)) depth++;
-                                        else if (match(TOK_RBRACKET)) depth--;
-                                        else advance();
-                                    }
-                                }
-                            }
-                        }
+                        int param_reg = add_local(previous_);
+                        param_type_hint(param_reg);
                         if (match(TOK_EQ))
                         {
                             if (default_start_idx < 0) default_start_idx = arity;
@@ -653,6 +651,34 @@ namespace zen
                 consume(TOK_RPAREN, "Expected ')' after parameters.");
                 int default_count = (default_start_idx >= 0) ? (arity - default_start_idx) : 0;
 
+                /* Return type annotation: accepted and skipped, exactly as
+                ** on a free def. (`-> Self` is read by the signature
+                ** pre-scan, not here.) */
+                if (match(TOK_ARROW))
+                {
+                    if (check(TOK_STRING) || check(TOK_FSTRING))
+                    {
+                        advance();
+                    }
+                    else
+                    {
+                        consume(TOK_IDENTIFIER, "Expected return type name.");
+                        while (match(TOK_DOT)) consume(TOK_IDENTIFIER, "Expected type name.");
+                        if (match(TOK_LBRACKET))
+                        {
+                            int depth = 1;
+                            while (depth > 0 && !check(TOK_EOF))
+                            {
+                                if (match(TOK_LBRACKET)) depth++;
+                                else if (match(TOK_RBRACKET)) depth--;
+                                else advance();
+                            }
+                        }
+                        if (match(TOK_PIPE))
+                            consume(TOK_IDENTIFIER, "Expected type name.");
+                    }
+                }
+
                 /* Body */
                 colon_block();
 
@@ -665,13 +691,13 @@ namespace zen
                 }
                 else
                 {
-                    state_->emitter.emit_abc(OP_LOADNIL, 0, 0, 0, previous_.line);
-                    state_->emitter.emit_abc(OP_RETURN, 0, 1, 0, previous_.line);
+                    state_->emitter.emit_abc(OP_RETURNNIL, 0, 1, 0, previous_.line);
                 }
 
                 ObjFunc *fn = state_->emitter.end(state_->max_reg);
                 fn->is_generator = state_->is_generator;
                 fn->arity = is_vararg ? -(arity) : arity;
+                fn->generic_arity = generic_count;
 
                 /* Store default values */
                 fn->default_count = default_count;
@@ -728,12 +754,59 @@ namespace zen
                 ** place to run code. */
                 advance();
                 Token field_name = previous_;
-                consume(TOK_EQ, "Expected '=' after field name in class body.");
+
+                /* `name: Class`, `name: Class?`, `name: Class | None`, each
+                ** with an optional `= literal`. A class annotation is the
+                ** explicit form of what note_field_class() infers from
+                ** constructors: `self.left.check()` dispatches through the
+                ** vtable and `self.left.item` uses the checked index. Still
+                ** only a hint — a wrong one costs speed, never behaviour. */
+                bool has_field_class = false;
+                Token field_class_tok;
+                if (match(TOK_COLON))
+                {
+                    if (check(TOK_STRING) || check(TOK_FSTRING))
+                    {
+                        advance();
+                    }
+                    else
+                    {
+                        consume(TOK_IDENTIFIER, "Expected type name after ':'.");
+                        field_class_tok = previous_;
+                        has_field_class = !check(TOK_DOT) && !check(TOK_LBRACKET);
+                        while (match(TOK_DOT)) consume(TOK_IDENTIFIER, "Expected type name.");
+                        if (has_field_class)
+                            skip_nullable_suffix();
+                        if (match(TOK_LBRACKET))
+                        {
+                            int depth = 1;
+                            while (depth > 0 && !check(TOK_EOF))
+                            {
+                                if (match(TOK_LBRACKET)) depth++;
+                                else if (match(TOK_RBRACKET)) depth--;
+                                else advance();
+                            }
+                        }
+                    }
+                }
 
                 int literal_ki = -1;
-                if (!class_field_literal(literal_ki))
+                bool has_default = false;
+                if (match(TOK_EQ))
                 {
-                    error("A class body field must be a number, string, True, False or None.");
+                    if (!class_field_literal(literal_ki))
+                    {
+                        error("A class body field must be a number, string, True, False or None.");
+                        while (!check(TOK_NEWLINE) && !check(TOK_DEDENT) && !check(TOK_EOF))
+                            advance();
+                        match(TOK_NEWLINE);
+                        continue;
+                    }
+                    has_default = true;
+                }
+                else if (!has_field_class && !check(TOK_NEWLINE) && !check(TOK_DEDENT))
+                {
+                    error("Expected '=' after field name in class body.");
                     while (!check(TOK_NEWLINE) && !check(TOK_DEDENT) && !check(TOK_EOF))
                         advance();
                     match(TOK_NEWLINE);
@@ -743,11 +816,19 @@ namespace zen
                 const int field_idx = add_class_field(token_string(field_name));
                 if (field_idx < 0)
                     error("Too many fields in class body.");
-                else if (class_field_default_count_ < kMaxClassFields)
+                else
                 {
-                    class_field_defaults_[class_field_default_count_].field_index = field_idx;
-                    class_field_defaults_[class_field_default_count_].const_index = literal_ki;
-                    class_field_default_count_++;
+                    if (has_default && class_field_default_count_ < kMaxClassFields)
+                    {
+                        class_field_defaults_[class_field_default_count_].field_index = field_idx;
+                        class_field_defaults_[class_field_default_count_].const_index = literal_ki;
+                        class_field_default_count_++;
+                    }
+                    if (has_field_class)
+                    {
+                        class_field_class_[field_idx] = field_class_tok;
+                        class_field_class_state_[field_idx] = 3; /* annotated: fixed */
+                    }
                 }
 
                 match(TOK_NEWLINE);
@@ -781,6 +862,19 @@ namespace zen
                                          def.const_index, previous_.line);
         }
         class_field_default_count_ = prev_field_default_count;
+
+        /* Flatten the parent's vtable into this class's now-complete vtable
+        ** (every OP_SETFIELD from the body above may have grown it): makes
+        ** an inherited, non-overridden method resolve in O(1) at every call
+        ** site instead of walking ->parent every time. Only classes with a
+        ** parent need this — a root class's vtable already IS its own. */
+        if (class_has_parent_)
+            state_->emitter.emit_abc(OP_CLASSFLATTEN, class_reg, 0, 0, previous_.line);
+
+        /* Game-facing classes are closed after their declaration. This
+        ** prevents runtime method replacement from invalidating the static
+        ** assumptions used by OP_INVOKE_VT. */
+        state_->emitter.emit_abc(OP_CLASSSEAL, class_reg, 0, 0, previous_.line);
 
         free_reg(class_reg);
 
@@ -1181,17 +1275,41 @@ namespace zen
                 if (check(TOK_COLON))
                 {
                     advance(); /* consume ':' */
-                    /* skip type expression: string literal, identifier (dotted/generic), etc. */
+                    /* Capture a simple (non-dotted, non-subscripted) type name
+                    ** so a class annotation — `c: Container = Container()` —
+                    ** can feed receiver_class() and let obj.method<T>(...) be
+                    ** recognised on `c` later. Also preserve the element
+                    ** class in an explicit `Array[Enemy]` annotation so
+                    ** `enemies[i].update()` has a known receiver. */
+                    bool has_simple_type = false;
+                    bool has_array_element_type = false;
+                    Token type_tok;
+                    Token array_element_tok;
                     if (check(TOK_STRING) || check(TOK_FSTRING))
                     {
                         advance(); /* quoted type hint like 'list[int]' */
                     }
                     else if (check(TOK_IDENTIFIER))
                     {
+                        type_tok = current_;
                         advance();
+                        has_simple_type = !check(TOK_DOT) && !check(TOK_LBRACKET);
                         while (match(TOK_DOT)) consume(TOK_IDENTIFIER, "Expected type name.");
+                        if (has_simple_type)
+                            skip_nullable_suffix();
                         if (match(TOK_LBRACKET))
                         {
+                            /* Only Array[Class] is a VM performance hint.
+                            ** Other parameterized hints remain syntax we
+                            ** accept and skip, as before. */
+                            const bool is_array = type_tok.length == 5 &&
+                                memcmp(type_tok.start, "Array", 5) == 0;
+                            if (is_array && check(TOK_IDENTIFIER))
+                            {
+                                array_element_tok = current_;
+                                advance();
+                                has_array_element_type = check(TOK_RBRACKET);
+                            }
                             int depth = 1;
                             while (depth > 0 && !check(TOK_EOF))
                             {
@@ -1207,18 +1325,64 @@ namespace zen
                         int local = resolve_local(state_, name_tok);
                         if (local >= 0)
                         {
+                            if (has_simple_type)
+                                set_local_type_hint(local, type_tok);
+                            else if (has_array_element_type)
+                                set_local_array_element_type(local, array_element_tok);
                             int val = expression(local);
                             if (val != local) emit_move(local, val);
                         }
+                        else if (state_->parent != nullptr && !is_declared_global(name_tok))
+                        {
+                            /* An annotation does not change Python's local
+                            ** binding rule. `x: Type = expr` inside a
+                            ** function must create the same function-local
+                            ** x as `x = expr`, not write a global every time
+                            ** through a hot loop. */
+                            int local_reg = add_local(name_tok);
+                            state_->locals[state_->local_count - 1].depth = 1;
+                            if (has_simple_type)
+                                set_local_type_hint(local_reg, type_tok);
+                            else if (has_array_element_type)
+                                set_local_array_element_type(local_reg, array_element_tok);
+                            int val = expression(local_reg);
+                            if (val != local_reg) emit_move(local_reg, val);
+                        }
                         else
                         {
-                        int gidx = find_or_add_global(name_tok.start, name_tok.length);
+                            int gidx = find_or_add_global(name_tok.start, name_tok.length);
+                            note_global_written_in_function(gidx);
+                            if (has_simple_type)
+                                set_global_type_hint(gidx, type_tok);
+                            else if (has_array_element_type)
+                                set_global_array_element_type(gidx, array_element_tok);
                             int val = expression(-1);
                             state_->emitter.emit_abx(OP_SETGLOBAL, val, gidx, name_tok.line);
                             free_reg(val);
                         }
                     }
-                    /* else: pure annotation — no code */
+                    /* else: pure annotation — no code, but still record the
+                    ** type for a bare `c: Container` followed by later
+                    ** `c = Container()` plain assignment. */
+                    else if (has_simple_type || has_array_element_type)
+                    {
+                        int local = resolve_local(state_, name_tok);
+                        if (local >= 0)
+                        {
+                            if (has_simple_type)
+                                set_local_type_hint(local, type_tok);
+                            else
+                                set_local_array_element_type(local, array_element_tok);
+                        }
+                        else
+                        {
+                            int gidx = find_or_add_global(name_tok.start, name_tok.length);
+                            if (has_simple_type)
+                                set_global_type_hint(gidx, type_tok);
+                            else
+                                set_global_array_element_type(gidx, array_element_tok);
+                        }
+                    }
                     return;
                 }
                 else
@@ -1263,9 +1427,13 @@ namespace zen
                         ** Use dest=-1 because the RHS may reference this same local
                         ** (e.g. `a = a + 1` or `b = temp + b`). Using dest=local would
                         ** overwrite the local before the RHS finishes reading it. */
+                        int rhs_start = state_->emitter.current_offset();
+                        int jumps_before = state_->emitter.jump_count();
                         int val = expression(-1);
-                        if (val != local) emit_move(local, val);
+                        if (!retarget_last_producer(rhs_start, jumps_before, val, local))
+                            emit_move(local, val);
                         free_reg(val);
+                        infer_assigned_class_local(local);
                     }
                     else
                     {
@@ -1277,6 +1445,7 @@ namespace zen
                         state_->locals[state_->local_count - 1].depth = 1;
                         int val = expression(local_reg);
                         if (val != local_reg) emit_move(local_reg, val);
+                        infer_assigned_class_local(local_reg);
                     }
                     return;
                 }
@@ -1306,31 +1475,52 @@ namespace zen
 
     void Compiler::if_statement()
     {
-        /* Condition */
-        int cond = expression(-1);
-        int then_jump = state_->emitter.emit_jump(OP_JMPIFNOT, cond, previous_.line);
-        free_reg(cond);
+        /* Condition: a plain expression branches once; an and/or chain
+        ** has already been turned into its jumps by condition(). */
+        CondJump then_jumps[kMaxCondJumps];
+        int n_then = 0;
+        int cond = condition(then_jumps, n_then);
+        if (cond >= 0)
+        {
+            then_jumps[0].offset = cond_false_jump(cond, then_jumps[0].fused);
+            n_then = 1;
+        }
 
         /* Then block */
         colon_block();
 
         /* Jump over else/elif */
         int else_jump = state_->emitter.emit_jump(OP_JMP, 0, previous_.line);
-        state_->emitter.patch_jump(then_jump);
+        patch_cond_jumps(then_jumps, n_then);
+
+        /* No elif/else: that jump would be a `JMP +0` executed every time
+        ** the body runs. Drop it and land the condition's false jumps here. */
+        if (!check(TOK_ELIF) && !check(TOK_ELSE) &&
+            state_->emitter.current_offset() == else_jump + 1)
+        {
+            state_->emitter.shrink_to(else_jump);
+            patch_cond_jumps(then_jumps, n_then);
+            return;
+        }
 
         /* elif chains */
         while (match(TOK_ELIF))
         {
-            int elif_cond = expression(-1);
-            int elif_jump = state_->emitter.emit_jump(OP_JMPIFNOT, elif_cond, previous_.line);
-            free_reg(elif_cond);
+            CondJump elif_jumps[kMaxCondJumps];
+            int n_elif = 0;
+            int elif_cond = condition(elif_jumps, n_elif);
+            if (elif_cond >= 0)
+            {
+                elif_jumps[0].offset = cond_false_jump(elif_cond, elif_jumps[0].fused);
+                n_elif = 1;
+            }
 
             colon_block();
 
             /* Patch previous else_jump to here, set new one */
             state_->emitter.patch_jump(else_jump);
             else_jump = state_->emitter.emit_jump(OP_JMP, 0, previous_.line);
-            state_->emitter.patch_jump(elif_jump);
+            patch_cond_jumps(elif_jumps, n_elif);
         }
 
         /* else */
@@ -1436,15 +1626,82 @@ namespace zen
         int loop_idx = state_->loop_depth++;
         LoopInfo &loop = state_->loops[loop_idx];
         loop.break_count = 0;
+        loop.continue_count = 0;
+        loop.continue_forward = false;
         loop.scope_depth = state_->scope_depth;
 
         int loop_start = state_->emitter.current_offset();
         loop.start_offset = loop_start;
+        int jumps_at_start = state_->emitter.jump_count();
+        int regs_at_start = state_->next_reg;
 
-        /* Condition */
-        int cond = expression(-1);
-        int exit_jump = state_->emitter.emit_jump(OP_JMPIFNOT, cond, previous_.line);
-        free_reg(cond);
+        /* Condition (an and/or chain is already compiled to jumps) */
+        CondJump exit_jumps[kMaxCondJumps];
+        int n_exit = 0;
+        int cond = condition(exit_jumps, n_exit);
+
+        /* Loop-invariant literal: `while i < 5000000` reloads the constant
+        ** on every iteration. When the condition is exactly
+        **     [one single-word load of the left operand, or nothing]
+        **     LOADK/LOADI  tmp
+        **     LT/LE/EQ     cond, left, tmp
+        ** load the literal once before the loop instead and keep its
+        ** register reserved for the body. Same code, one dispatch fewer
+        ** per iteration. */
+        int hoisted_reg = -1;
+        if (cond >= 0)
+        {
+            Emitter &e = state_->emitter;
+            int off = e.current_offset() - 1;
+            int ncond = e.current_offset() - loop_start;
+            if ((ncond == 2 || ncond == 3) && e.jump_count() == jumps_at_start && e.last_op_start() == off)
+            {
+                Instruction cmp = e.instruction_at(off);
+                Instruction ld = e.instruction_at(off - 1);
+                OpCode cop = (OpCode)ZEN_OP(cmp);
+                OpCode lop = (OpCode)ZEN_OP(ld);
+                bool left_ok = true;
+                if (ncond == 3)
+                {
+                    OpCode fop = (OpCode)ZEN_OP(e.instruction_at(loop_start));
+                    left_ok = fop == OP_GETGLOBAL || fop == OP_GETUPVAL || fop == OP_MOVE ||
+                              fop == OP_GETFIELD_IDX || fop == OP_LEN;
+                }
+                /* An int8 literal is better served by the compare-immediate
+                ** branch (no register at all): leave that to emit_cond_jump. */
+                bool small_imm = lop == OP_LOADI && ZEN_SBX(ld) >= -128 && ZEN_SBX(ld) <= 127 &&
+                                 (cop == OP_LT || cop == OP_LE);
+                if (left_ok && !small_imm && (cop == OP_LT || cop == OP_LE || cop == OP_EQ) && ZEN_A(cmp) == cond &&
+                    (lop == OP_LOADK || lop == OP_LOADI) &&
+                    ZEN_A(ld) == ZEN_C(cmp) && ZEN_B(cmp) != ZEN_C(cmp) && !is_local_reg(ZEN_C(cmp)))
+                {
+                    Instruction first = e.instruction_at(loop_start);
+                    int first_line = e.line_at(loop_start);
+                    int ld_line = e.line_at(off - 1);
+                    int cmp_line = e.line_at(off);
+                    e.shrink_to(loop_start);
+                    if (lop == OP_LOADK)
+                        e.emit_abx(OP_LOADK, ZEN_A(ld), (int)(ld & 0xFFFF), ld_line);
+                    else
+                        e.emit_asbx(OP_LOADI, ZEN_A(ld), ZEN_SBX(ld), ld_line);
+                    loop_start = e.current_offset();
+                    loop.start_offset = loop_start;
+                    if (ncond == 3)
+                        e.emit_abc((OpCode)ZEN_OP(first), ZEN_A(first), ZEN_B(first), ZEN_C(first), first_line);
+                    e.emit_abc(cop, ZEN_A(cmp), ZEN_B(cmp), ZEN_C(cmp), cmp_line);
+                    hoisted_reg = ZEN_C(cmp);
+                }
+            }
+        }
+
+        if (cond >= 0)
+        {
+            exit_jumps[0].offset = cond_false_jump(cond, exit_jumps[0].fused);
+            n_exit = 1;
+        }
+        /* Keep the hoisted literal's register out of the body's reach. */
+        if (hoisted_reg >= 0 && state_->next_reg <= hoisted_reg)
+            state_->next_reg = hoisted_reg + 1;
 
         /* Body */
         colon_block();
@@ -1453,7 +1710,9 @@ namespace zen
         state_->emitter.emit_loop(loop_start, 0, previous_.line);
 
         /* Patch exit */
-        state_->emitter.patch_jump(exit_jump);
+        patch_cond_jumps(exit_jumps, n_exit);
+        if (hoisted_reg >= 0 && state_->next_reg == hoisted_reg + 1)
+            state_->next_reg = regs_at_start;
 
         /* Patch breaks */
         for (int i = 0; i < loop.break_count; i++)
@@ -1477,7 +1736,7 @@ namespace zen
         begin_scope();
 
         /* Loop variable(s) — detect tuple unpack: for k, v in ... */
-        consume(TOK_IDENTIFIER, "Expected variable name after 'for'.");
+        if (!match(TOK_UNDERSCORE)) consume(TOK_IDENTIFIER, "Expected variable name after 'for'.");
         Token var_names[8];
         int var_count = 1;
         var_names[0] = previous_;
@@ -1491,10 +1750,112 @@ namespace zen
 
         consume(TOK_IN, "Expected 'in' after variable name.");
 
+        /* Numeric loop: `for i in range(a, b, step)`.
+        **
+        ** Instead of allocating a range object and stepping it through the
+        ** generic FOR_ITER protocol, keep the schedule in three registers
+        ** and let one FORLOOP per iteration advance the counter, refresh
+        ** the loop variable and branch:
+        **
+        **     R[base]   counter        R[base+1] stop → iterations left
+        **     R[base+2] step           R[base+3] the loop variable
+        **
+        **     <args into base..base+2>
+        **     FORPREP base -> exit        ; validates, counts, sets R[base+3]
+        **   body:
+        **     ...                         ; `continue` jumps to FORLOOP
+        **     FORLOOP base -> body
+        **   exit:
+        **
+        ** Same observable behaviour as iterating the range object: the
+        ** iteration count is fixed on entry, rebinding `i` in the body
+        ** does not alter the schedule, and step 0 is the same error. */
+        if (var_count == 1 && builtin_range_call_ahead())
+        {
+            advance(); /* range */
+            advance(); /* ( */
+            int base = alloc_reg();
+            int stop_reg = alloc_reg();
+            int step_reg = alloc_reg();
+            int args[3];
+            int nargs = 0;
+            if (!check(TOK_RPAREN))
+            {
+                do
+                {
+                    if (nargs == 3)
+                    {
+                        error("range() expects 1-3 arguments.");
+                        break;
+                    }
+                    args[nargs++] = expression(-1);
+                } while (match(TOK_COMMA));
+            }
+            consume(TOK_RPAREN, "Expected ')' after range() arguments.");
+            if (nargs == 0)
+                error("range() expects 1-3 arguments.");
+            int line = previous_.line;
+            if (nargs == 1)
+            {
+                state_->emitter.emit_asbx(OP_LOADI, base, 0, line);
+                emit_move(stop_reg, args[0]);
+                state_->emitter.emit_asbx(OP_LOADI, step_reg, 1, line);
+            }
+            else if (nargs >= 2)
+            {
+                emit_move(base, args[0]);
+                emit_move(stop_reg, args[1]);
+                if (nargs == 3)
+                    emit_move(step_reg, args[2]);
+                else
+                    state_->emitter.emit_asbx(OP_LOADI, step_reg, 1, line);
+            }
+            /* Argument temporaries are dead now; the loop variable must be
+            ** the register right above step. */
+            state_->next_reg = step_reg + 1;
+            int var_reg = add_local(var_names[0]);
+            if (var_reg != base + 3)
+                error("internal: numeric for register layout.");
+
+            int loop_idx = state_->loop_depth++;
+            LoopInfo &loop = state_->loops[loop_idx];
+            loop.break_count = 0;
+            loop.continue_count = 0;
+            loop.continue_forward = true;
+            loop.scope_depth = state_->scope_depth;
+
+            int prep = state_->emitter.emit_asbx(OP_FORPREP, base, 0, line);
+            int loop_start = state_->emitter.current_offset();
+            loop.start_offset = loop_start;
+
+            colon_block();
+
+            for (int i = 0; i < loop.continue_count; i++)
+                state_->emitter.patch_jump(loop.continues[i]);
+            int back = loop_start - (state_->emitter.current_offset() + 1);
+            state_->emitter.emit_asbx(OP_FORLOOP, base, back, previous_.line);
+            state_->emitter.patch_jump(prep);
+
+            for (int i = 0; i < loop.break_count; i++)
+                state_->emitter.patch_jump(loop.breaks[i]);
+
+            state_->loop_depth--;
+            end_scope();
+            /* end_scope released the loop variable; the schedule registers
+            ** below it are dead too. */
+            if (state_->next_reg == base + 3)
+                state_->next_reg = base;
+            return;
+        }
+
         /* Iterable expression — R[iter_reg] */
         int iter_reg = alloc_reg();
         int iter_result = expression(iter_reg);
         if (iter_result != iter_reg) emit_move(iter_reg, iter_result);
+        /* Whatever the iterable expression allocated above iter_reg (an
+        ** array literal's element temps, for one) is dead now; the index
+        ** MUST land in iter_reg + 1 or FOR_NEXT reads a stale register. */
+        state_->next_reg = iter_reg + 1;
 
         /* Index counter — R[iter_reg+1] (used by FOR_ITER for arrays) */
         int idx_reg = alloc_reg(); /* must be iter_reg + 1 */
@@ -1518,13 +1879,17 @@ namespace zen
         int loop_idx = state_->loop_depth++;
         LoopInfo &loop = state_->loops[loop_idx];
         loop.break_count = 0;
+        loop.continue_count = 0;
+        loop.continue_forward = false;
         loop.scope_depth = state_->scope_depth;
 
+        /* The step lives at the bottom (OP_FOR_NEXT): enter through a jump
+        ** to it, which yields the first element or leaves at once. One
+        ** dispatch per iteration instead of FOR_ITER + JMP. */
+        loop.continue_forward = true;
+        int entry_jump = state_->emitter.emit_jump(OP_JMP, 0, previous_.line);
         int loop_start = state_->emitter.current_offset();
         loop.start_offset = loop_start;
-
-        /* FOR_ITER: R[var_reg] = next(R[iter_reg]); if done → exit */
-        int exit_jump = state_->emitter.emit_for_iter(var_reg, iter_reg, previous_.line);
 
         /* Tuple unpack: R[var_reg] is an array — extract into individual locals */
         if (var_count > 1)
@@ -1544,11 +1909,11 @@ namespace zen
         /* Body */
         colon_block();
 
-        /* Loop back */
-        state_->emitter.emit_loop(loop_start, 0, previous_.line);
-
-        /* Patch exit */
-        state_->emitter.patch_for_iter(exit_jump);
+        /* `continue` and the loop entry both land on the step. */
+        for (int i = 0; i < loop.continue_count; i++)
+            state_->emitter.patch_jump(loop.continues[i]);
+        state_->emitter.patch_jump(entry_jump);
+        state_->emitter.emit_for_next(var_reg, iter_reg, loop_start, previous_.line);
 
         /* Patch breaks */
         for (int i = 0; i < loop.break_count; i++)
@@ -1568,11 +1933,12 @@ namespace zen
         {
             /* return None */
             close_captured_locals();
-            state_->emitter.emit_abc(OP_LOADNIL, 0, 0, 0, previous_.line);
-            state_->emitter.emit_abc(OP_RETURN, 0, 1, 0, previous_.line);
+            state_->emitter.emit_abc(OP_RETURNNIL, 0, 1, 0, previous_.line);
         }
         else
         {
+            int ret_rhs_start = state_->emitter.current_offset();
+            int ret_jumps_before = state_->emitter.jump_count();
             int reg = expression(-1);
 
             /* Tuple return: return a, b, c
@@ -1664,8 +2030,16 @@ namespace zen
             }
             else
             {
+                /* Write the value into R[0] from its producer instead of a
+                ** MOVE — but never ahead of an OP_CLOSE: a captured R[0]
+                ** must be closed over with its own value, not the result. */
+                bool any_captured = false;
+                for (int i = 0; i < state_->local_count; i++)
+                    if (state_->locals[i].captured) any_captured = true;
+                bool placed = !any_captured &&
+                              retarget_last_producer(ret_rhs_start, ret_jumps_before, reg, 0);
                 close_captured_locals();
-                if (reg != 0) emit_move(0, reg);
+                if (!placed && reg != 0) emit_move(0, reg);
                 state_->emitter.emit_abc(OP_RETURN, 0, 1, 0, previous_.line);
             }
         }
@@ -1699,7 +2073,78 @@ namespace zen
             return;
         }
         LoopInfo &loop = state_->loops[state_->loop_depth - 1];
+        if (loop.continue_forward)
+        {
+            if (loop.continue_count >= 64)
+            {
+                error("Too many continue statements in loop.");
+                return;
+            }
+            loop.continues[loop.continue_count++] = state_->emitter.emit_jump(OP_JMP, 0, previous_.line);
+            return;
+        }
         state_->emitter.emit_loop(loop.start_offset, 0, previous_.line);
+    }
+
+    bool Compiler::builtin_range_call_ahead()
+    {
+        if (!check(TOK_IDENTIFIER) || current_.length != 5 ||
+            memcmp(current_.start, "range", 5) != 0)
+            return false;
+        Token name = current_;
+        /* Anything that rebinds the name in this file makes it not the
+        ** builtin: a local or enclosing local, a `global range`, a def or
+        ** class called range. A module-level `range = ...` assignment is
+        ** not visible to a single pass and is not supported. */
+        for (CompilerState *s = state_; s != nullptr; s = s->parent)
+        {
+            for (int i = s->local_count - 1; i >= 0; i--)
+                if (identifiers_equal(s->locals[i].name, name))
+                    return false;
+        }
+        if (is_declared_global(name))
+            return false;
+        if (find_signature(nullptr, 0, name.start, name.length) ||
+            find_sig_class(name.start, name.length))
+            return false;
+
+        /* Shape: `range(` with plain positional arguments — no spread, no
+        ** keyword — closed on the same logical line. */
+        LexerState saved_lex = lexer_.save_state();
+        Token saved_cur = current_;
+        Token saved_prev = previous_;
+        advance();
+        bool ok = check(TOK_LPAREN);
+        if (ok)
+        {
+            int depth = 0;
+            for (;;)
+            {
+                advance();
+                if (check(TOK_EOF) || check(TOK_NEWLINE) || check(TOK_ERROR))
+                {
+                    ok = false;
+                    break;
+                }
+                if (check(TOK_LPAREN) || check(TOK_LBRACKET) || check(TOK_LBRACE))
+                    depth++;
+                else if (check(TOK_RPAREN) || check(TOK_RBRACKET) || check(TOK_RBRACE))
+                {
+                    if (depth == 0)
+                        break;
+                    depth--;
+                }
+                else if (depth == 0 && (check(TOK_STAR) || check(TOK_DSTAR) || check(TOK_EQ)))
+                {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        lexer_.restore_state(saved_lex);
+        current_ = saved_cur;
+        previous_ = saved_prev;
+        return ok;
     }
 
     /* =========================================================
@@ -1770,15 +2215,67 @@ namespace zen
             return;
         }
 
+        /* Values first, then `sep=` / `end=` keywords (any order); all the
+        ** registers stay live until everything is emitted. */
+        int saved_next = state_->next_reg;
+        static const int kMaxPrintArgs = 64;
+        int vals[kMaxPrintArgs];
+        int nvals = 0;
+        int sep_reg = -1, end_reg = -1;
         do
         {
-            int reg = expression(-1);
-            bool last = check(TOK_RPAREN);
-            state_->emitter.emit_abc(OP_PRINT, reg, last ? 1 : 0, 0, previous_.line);
-            free_reg(reg);
+            if (next_is_keyword_arg())
+            {
+                Token kw = current_;
+                advance(); /* name */
+                advance(); /* '=' */
+                int r = expression(-1);
+                if (kw.length == 3 && memcmp(kw.start, "sep", 3) == 0)
+                    sep_reg = r;
+                else if (kw.length == 3 && memcmp(kw.start, "end", 3) == 0)
+                    end_reg = r;
+                else
+                    error("print() only accepts the keywords sep= and end=.");
+                continue;
+            }
+            if (nvals >= kMaxPrintArgs)
+            {
+                error("Too many arguments to print().");
+                return;
+            }
+            vals[nvals++] = expression(-1);
         } while (match(TOK_COMMA));
-
         consume(TOK_RPAREN, "Expected ')' after print arguments.");
+
+        if (sep_reg < 0 && end_reg < 0)
+        {
+            for (int i = 0; i < nvals; i++)
+                state_->emitter.emit_abc(OP_PRINT, vals[i], i == nvals - 1 ? 1 : 0, 0, previous_.line);
+        }
+        else
+        {
+            /* C=2: the value alone; the separator and the end are printed as
+            ** values themselves (a string prints raw). */
+            int space_reg = -1;
+            if (sep_reg < 0 && nvals > 1)
+            {
+                space_reg = alloc_reg();
+                int ki = state_->emitter.add_string_constant(" ", 1);
+                state_->emitter.emit_abx(OP_LOADK, space_reg, ki, previous_.line);
+                sep_reg = space_reg;
+            }
+            for (int i = 0; i < nvals; i++)
+            {
+                state_->emitter.emit_abc(OP_PRINT, vals[i], 0, 2, previous_.line);
+                if (i < nvals - 1)
+                    state_->emitter.emit_abc(OP_PRINT, sep_reg, 0, 2, previous_.line);
+            }
+            if (end_reg >= 0)
+                state_->emitter.emit_abc(OP_PRINT, end_reg, 0, 2, previous_.line);
+            else
+                state_->emitter.emit_abc(OP_PRINT, 0, 1, 1, previous_.line); /* just the newline */
+        }
+        state_->next_reg = saved_next;
     }
 
     /* =========================================================
@@ -1787,10 +2284,14 @@ namespace zen
 
     void Compiler::store_to_lhs(const Token &name, int src_reg)
     {
+        /* Unpacked values have no single constructor expression behind
+        ** them: an inferred class on the target is dropped. */
+        last_expr_ctor_valid_ = false;
         int local = resolve_local(state_, name);
         if (local != -1)
         {
             if (local != src_reg) emit_move(local, src_reg);
+            infer_assigned_class_local(local);
             return;
         }
         int upval = resolve_upvalue(state_, name);
@@ -1802,6 +2303,8 @@ namespace zen
         /* Global */
         int gidx = find_or_add_global(name.start, name.length);
         state_->emitter.emit_abx(OP_SETGLOBAL, src_reg, gidx, name.line);
+        note_global_written_in_function(gidx);
+        infer_assigned_class_global(gidx);
     }
 
     void Compiler::expression_statement()
@@ -1890,7 +2393,10 @@ namespace zen
             int rhs_start = state_->emitter.current_offset();
                 state_->next_reg = rhs_base + lhs_count;
             if (state_->next_reg > state_->max_reg) state_->max_reg = state_->next_reg;
+            bool saved_multi_rhs = multi_assign_rhs_;
+            multi_assign_rhs_ = true; /* keep the call patchable: see patch_c_at below */
             int r0 = expression(rhs_base);
+            multi_assign_rhs_ = saved_multi_rhs;
 
             if (check(TOK_COMMA))
             {
@@ -1947,7 +2453,8 @@ namespace zen
                 {
                     Instruction instr = state_->emitter.instruction_at(off);
                     uint32_t op = (instr >> 24);
-                    if (op == (uint32_t)OP_CALL || op == (uint32_t)OP_INVOKE) { call_offset = off; break; }
+                    if (op == (uint32_t)OP_CALL || op == (uint32_t)OP_CALLGLOBAL ||
+                        op == (uint32_t)OP_INVOKE || op == (uint32_t)OP_INVOKE_VT) { call_offset = off; break; }
                 }
                 if (call_offset < 0)
                 {

@@ -5,6 +5,7 @@
 /build_asan
 /build_baseline
 /build_*/
+/build-*/
 /build-web/
 /build-android/
 /build-mingw/

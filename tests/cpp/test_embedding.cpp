@@ -103,6 +103,87 @@ static void test_native_from_script()
 }
 
 /* =========================================================
+** TEST 1b: C++ -> native boundary hardening
+** ========================================================= */
+static int native_zero_result(VM *vm, Value *args, int nargs)
+{
+    (void)vm; (void)nargs;
+    args[0] = val_int(42);
+    return 1;
+}
+
+static int g_native_method_calls = 0;
+static int g_cpp_native_was_paused = 0;
+
+static int native_sum_many(VM *vm, Value *args, int nargs)
+{
+    (void)vm;
+    if (!is_instance(args[-1]))
+        return -1;
+    g_native_method_calls++;
+    int64_t total = 0;
+    for (int i = 0; i < nargs; i++)
+        total += args[i].as.integer;
+    args[0] = val_int(total);
+    return 1;
+}
+
+static int native_gc_safe_probe(VM *vm, Value *args, int nargs)
+{
+    (void)nargs;
+    g_cpp_native_was_paused = vm->get_gc().pause_depth > 0;
+    args[0] = val_bool(g_cpp_native_was_paused != 0);
+    return 1;
+}
+
+static void test_cpp_native_boundary()
+{
+    printf("\n[Test 1b] C++ -> native call boundary\n");
+
+    VM vm;
+    vm.open_lib_globals(&zen_lib_base);
+    vm.def_native("zero_result", native_zero_result, 0);
+    vm.def_native("gc_safe_probe", native_gc_safe_probe, 0, ZEN_NATIVE_GC_SAFE);
+
+    TEST("zero-arg native returns safely through call_global");
+    Value r = vm.call_global("zero_result", nullptr, 0);
+    CHECK(!vm.had_error() && is_int(r) && r.as.integer == 42, "expected 42");
+
+    TEST("GC_SAFE native is paused through C++ call_global");
+    g_cpp_native_was_paused = 0;
+    r = vm.call_global("gc_safe_probe", nullptr, 0);
+    CHECK(!vm.had_error() && is_bool(r) && r.as.boolean && g_cpp_native_was_paused,
+          "C++ argument storage was not protected from GC");
+
+    ObjClass *klass = vm.def_class("ManyArgs")
+        .method("sum_many", native_sum_many, -1)
+        .end();
+    Value instance = vm.make_instance(klass);
+    Value args[20];
+    for (int i = 0; i < 20; i++)
+        args[i] = val_int(i + 1);
+
+    TEST("native method receives self at args[-1] and all 20 arguments");
+    g_native_method_calls = 0;
+    r = vm.invoke(instance, "sum_many", args, 20);
+    CHECK(!vm.had_error() && is_int(r) && r.as.integer == 210 && g_native_method_calls == 1,
+          "receiver convention or arguments beyond 16 were lost");
+
+    TEST("invalid C++ native arguments report an error, not a crash");
+    r = vm.invoke(instance, "sum_many", nullptr, 1);
+    CHECK(vm.had_error() && is_nil(r) && g_native_method_calls == 1,
+          "invalid argument window reached the native");
+
+    TEST("invalid C++ receiver reports an error, not a cast");
+    r = vm.invoke(val_int(1), "sum_many", nullptr, 0);
+    CHECK(vm.had_error() && is_nil(r), "non-instance receiver was accepted");
+
+    TEST("out-of-range C++ global index reports an error");
+    r = vm.call_global(vm.num_globals() + 1, nullptr, 0);
+    CHECK(vm.had_error() && is_nil(r), "out-of-range global index was accepted");
+}
+
+/* =========================================================
 ** TEST 2: Script defines function, C++ calls it
 ** ========================================================= */
 static void test_call_script_from_cpp()
@@ -123,6 +204,9 @@ def fib(n):
     if n < 2:
         return n
     return fib(n - 1) + fib(n - 2)
+
+def first_plus_rest(first, *rest):
+    return first + len(rest)
 )");
 
     TEST("call_global('square', 7) == 49");
@@ -146,6 +230,16 @@ def fib(n):
     args[0] = val_int(10);
     result = vm.call_global("fib", args, 1);
     CHECK(result.type == VAL_INT && result.as.integer == 55, "expected 55");
+
+    TEST("call_global packs *args like a script call");
+    Value varargs[4] = { val_int(10), val_int(1), val_int(2), val_int(3) };
+    result = vm.call_global("first_plus_rest", varargs, 4);
+    CHECK(!vm.had_error() && result.type == VAL_INT && result.as.integer == 13,
+          "expected first + 3 packed args");
+
+    TEST("call_global validates script arity before entering the VM");
+    result = vm.call_global("square", nullptr, 0);
+    CHECK(vm.had_error() && is_nil(result), "wrong arity was accepted");
 }
 
 /* =========================================================
@@ -194,6 +288,12 @@ result = apply_twice(inc, 10)
 )");
     r = vm.get_global("result");
     CHECK(r.type == VAL_INT && r.as.integer == 12, "expected 12");
+
+    TEST("C++ -> native -> Zen callback has no synthetic caller frame");
+    Value callback_args[2] = { vm.get_global("double"), val_int(5) };
+    r = vm.call_global("apply_twice", callback_args, 2);
+    CHECK(!vm.had_error() && r.type == VAL_INT && r.as.integer == 20,
+          "direct native callback did not return 20");
 }
 
 /* =========================================================
@@ -909,6 +1009,227 @@ static void test_resume_fiber_error_handling()
 }
 
 /* =========================================================
+** TEST 13: ClassBuilder::generic_method() — native reified generics
+**
+** The motivating use case: entity.get_component<Transform>(), where
+** Entity/Transform are native C++ classes (ClassBuilder), not script
+** classes. Container stores at most one component per native_data slot
+** keyed by ObjClass* (a tiny fixed table is enough for the test); the
+** generic method reads its single type argument to pick which slot.
+** ========================================================= */
+static const int kMaxComponentSlots = 4;
+struct ContainerData {
+    ObjClass *slot_class[kMaxComponentSlots];
+    Value slot_value[kMaxComponentSlots];
+    int count;
+};
+
+static void *container_ctor(VM *vm, int argc, Value *args)
+{
+    (void)vm; (void)argc; (void)args;
+    ContainerData *c = (ContainerData *)malloc(sizeof(ContainerData));
+    c->count = 0;
+    return c;
+}
+
+static void container_dtor(VM *vm, void *data)
+{
+    (void)vm;
+    free(data);
+}
+
+/* container.add_component(instance) — files it under instance's own class. */
+static int container_add_component(VM *vm, Value *args, int nargs)
+{
+    (void)vm; (void)nargs;
+    ContainerData *c = zen_instance_data<ContainerData>(args[-1]);
+    Value comp = args[0];
+    if (!is_instance(comp) || c->count >= kMaxComponentSlots)
+    {
+        return 0;
+    }
+    ObjClass *klass = as_instance(comp)->klass;
+    for (int i = 0; i < c->count; i++)
+    {
+        if (c->slot_class[i] == klass)
+        {
+            c->slot_value[i] = comp; /* replace */
+            return 0;
+        }
+    }
+    c->slot_class[c->count] = klass;
+    c->slot_value[c->count] = comp;
+    c->count++;
+    return 0;
+}
+
+/* container.get_component<T>() — the reified-generics native entry point. */
+static int container_get_component(VM *vm, Value receiver, Value *type_args, int ntype_args,
+                                    Value *args, int nargs)
+{
+    (void)vm; (void)args; (void)nargs;
+    if (ntype_args != 1 || !is_class(type_args[0]))
+        return 0; /* the VM already validates this before calling us — belt and suspenders */
+    ObjClass *wanted = as_class(type_args[0]);
+    ContainerData *c = zen_instance_data<ContainerData>(receiver);
+    for (int i = 0; i < c->count; i++)
+    {
+        if (c->slot_class[i] == wanted)
+        {
+            args[0] = c->slot_value[i];
+            return 1;
+        }
+    }
+    args[0] = val_nil();
+    return 1;
+}
+
+/* Regression: a GenericNativeFn signaling failure (nret < 0, same
+** convention as plain NativeFn) must surface as a runtime error, not be
+** silently swallowed into a nil result. */
+static int container_always_fails(VM *vm, Value receiver, Value *type_args, int ntype_args,
+                                   Value *args, int nargs)
+{
+    (void)vm; (void)receiver; (void)type_args; (void)ntype_args; (void)args; (void)nargs;
+    return -1;
+}
+
+static void test_generic_native_method()
+{
+    printf("\n[Test 13] ClassBuilder::generic_method() — entity.get_component<T>()\n");
+
+    VM vm;
+    vm.open_lib_globals(&zen_lib_base);
+
+    vm.def_class("Container")
+        .ctor(container_ctor)
+        .dtor(container_dtor)
+        .method("add_component", container_add_component, 1)
+        .generic_method("get_component", container_get_component, /*generic_arity=*/1, /*arity=*/0)
+        .generic_method("always_fails", container_always_fails, /*generic_arity=*/1, /*arity=*/0)
+        .end();
+
+    /* Note: `c: Container = Container()` — the explicit class annotation is
+    ** what lets the compiler know `c`'s static type at a call site with no
+    ** other source of type information (Container is a native class, so
+    ** there's no script `def` for the pre-scan to have seen). Without the
+    ** annotation, obj.method<T>(...) can never be told apart from chained
+    ** comparisons written without spaces — see generic_call_ahead(). */
+    TEST("Two different components on the same container round-trip by type");
+    run_source(vm, R"(
+class Transform:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
+class Sprite:
+    def __init__(self, path):
+        self.path = path
+
+c: Container = Container()
+c.add_component(Transform(1, 2))
+c.add_component(Sprite("hero.png"))
+
+t = c.get_component<Transform>()
+s = c.get_component<Sprite>()
+)");
+    Value tv = vm.get_global("t");
+    Value sv = vm.get_global("s");
+    CHECK(!vm.had_error() && is_instance(tv) && is_instance(sv) && tv.as.obj != sv.as.obj,
+          "expected two distinct component instances, no error");
+
+    /* Note: a class-type annotation (`c: Container`) is tracked per
+    ** Compiler instance, not persisted anywhere — each run_source() call
+    ** here uses a fresh Compiler, so `c`'s annotation from the previous
+    ** run_source() call above is gone. Re-annotating in the same script as
+    ** the call is the documented way to use this across a fresh
+    ** compilation (matches how any other compile-time-only fact in this
+    ** compiler works: signatures, class field tables, etc. are also
+    ** per-compilation, not persisted across separate compile() calls). */
+    TEST("get_component<T>() with no matching component returns nil");
+    run_source(vm, R"(
+class Nothing:
+    pass
+c: Container = c
+missing = c.get_component<Nothing>()
+)");
+    Value mv = vm.get_global("missing");
+    CHECK(!vm.had_error() && is_nil(mv), "expected nil for a component that was never added");
+
+    TEST("get_component<T>() called with wrong generic arity is a compile error");
+    bool bad_arity_compiled = run_source(vm, "bad = c.get_component<Transform, Sprite>()\n");
+    CHECK(!bad_arity_compiled || vm.had_error(), "expected a compile/runtime error, not silent success");
+
+    TEST("add_component (plain native method) is unaffected by generics support");
+    run_source(vm, R"(
+c2: Container = Container()
+c2.add_component(Transform(9, 9))
+t2 = c2.get_component<Transform>()
+)");
+    Value t2v = vm.get_global("t2");
+    CHECK(!vm.had_error() && is_instance(t2v), "expected plain native method + generic method to coexist");
+
+    /* Regression: a GenericNativeFn returning -1 (the established
+    ** error-signal convention) must raise a runtime error, not be silently
+    ** swallowed into a nil result — see OP_INVOKE_GENERIC's native branch. */
+    TEST("A generic native method returning -1 raises a runtime error, not nil");
+    run_source(vm, R"(
+c3: Container = Container()
+oops = c3.always_fails<Transform>()
+)");
+    CHECK(vm.had_error(), "expected had_error() == true when the native signals failure");
+
+    /* Regression: receiver_static_class() must not misattribute a closure's
+    ** captured UPVALUE to an unrelated GLOBAL of the same name that happens
+    ** to carry its own class annotation. Container is a native class, so
+    ** this can only be exercised through a native generic method — a
+    ** script-only equivalent doesn't reach the code path being tested
+    ** (method_signature() already resolves script classes without falling
+    ** back to the global-hint table at all). */
+    TEST("A closure's captured local isn't misattributed to an unrelated global's type hint");
+    run_source(vm, R"(
+def outer():
+    c: Container = Container()
+    c.add_component(Transform(1, 2))
+    def inner():
+        return c.get_component<Transform>()
+    return inner()
+
+class Sprite:
+    pass
+c: Sprite = None
+
+upvalue_result = outer()
+)");
+    Value uv = vm.get_global("upvalue_result");
+    CHECK(!vm.had_error() && is_instance(uv), "expected the captured Container's component, not misresolution via the unrelated global 'c: Sprite'");
+}
+
+/* =========================================================
+** TEST 14: Script classes are closed after their declaration
+** ========================================================= */
+static void test_closed_script_class()
+{
+    printf("\n[Test 14] Closed script classes\n");
+
+    VM vm;
+    vm.open_lib_globals(&zen_lib_base);
+
+    TEST("runtime method replacement is rejected after class declaration");
+    bool compiled = run_source(vm, R"(
+class Locked:
+    def value(self):
+        return 1
+
+def replacement(x):
+    return 2
+
+Locked.value = replacement
+)");
+    CHECK(compiled && vm.had_error(), "expected a closed-class runtime error");
+}
+
+/* =========================================================
 ** MAIN
 ** ========================================================= */
 int main()
@@ -916,6 +1237,7 @@ int main()
     printf("=== Zen Embedding Tests (C++ <-> Script) ===\n");
 
     test_native_from_script();
+    test_cpp_native_boundary();
     test_call_script_from_cpp();
     test_bidirectional_callback();
     test_shared_globals();
@@ -927,6 +1249,8 @@ int main()
     test_class_builder_native_data();
     test_run_from_inside_script();
     test_resume_fiber_error_handling();
+    test_generic_native_method();
+    test_closed_script_class();
 
     printf("\n========================================\n");
     printf("Results: %d passed, %d failed\n", g_tests_passed, g_tests_failed);

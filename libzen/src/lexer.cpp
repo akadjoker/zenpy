@@ -325,7 +325,7 @@ namespace zen
         case '?':
             if (match_char('.')) return make_token(TOK_QDOT);
             if (match_char('?')) return make_token(TOK_DQMARK);
-            return error_token("Unexpected character '?'.");
+            return make_token(TOK_QMARK);
 
         case '"':
         case '\'':

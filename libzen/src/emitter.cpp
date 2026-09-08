@@ -12,6 +12,8 @@ namespace zen
         func_->arity = arity;
         func_->name = name ? intern_string(gc_, name, (int)strlen(name)) : nullptr;
         func_->source = source ? intern_string(gc_, source, (int)strlen(source)) : nullptr;
+        last_op_start_ = -1;
+        jump_count_ = 0;
     }
 
     /* --- Grow buffers --- */
@@ -49,22 +51,35 @@ namespace zen
         func_->lines[offset] = line;
         func_->code_count++;
         last_line_ = line;
+        switch (ZEN_OP(instr))
+        {
+        case OP_JMP: case OP_JMPIF: case OP_JMPIFNOT:
+        case OP_LTJMPIFNOT: case OP_LEJMPIFNOT:
+        case OP_LTIJMPIFNOT: case OP_LEIJMPIFNOT: case OP_GTIJMPIFNOT: case OP_GEIJMPIFNOT:
+        case OP_EQIJMPIFNOT: case OP_NEIJMPIFNOT:
+        case OP_JMPIFNIL: case OP_JMPIFNOTNIL: case OP_JMPIFEQNIL: case OP_JMPIFNEQNIL:
+        case OP_FOR_ITER: case OP_FOR_NEXT: case OP_FORPREP: case OP_FORLOOP:
+            jump_count_++; /* a data word that happens to look like one only makes callers more conservative */
+            break;
+        default:
+            break;
+        }
         return offset;
     }
 
     int Emitter::emit_abc(OpCode op, int a, int b, int c, int line)
     {
-        return emit(ZEN_ENCODE(op, a, b, c), line);
+        return last_op_start_ = emit(ZEN_ENCODE(op, a, b, c), line);
     }
 
     int Emitter::emit_abx(OpCode op, int a, int bx, int line)
     {
-        return emit(ZEN_ENCODE_BX(op, a, bx), line);
+        return last_op_start_ = emit(ZEN_ENCODE_BX(op, a, bx), line);
     }
 
     int Emitter::emit_asbx(OpCode op, int a, int sbx, int line)
     {
-        return emit(ZEN_ENCODE_SBX(op, a, sbx), line);
+        return last_op_start_ = emit(ZEN_ENCODE_SBX(op, a, sbx), line);
     }
 
     /* --- Constants --- */
@@ -344,7 +359,7 @@ namespace zen
     int Emitter::emit_jump(OpCode op, int a, int line)
     {
         /* Emite com placeholder sBx=0, retorna offset para patch */
-        return emit(ZEN_ENCODE_SBX(op, a, 0), line);
+        return last_op_start_ = emit(ZEN_ENCODE_SBX(op, a, 0), line);
     }
 
     void Emitter::patch_jump(int offset)
@@ -370,21 +385,27 @@ namespace zen
     {
         /* Jump negativo para loop_start */
         int jump = loop_start - (func_->code_count + 1);
-        return emit(ZEN_ENCODE_SBX(OP_JMP, a, jump), line);
+        return last_op_start_ = emit(ZEN_ENCODE_SBX(OP_JMP, a, jump), line);
     }
 
     /* --- Fused compare+jump (2-word superinstructions) --- */
 
     int Emitter::emit_lt_jmpifnot(int b, int c, int line)
     {
-        emit(ZEN_ENCODE(OP_LTJMPIFNOT, 0, b, c), line);
+        last_op_start_ = emit(ZEN_ENCODE(OP_LTJMPIFNOT, 0, b, c), line);
         /* Second word: sBx placeholder (to be patched) */
         return emit(ZEN_ENCODE_SBX(OP_JMP, 0, 0), line); /* offset of the sBx word */
     }
 
     int Emitter::emit_le_jmpifnot(int b, int c, int line)
     {
-        emit(ZEN_ENCODE(OP_LEJMPIFNOT, 0, b, c), line);
+        last_op_start_ = emit(ZEN_ENCODE(OP_LEJMPIFNOT, 0, b, c), line);
+        return emit(ZEN_ENCODE_SBX(OP_JMP, 0, 0), line);
+    }
+
+    int Emitter::emit_cmpi_jmpifnot(OpCode op, int b, int imm, int line)
+    {
+        last_op_start_ = emit(ZEN_ENCODE(op, 0, b, (uint8_t)(int8_t)imm), line);
         return emit(ZEN_ENCODE_SBX(OP_JMP, 0, 0), line);
     }
 
@@ -399,10 +420,17 @@ namespace zen
 
     int Emitter::emit_for_iter(int a, int b, int line)
     {
-        emit(ZEN_ENCODE(OP_FOR_ITER, a, b, 0), line);
+        last_op_start_ = emit(ZEN_ENCODE(OP_FOR_ITER, a, b, 0), line);
         int word2_offset = func_->code_count;
         emit(0, line); /* placeholder word2: jump offset */
         return word2_offset;
+    }
+
+    void Emitter::emit_for_next(int a, int b, int body_start, int line)
+    {
+        last_op_start_ = emit(ZEN_ENCODE(OP_FOR_NEXT, a, b, 0), line);
+        int word2_offset = func_->code_count;
+        emit((uint32_t)(int32_t)(body_start - (word2_offset + 1)), line);
     }
 
     void Emitter::patch_for_iter(int word2_offset)
@@ -416,7 +444,7 @@ namespace zen
 
     void Emitter::emit_callglobal(int a, int nargs, int nresults, int global_idx, int line)
     {
-        emit(ZEN_ENCODE(OP_CALLGLOBAL, a, nargs, nresults), line);
+        last_op_start_ = emit(ZEN_ENCODE(OP_CALLGLOBAL, a, nargs, nresults), line);
         emit(ZEN_ENCODE_BX(OP_HALT, 0, global_idx), line); /* word 2: Bx = global index */
     }
 

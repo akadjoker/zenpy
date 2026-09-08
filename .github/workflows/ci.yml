@@ -265,7 +265,7 @@ jobs:
   # ---------------------------------------------------- cross-platform gate --
   cross-check:
     name: cross-platform binaries
-    needs: [linux, linux-switch-dispatch, linux-host-output, linux-trimmed-modules, macos, windows-msvc, windows-mingw, web, android]
+    needs: [linux, fuzz-embedding, linux-switch-dispatch, linux-host-output, linux-trimmed-modules, macos, windows-msvc, windows-mingw, web, android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

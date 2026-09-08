@@ -57,10 +57,18 @@ namespace zen
         advance();
         Token token = previous_;
 
-        /* Prefix */
-        int reg = prefix_rule(token, dest);
+        /* Prefix. A local that is the left operand of an operator, or the
+        ** object of a field/subscript access, is read where it lives: the
+        ** operator or access that follows writes `dest` itself, so copying
+        ** the local into `dest` first would only add a MOVE (and lose the
+        ** local's static type on the way). */
+        int prefix_dest = dest;
+        if (dest >= 0 && token.type == TOK_IDENTIFIER && local_operand_reads_in_place(token))
+            prefix_dest = -1;
+        int reg = prefix_rule(token, prefix_dest);
         if (had_error_)
             return reg;
+        last_expr_ctor_valid_ = false;
 
         /* `name(` is the only shape whose callee still has a name at the
         ** point call_expr() runs — remember it for keyword resolution. */
@@ -70,18 +78,31 @@ namespace zen
         for (;;)
         {
             /* Generic call: fn<Type>(args).  Only treat '<' as generic syntax
-            ** when its complete shape is <Identifier[, Identifier]*>(.  This
-            ** keeps ordinary comparisons such as `a < b` unchanged. */
-            if (current_.type == TOK_LT && generic_call_ahead())
+            ** when (a) its complete shape is <Identifier[, Identifier]*>( and
+            ** (b) `fn` is a name the compiler already knows is a def/method —
+            ** never a plain variable.  (b) is what keeps `f<T, U>(h)` from
+            ** being read as a generic call when `f` merely happens to hold an
+            ** int: without it, punctuation alone can't tell a real generic
+            ** call apart from `f < T, U > (h)` (two chained comparisons in a
+            ** parenthesized tuple written without spaces by habit). */
+            if (current_.type == TOK_LT && bare_name)
             {
-                pending_callee_valid_ = bare_name;
+                pending_callee_valid_ = true;
                 pending_callee_ = token;
-                bare_name = false;
-                reg = generic_call_expr(reg, dest);
+                const FuncSig *maybe_sig = callee_signature();
                 pending_callee_valid_ = false;
-                if (had_error_)
-                    return reg;
-                continue;
+                if (generic_call_ahead(maybe_sig != nullptr))
+                {
+                    pending_callee_valid_ = true;
+                    pending_callee_ = token;
+                    bare_name = false;
+                    reg = generic_call_expr(reg, dest);
+                    pending_callee_valid_ = false;
+                    last_expr_ctor_valid_ = false;
+                    if (had_error_)
+                        return reg;
+                    continue;
+                }
             }
 
             int infix_prec = get_precedence(current_.type);
@@ -104,6 +125,7 @@ namespace zen
                     /* 'not in' is the operator — hand to infix_rule with op=TOK_NOT */
                     Token op = previous_; /* the 'not' token */
                     reg = infix_rule(op, reg, dest);
+                    last_expr_ctor_valid_ = false;
                     if (had_error_)
                         return reg;
                     continue;
@@ -119,9 +141,22 @@ namespace zen
             Token op = previous_;
             pending_callee_valid_ = bare_name && op.type == TOK_LPAREN;
             pending_callee_ = token;
+            /* `name.field` — remember the bare name so dot_expr() can look
+            ** it up in the global class-type-hint table when it isn't a
+            ** local with a type hint (receiver_class() only knows locals).
+            ** Same idea as pending_callee_, one hop earlier. */
+            pending_receiver_valid_ = bare_name && op.type == TOK_DOT;
+            pending_receiver_ = token;
+            pending_subscript_receiver_valid_ = bare_name && op.type == TOK_LBRACKET;
+            pending_subscript_receiver_ = token;
             bare_name = false;
             reg = infix_rule(op, reg, dest);
+            /* Only a call can leave "this was ClassName(...)" standing. */
+            if (op.type != TOK_LPAREN)
+                last_expr_ctor_valid_ = false;
             pending_callee_valid_ = false;
+            pending_receiver_valid_ = false;
+            pending_subscript_receiver_valid_ = false;
             if (had_error_)
                 return reg;
         }
@@ -566,7 +601,9 @@ namespace zen
     int Compiler::unary(Token token, int dest)
     {
         int reg = (dest >= 0) ? dest : alloc_reg();
-        int operand = parse_precedence(PREC_UNARY, -1);
+        /* `not` binds looser than comparisons: `not a == b` is
+        ** `not (a == b)`, `not x in xs` is `not (x in xs)`. */
+        int operand = parse_precedence(token.type == TOK_NOT ? PREC_COMPARISON : PREC_UNARY, -1);
 
         switch (token.type)
         {
@@ -595,7 +632,39 @@ namespace zen
     {
         int prec = get_precedence(op.type);
         int adjust = is_right_associative(op.type) ? 0 : 1;
+        int right_start = state_->emitter.current_offset();
         int right = parse_precedence(prec + adjust, -1);
+
+        /* Peephole: `x + <small int literal>` / `x - <small int literal>`
+        ** (the `i + 1` of every loop counter). When the right operand
+        ** compiled to exactly one instruction and it is a LOADI into the
+        ** operand's own fresh temporary with an immediate that fits the
+        ** 8-bit C field, drop that LOADI and emit the immediate form
+        ** instead — one instruction and one register fewer. OP_ADDI/OP_SUBI
+        ** are defined to behave exactly like OP_ADD/OP_SUB with that int
+        ** right operand for every left-operand type (instances with
+        ** __add__, strings, ...), so this is purely an encoding change. */
+        if ((op.type == TOK_PLUS || op.type == TOK_MINUS) &&
+            state_->emitter.current_offset() == right_start + 1)
+        {
+            Instruction li = state_->emitter.instruction_at(right_start);
+            if (ZEN_OP(li) == OP_LOADI && ZEN_A(li) == right)
+            {
+                int imm = ZEN_SBX(li);
+                if (imm >= -128 && imm <= 127)
+                {
+                    state_->emitter.shrink_to(right_start);
+                    free_reg(right); /* the literal's temporary no longer exists */
+                    int ireg = (dest >= 0) ? dest : alloc_reg();
+                    state_->emitter.emit_abc(op.type == TOK_PLUS ? OP_ADDI : OP_SUBI,
+                                             ireg, left, (uint8_t)(int8_t)imm, op.line);
+                    if (left != ireg)
+                        free_reg(left);
+                    return ireg;
+                }
+            }
+        }
+
         int reg = (dest >= 0) ? dest : alloc_reg();
 
         OpCode opcode;
@@ -643,6 +712,20 @@ namespace zen
         }
 
         state_->emitter.emit_abc(opcode, reg, left, right, op.line);
+
+        /* `self.field * local` is the innermost operation in the usual game
+        ** update (`self.x + self.vx * dt`).  With a local right operand its
+        ** bytecode is adjacent GETFIELD_IDX / MUL, so fuse their dispatches.
+        ** OP_GETFIELD_MUL keeps the original MUL word and deopts to it for
+        ** object/string operands: this changes encoding, not semantics. */
+        if (opcode == OP_MUL &&
+            state_->emitter.current_offset() == right_start + 1 &&
+            right_start > 0)
+        {
+            Instruction field_load = state_->emitter.instruction_at(right_start - 1);
+            if (ZEN_OP(field_load) == OP_GETFIELD_IDX && ZEN_A(field_load) == left)
+                state_->emitter.rewrite_opcode_at(right_start - 1, OP_GETFIELD_MUL);
+        }
         if (right != reg)
             free_reg(right);
         if (left != reg)
@@ -675,8 +758,34 @@ namespace zen
             return reg;
         }
 
+        /* `x is not y`: the `not` belongs to the operator, not to y
+        ** (otherwise it would read as `x is (not y)` and always be False). */
+        const bool is_not = (op.type == TOK_IS) && match(TOK_NOT);
+
+        int right_start = state_->emitter.current_offset();
         int right = parse_precedence(get_precedence(op.type) + 1, -1);
         int reg = (dest >= 0) ? dest : alloc_reg();
+
+        /* A literal right operand — a small int or None — loaded by exactly
+        ** one instruction into its own temporary. Remembered for
+        ** emit_cond_jump(), which turns the comparison into a single
+        ** branch when it is used as an if/while condition. */
+        int lit_kind = 0;
+        int lit_imm = 0;
+        if (state_->emitter.current_offset() == right_start + 1 && !is_local_reg(right))
+        {
+            Instruction li = state_->emitter.instruction_at(right_start);
+            if (ZEN_A(li) == right)
+            {
+                if (ZEN_OP(li) == OP_LOADI && ZEN_SBX(li) >= -128 && ZEN_SBX(li) <= 127)
+                {
+                    lit_kind = 1;
+                    lit_imm = ZEN_SBX(li);
+                }
+                else if (ZEN_OP(li) == OP_LOADNIL)
+                    lit_kind = 2;
+            }
+        }
 
         /* Helper: emit a single comparison op into reg */
         auto emit_cmp = [&](TokenType t, int lhs, int rhs)
@@ -704,6 +813,8 @@ namespace zen
                 break;
             case TOK_IS:
                 state_->emitter.emit_abc(OP_IS, reg, lhs, rhs, op.line);
+                if (is_not)
+                    state_->emitter.emit_abc(OP_NOT, reg, reg, 0, op.line);
                 break;
             case TOK_IN:
                 state_->emitter.emit_abc(OP_CONTAINS, reg, lhs, rhs, op.line);
@@ -714,6 +825,19 @@ namespace zen
         };
 
         emit_cmp(op.type, left, right);
+        last_cmp_.valid = lit_kind != 0;
+        if (lit_kind != 0)
+        {
+            last_cmp_.end_offset = state_->emitter.current_offset();
+            last_cmp_.load_offset = right_start;
+            last_cmp_.reg = reg;
+            last_cmp_.lhs = left;
+            last_cmp_.rhs = right;
+            last_cmp_.op = op.type;
+            last_cmp_.negated = is_not;
+            last_cmp_.imm_kind = lit_kind;
+            last_cmp_.imm = lit_imm;
+        }
         if (left != reg && left != right)
             free_reg(left);
 
@@ -750,6 +874,7 @@ namespace zen
             right = new_right;
 
             state_->emitter.patch_jump(and_jump);
+            cmp_chain_end_ = state_->emitter.current_offset();
         }
 
         if (right != reg)
@@ -794,9 +919,23 @@ namespace zen
         if (state_->next_reg <= reg)
             state_->next_reg = reg + 1;
 
-        int right = parse_precedence(PREC_AND + 1, reg);
+        /* dest=-1, not reg: passing reg here forces named_variable() to
+        ** MOVE any bare name read on the RHS (most importantly `self`)
+        ** into reg immediately, before a following `.field` gets a chance
+        ** to see it — is_current_class_instance() only recognizes literal
+        ** register 0 as "this is self", so a copy silently downgrades
+        ** `self.field` from OP_GETFIELD_IDX (O(1)) to OP_GETFIELD's
+        ** by-name lookup for the rest of the RHS. With dest=-1, a bare
+        ** `self`/local on the RHS is returned in its own original
+        ** register untouched, and the single MOVE this function already
+        ** performs below still happens — just after the RHS finishes
+        ** instead of before dot_expr() gets to look at it. */
+        int right = parse_precedence(PREC_AND + 1, -1);
         if (right != reg)
+        {
             emit_move(reg, right);
+            free_reg(right);
+        }
 
         state_->next_reg = saved_next > state_->next_reg ? saved_next : state_->next_reg;
         state_->emitter.patch_jump(jump);
@@ -831,7 +970,10 @@ namespace zen
 
         consume(TOK_ELSE, "Expected 'else' in ternary expression.");
 
-        int false_val = parse_precedence(PREC_TERNARY + 1, reg);
+        /* dest=-1, not reg — same reasoning as logical_and()/logical_or():
+        ** avoids forcing a premature MOVE of a bare self/local before a
+        ** following `.field` can use OP_GETFIELD_IDX's O(1) path. */
+        int false_val = parse_precedence(PREC_TERNARY, -1); /* `a if c else b if d else e` nests to the right */
         if (false_val != reg)
             emit_move(reg, false_val);
 
@@ -878,13 +1020,67 @@ namespace zen
         if (state_->next_reg <= reg)
             state_->next_reg = reg + 1;
 
-        int right = parse_precedence(PREC_OR + 1, reg);
+        /* dest=-1, not reg — same reasoning as logical_and() above. */
+        int right = parse_precedence(PREC_OR + 1, -1);
         if (right != reg)
+        {
             emit_move(reg, right);
+            free_reg(right);
+        }
 
         state_->next_reg = saved_next > state_->next_reg ? saved_next : state_->next_reg;
         state_->emitter.patch_jump(jump);
         return reg;
+    }
+
+    /* True when the token immediately following (current_, already
+    ** advanced past everything this call/dot/subscript just consumed)
+    ** continues the same postfix chain at PREC_CALL — `.`, `(`, `[`, `?.`.
+    ** Used to adjourn a call's own move-into-dest: if another link is
+    ** coming right after, THAT link will receive this result as its
+    ** `callee`/`obj` and do the eventual move into `dest` once it really
+    ** is the last one — collapsing what would otherwise be a MOVE-out
+    ** here immediately followed by a MOVE-in there. Safe because a
+    ** postfix chain never lets anything else observe the intermediate
+    ** register by name in between: each link hands its result straight to
+    ** the next as an explicit operand, instruction after instruction. */
+    bool Compiler::local_operand_reads_in_place(const Token &name) const
+    {
+        int reg = -1;
+        for (int i = state_->local_count - 1; i >= 0; i--)
+        {
+            if (identifiers_equal(state_->locals[i].name, name))
+            {
+                /* A captured local can be rebound by a call made while
+                ** evaluating the right operand; Python's left-to-right
+                ** evaluation must then see the earlier value, so that one
+                ** keeps its copy. */
+                if (state_->locals[i].captured)
+                    return false;
+                reg = state_->locals[i].reg;
+                break;
+            }
+        }
+        if (reg < 0)
+            return false;
+        switch (current_.type)
+        {
+        case TOK_PLUS: case TOK_MINUS: case TOK_STAR: case TOK_SLASH: case TOK_DSLASH:
+        case TOK_PERCENT: case TOK_DSTAR:
+        case TOK_LT: case TOK_GT: case TOK_LTEQ: case TOK_GTEQ: case TOK_EQEQ: case TOK_BANGEQ:
+        case TOK_AMP: case TOK_PIPE: case TOK_CARET: case TOK_LSHIFT: case TOK_RSHIFT:
+        case TOK_IS: case TOK_IN:
+        case TOK_DOT: case TOK_LBRACKET:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    bool Compiler::chain_continues() const
+    {
+        return current_.type == TOK_DOT || current_.type == TOK_LPAREN ||
+               current_.type == TOK_LBRACKET || current_.type == TOK_QDOT;
     }
 
     /* =========================================================
@@ -897,13 +1093,49 @@ namespace zen
         ** argument list overwrite pending_callee_. */
         const FuncSig *sig = callee_signature();
 
-        /* Move callee to a fresh register if it's a local — OP_CALL overwrites R[base] with result */
-        int base = callee;
-        int saved_next = state_->next_reg;
-        if (base < saved_next)
+        /* `ClassName(...)` through a bare, unshadowed name: the result is
+        ** an instance of exactly that class. Left in last_expr_ctor_* for
+        ** an assignment to pick up — decided now, before the argument list
+        ** (whose nested calls overwrite pending_callee_). */
+        const bool constructs_known_class = pending_callee_valid_ && known_script_class(pending_callee_);
+        const Token constructed_class = pending_callee_;
+
+        /* OP_CALL overwrites R[base] with the result, so a LOCAL's own
+        ** register can't serve as base. But the callee is usually not a
+        ** local: it's the temporary a GETGLOBAL/GETFIELD/previous call just
+        ** produced at the top of the register stack — already exactly where
+        ** base needs to be. (The previous `base < next_reg` test here was
+        ** true for every live register, so every call paid a MOVE.) Same
+        ** rule as dot_expr()'s receiver reuse: not a local AND top of stack. */
+        bool callee_is_local = false;
+        for (int i = 0; i < state_->local_count; i++)
         {
-            base = alloc_reg();
+            if (state_->locals[i].reg == callee)
+            {
+                callee_is_local = true;
+                break;
+            }
+        }
+        bool callee_is_top = (callee == state_->next_reg - 1);
+        int base = (!callee_is_local && callee_is_top) ? callee : alloc_reg();
+        if (base != callee)
             emit_move(base, callee);
+
+        /* A direct call to a global name — `fib(n)`, `helper(x)`, any
+        ** module-level def or imported function — arrives here as
+        ** `GETGLOBAL base` immediately followed by this call. Fold the pair
+        ** into OP_CALLGLOBAL: the VM reads the global into R[base] itself
+        ** and continues on OP_CALL's path, one dispatch fewer per call. */
+        int fused_global_idx = -1;
+        if (base == callee && state_->emitter.current_offset() > 0)
+        {
+            int prev_off = state_->emitter.current_offset() - 1;
+            Instruction prev = state_->emitter.instruction_at(prev_off);
+            if (ZEN_OP(prev) == OP_GETGLOBAL && (int)ZEN_A(prev) == callee)
+            {
+                fused_global_idx = (int)ZEN_BX(prev);
+                state_->emitter.shrink_to(prev_off);
+            }
         }
 
         /* Parse arguments into consecutive registers after callee */
@@ -912,7 +1144,12 @@ namespace zen
         consume(TOK_RPAREN, "Expected ')' after arguments.");
 
         /* OP_CALL: R[base](R[base+1]..R[base+nargs]) → R[base] */
-        state_->emitter.emit_abc(OP_CALL, base, nargs, 1, previous_.line);
+        if (fused_global_idx >= 0)
+            state_->emitter.emit_callglobal(base, nargs, 1, fused_global_idx, previous_.line);
+        else
+            state_->emitter.emit_abc(OP_CALL, base, nargs, 1, previous_.line);
+        last_expr_ctor_valid_ = constructs_known_class;
+        last_expr_ctor_class_ = constructed_class;
 
         /* Restore registers: call result is in base */
         state_->next_reg = base + 1;
@@ -920,7 +1157,11 @@ namespace zen
             state_->max_reg = state_->next_reg;
 
         int result = base;
-        if (dest >= 0 && dest != result)
+        /* If another link continues the chain right after this call
+        ** (`f()()`, `f().x`, `f()[0]`), defer the move into dest — that
+        ** next link will receive `result` as its own callee/obj and do the
+        ** eventual move once IT turns out to be the chain's last link. */
+        if (dest >= 0 && dest != result && !chain_continues())
         {
             emit_move(dest, result);
             free_reg(result);
@@ -933,18 +1174,31 @@ namespace zen
     {
         const FuncSig *sig = callee_signature();
 
-        /* OP_CALL overwrites R[base] with the return value, just like a
-        ** normal call. */
-        int base = callee;
-        int saved_next = state_->next_reg;
-        if (base < saved_next)
+        /* OP_CALL_GENERIC overwrites R[base] with the return value, just
+        ** like a normal call — same base-reuse rule as call_expr(). */
+        bool callee_is_local = false;
+        for (int i = 0; i < state_->local_count; i++)
         {
-            base = alloc_reg();
-            emit_move(base, callee);
+            if (state_->locals[i].reg == callee)
+            {
+                callee_is_local = true;
+                break;
+            }
         }
+        bool callee_is_top = (callee == state_->next_reg - 1);
+        int base = (!callee_is_local && callee_is_top) ? callee : alloc_reg();
+        if (base != callee)
+            emit_move(base, callee);
 
-        int nargs = generic_argument_list(base, sig);
-        state_->emitter.emit_abc(OP_CALL, base, nargs, 1, previous_.line);
+        int ngeneric = 0;
+        int nargs = generic_argument_list(base, sig, &ngeneric);
+        if (nargs & 0x80)
+        {
+            error("Cannot spread arguments into a generic call.");
+            nargs &= 0x7F;
+        }
+        state_->emitter.emit_abc(OP_CALL_GENERIC, base, nargs, 1, previous_.line);
+        state_->emitter.emit((uint32_t)(ngeneric & 0xFFFF), previous_.line);
 
         state_->next_reg = base + 1;
         if (state_->next_reg > state_->max_reg)
@@ -983,6 +1237,7 @@ namespace zen
         ** call. */
         uint64_t filled = 0;
         int highest = -1;
+        bool native_kw = false; /* keyword map for a callee without a signature */
         bool saw_keyword = false;
 
         if (!check(TOK_RPAREN))
@@ -994,16 +1249,44 @@ namespace zen
                     /* `name = value` inside a call is a keyword argument, never
                     ** an assignment expression.  Saying so out loud beats
                     ** compiling it as one and passing the wrong positional. */
-                    if (!sig)
-                    {
-                        error("Keyword argument needs a signature the compiler "
-                              "can see (a def or method in this file).");
-                        return nargs;
-                    }
                     if (has_spread)
                     {
                         error("Keyword argument cannot follow '*' spread.");
                         return nargs;
+                    }
+                    if (!sig)
+                    {
+                        /* No signature in sight (a native such as sorted(),
+                        ** print-like helpers, a value held in a variable):
+                        ** `name=value` pairs go into a map passed as the
+                        ** last argument, flagged with 0x40 in the count. The
+                        ** VM hands it to a native through vm->kwargs() and
+                        ** refuses it for a script function. */
+                        int map_reg = base + 1 + nargs;
+                        if (map_reg >= kMaxRegisters)
+                        {
+                            error("Too many arguments.");
+                            return nargs;
+                        }
+                        if (!native_kw)
+                        {
+                            while (state_->next_reg <= map_reg)
+                                alloc_reg();
+                            state_->emitter.emit_abc(OP_NEWMAP, map_reg, 0, 0, current_.line);
+                            state_->next_reg = map_reg + 1;
+                            native_kw = true;
+                        }
+                        advance(); /* the parameter name */
+                        Token key = previous_;
+                        advance(); /* '=' */
+                        int kreg = alloc_reg();
+                        int name_ki = state_->emitter.add_string_constant(key.start, key.length);
+                        state_->emitter.emit_abx(OP_LOADK, kreg, name_ki, key.line);
+                        int v = expression(-1);
+                        state_->emitter.emit_abc(OP_SETINDEX, map_reg, kreg, v, key.line);
+                        state_->next_reg = map_reg + 1;
+                        saw_keyword = true;
+                        continue;
                     }
                     if (!sig->takes_keywords)
                     {
@@ -1057,25 +1340,67 @@ namespace zen
                     error("Too many arguments.");
                     return nargs;
                 }
-                /* Ensure next_reg is at the right position */
-                while (state_->next_reg <= arg_reg)
-                    alloc_reg();
 
                 if (match(TOK_STAR))
                 {
                     /* *expr — spread: must be last arg */
+                    while (state_->next_reg <= arg_reg)
+                        alloc_reg();
                     has_spread = true;
                     expression(arg_reg);
                     nargs++;
                     break; /* no more args after spread */
                 }
 
-                expression(arg_reg);
+                /* Compile the argument with dest=-1 rather than dest=arg_reg.
+                ** arg_reg is the top of the register stack here (base and
+                ** the previous arguments sit right below it, nothing live
+                ** above), so an expression that allocates its result simply
+                ** lands on arg_reg by itself — and one that doesn't (a bare
+                ** local, `self`) is copied there afterwards, exactly the MOVE
+                ** dest=arg_reg would have emitted anyway. What changes is
+                ** WHEN that copy happens: with dest=arg_reg, named_variable()
+                ** moved `self` into arg_reg before a following `.field` was
+                ** even parsed, and dot_expr()'s self-fast-path only recognizes
+                ** register 0, so `f(self.x)` compiled to MOVE + a by-name
+                ** OP_GETFIELD instead of a single OP_GETFIELD_IDX. Keyword
+                ** arguments keep dest=arg_reg: they can land above other
+                ** live arguments, where "nothing above is live" doesn't hold. */
+                while (state_->next_reg < arg_reg)
+                    alloc_reg();
+                /* `f(x for x in xs)`: a generator expression as the only
+                ** argument compiles as the equivalent list. */
+                LexerState gen_lex = lexer_.save_state();
+                Token gen_cur = current_, gen_prev = previous_;
+                int gen_off = state_->emitter.current_offset();
+                int gen_regs = state_->next_reg;
+                int gen_globals = vm_->num_globals();
+                int r = expression(-1);
+                if (check(TOK_FOR))
+                {
+                    state_->emitter.shrink_to(gen_off);
+                    state_->next_reg = gen_regs;
+                    vm_->shrink_globals(gen_globals);
+                    while (state_->next_reg <= arg_reg)
+                        alloc_reg();
+                    state_->emitter.emit_abc(OP_NEWARRAY, arg_reg, 0, 0, gen_cur.line);
+                    comprehension_into(arg_reg, 0, gen_lex, gen_cur, gen_prev, gen_cur.line);
+                    r = arg_reg;
+                }
+                if (r != arg_reg)
+                {
+                    while (state_->next_reg <= arg_reg)
+                        alloc_reg();
+                    emit_move(arg_reg, r);
+                }
+                /* The value is in arg_reg; any temporaries the expression
+                ** left above it are dead. */
+                state_->next_reg = arg_reg + 1;
                 nargs++;
             } while (match(TOK_COMMA));
         }
 
-        if (saw_keyword)
+        if (saw_keyword && !native_kw)
         {
             /* Fill the gaps the keywords jumped over.  Parameters past the
             ** last one named are left to the VM, which already tops a call
@@ -1098,29 +1423,36 @@ namespace zen
             nargs = highest + 1;
         }
 
-        /* Encode spread flag in bit 7 of nargs */
+        /* Encode spread flag in bit 7 of nargs; a keyword map in bit 6. */
         if (has_spread)
             nargs |= 0x80;
+        if (native_kw)
+            nargs = (nargs + 1) | 0x40; /* the map is one more argument slot */
         return nargs;
     }
 
-    /* Parse <T, U>(args) after a callee.  Generic values are normal runtime
-    ** values (usually classes), placed before the explicit arguments. */
-    int Compiler::generic_argument_list(int base, const FuncSig *sig)
+    /* Parse <T, U>(args) after a callee.  Type arguments are normal runtime
+    ** values (classes, checked against at runtime by OP_CALL_GENERIC /
+    ** OP_INVOKE_GENERIC) placed before the explicit value arguments — but,
+    ** unlike the old f<T>(x) == f(T,x) sugar, they are counted separately
+    ** (ObjFunc::generic_arity) rather than folded into the same arity as
+    ** the value parameters. */
+    int Compiler::generic_argument_list(int base, const FuncSig *sig, int *out_ngeneric)
     {
         consume(TOK_LT, "Expected '<' before generic arguments.");
 
-        int nargs = 0;
+        int ngeneric = 0;
         do
         {
             consume(TOK_IDENTIFIER, "Expected generic type name.");
             Token type_name = previous_;
 
-            int arg_reg = base + 1 + nargs;
+            int arg_reg = base + 1 + ngeneric;
             if (arg_reg >= kMaxRegisters)
             {
                 error("Too many generic arguments.");
-                return nargs;
+                *out_ngeneric = ngeneric;
+                return ngeneric;
             }
             while (state_->next_reg <= arg_reg)
                 alloc_reg();
@@ -1128,25 +1460,81 @@ namespace zen
             int type_reg = named_variable(type_name, arg_reg, false);
             if (type_reg != arg_reg)
                 emit_move(arg_reg, type_reg);
-            nargs++;
+            ngeneric++;
         } while (match(TOK_COMMA));
 
         consume(TOK_GT, "Expected '>' after generic arguments.");
+
+        /* Compile-time check when the callee's signature is visible: catches
+        ** `def f<T>(x)` called as `f<T,U>()`, and (via sig->generic_count==0)
+        ** a non-generic function called with `<...>` — both used to silently
+        ** compile as extra/misplaced positional arguments. */
+        if (sig && sig->generic_count != ngeneric)
+        {
+            if (sig->generic_count == 0)
+                error("Function is not generic.");
+            else
+                error("Wrong number of type arguments for generic function.");
+        }
+
         consume(TOK_LPAREN, "Expected '(' after generic arguments.");
 
-        int total_nargs = argument_list(base, nargs, sig);
+        int nvalue = argument_list(base + ngeneric, 0, sig);
         consume(TOK_RPAREN, "Expected ')' after arguments.");
-        return total_nargs;
+
+        *out_ngeneric = ngeneric;
+        /* nvalue may carry the spread flag in bit 7 (see argument_list) —
+        ** preserve it untouched, only the low 7 bits are an actual count.
+        ** ngeneric + (nvalue's count) must itself stay under 128: past
+        ** that, the sum spills into bit 7 and gets misread as a spread
+        ** flag by every caller's `if (nargs & 0x80)` check — reject before
+        ** that arithmetic can produce a bogus count. kMaxRegisters (250)
+        ** bounds each half individually but not their sum, so this can't
+        ** be caught earlier by the per-register checks alone. */
+        int total = ngeneric + (nvalue & 0x7F);
+        if (total > 0x7F)
+        {
+            error("Too many combined type and value arguments in a generic call.");
+            total &= 0x7F;
+        }
+        return total | (nvalue & 0x80);
     }
 
-    bool Compiler::generic_call_ahead()
+    /* Two tokens are "adjacent" when nothing (not even a space) separates
+    ** them in the source — comparing the raw pointers avoids needing a
+    ** whitespace-aware lexer mode just for this. */
+    static inline bool tokens_adjacent(const Token &a, const Token &b)
     {
+        return b.start == a.start + a.length;
+    }
+
+    /* `f<T>(...)` is generic call syntax ONLY when (a) `f` is already known
+    ** to be generic — a script def/method (FuncSig) or a native class
+    ** method (ObjNative::generic_arity > 0); `callee_is_generic=false` means
+    ** "no, it's a plain variable/expression" and this returns false without
+    ** even looking at the tokens — and (b) its complete shape is punctuation
+    ** that cannot also be a comparison: the opening '<' glued to the callee
+    ** and directly followed by an identifier with no space (`f<T` yes,
+    ** `f < T` no), and the closing '>' directly followed by '(' with no
+    ** space (`>(` yes, `> (` no). Both conditions are needed: adjacency
+    ** alone still reads `f<T, U>(h)` as generic syntax when `f` merely holds
+    ** an int — indistinguishable from `f < T, U > (h)` written without
+    ** spaces, two chained comparisons in a parenthesized tuple. Ordinary
+    ** whitespace is still allowed *inside* the type-argument list
+    ** (`f<T, U>(...)`, comma-space is normal style) — only the two boundary
+    ** tokens that actually collide with comparison syntax are held to
+    ** strict adjacency. */
+    bool Compiler::generic_call_ahead(bool callee_is_generic)
+    {
+        if (!callee_is_generic)
+            return false;
         if (!check(TOK_LT))
             return false;
+        Token lt = current_;
 
         LexerState saved = lexer_.save_state();
         Token token = lexer_.next_token();
-        if (token.type != TOK_IDENTIFIER)
+        if (token.type != TOK_IDENTIFIER || !tokens_adjacent(lt, token))
         {
             lexer_.restore_state(saved);
             return false;
@@ -1165,8 +1553,13 @@ namespace zen
             }
         }
 
-        bool is_generic_call = token.type == TOK_GT &&
-                               lexer_.next_token().type == TOK_LPAREN;
+        bool is_generic_call = false;
+        if (token.type == TOK_GT)
+        {
+            Token gt = token;
+            Token lparen = lexer_.next_token();
+            is_generic_call = lparen.type == TOK_LPAREN && tokens_adjacent(gt, lparen);
+        }
         lexer_.restore_state(saved);
         return is_generic_call;
     }
@@ -1182,6 +1575,38 @@ namespace zen
 
         int reg = (dest >= 0) ? dest : alloc_reg();
 
+        /* Resolved once, reused by both generic_call_ahead() checks below —
+        ** a null sig (method name not seen by the pre-scan, or `obj` isn't
+        ** provably an instance of a known class) means `<` after `field`
+        ** can never be read as a generic call, only as a comparison —
+        ** UNLESS the receiver's static class is a native class with this
+        ** name registered as a generic method (ClassBuilder::generic_method,
+        ** which script pre-scan knows nothing about). */
+        const FuncSig *method_sig = method_signature(obj, field);
+        int native_generic_arity = 0;
+        bool is_native_generic = false;
+        const char *receiver_class_name = nullptr;
+        int32_t receiver_class_len = 0;
+        bool receiver_exact = false;
+        const bool receiver_has_static_class =
+            receiver_static_class(obj, receiver_class_name, receiver_class_len, &receiver_exact);
+        const bool receiver_is_typed_subscript = (obj == typed_subscript_reg_);
+        if (receiver_is_typed_subscript)
+            typed_subscript_reg_ = -1; /* type belongs to this one dot only */
+        typed_call_reg_ = -1;          /* likewise: consumed by this dot or gone */
+        /* The declaration the receiver's static class resolves `field` to
+        ** (method_signature() only knows locals and self). */
+        const FuncSig *static_sig = receiver_has_static_class
+                                        ? find_method_in_chain(receiver_class_name, receiver_class_len, field)
+                                        : nullptr;
+        if (!method_sig)
+        {
+            if (receiver_has_static_class)
+                is_native_generic = native_generic_method_arity(receiver_class_name, receiver_class_len,
+                                                                  field, native_generic_arity);
+        }
+        bool method_is_generic = method_sig || is_native_generic;
+
         /* --- Fast path: self.field inside a method → OP_GETFIELD_IDX / OP_SETFIELD_IDX --- */
         if (is_current_class_instance(obj))
         {
@@ -1192,8 +1617,48 @@ namespace zen
                 /* Assignment: self.field = expr */
                 if (can_assign && match(TOK_EQ))
                 {
+                    int rhs_start = state_->emitter.current_offset();
                     int val = expression(-1);
+                    {
+                        bool rhs_none = state_->emitter.current_offset() == rhs_start + 1 &&
+                                        ZEN_OP(state_->emitter.instruction_at(rhs_start)) == OP_LOADNIL &&
+                                        (int)ZEN_A(state_->emitter.instruction_at(rhs_start)) == val;
+                        note_field_class(fidx, rhs_none);
+                    }
                     state_->emitter.emit_abc(OP_SETFIELD_IDX, obj, fidx, val, field.line);
+
+                    /* Fuse the exact bytecode shape produced by
+                    **   self.x = self.x + self.vx * dt
+                    ** into one numeric hot path. Its four following words
+                    ** are deliberately retained: if a field becomes a
+                    ** string or an overloaded object, the VM runs those
+                    ** ordinary instructions unchanged. */
+                    int rhs_end = state_->emitter.current_offset();
+                    if (rhs_end == rhs_start + 5)
+                    {
+                        Instruction load_x = state_->emitter.instruction_at(rhs_start);
+                        Instruction load_v = state_->emitter.instruction_at(rhs_start + 1);
+                        Instruction mul = state_->emitter.instruction_at(rhs_start + 2);
+                        Instruction add = state_->emitter.instruction_at(rhs_start + 3);
+                        Instruction store_x = state_->emitter.instruction_at(rhs_start + 4);
+                        if (ZEN_OP(load_x) == OP_GETFIELD_IDX &&
+                            ZEN_OP(load_v) == OP_GETFIELD_MUL &&
+                            ZEN_OP(mul) == OP_MUL &&
+                            ZEN_OP(add) == OP_ADD &&
+                            ZEN_OP(store_x) == OP_SETFIELD_IDX &&
+                            ZEN_B(load_x) == obj &&
+                            ZEN_B(load_v) == obj &&
+                            ZEN_A(load_x) == ZEN_B(add) &&
+                            ZEN_A(load_v) == ZEN_B(mul) &&
+                            ZEN_A(mul) == ZEN_C(add) &&
+                            ZEN_A(add) == ZEN_C(store_x) &&
+                            ZEN_A(store_x) == obj &&
+                            ZEN_C(load_x) == fidx &&
+                            ZEN_B(store_x) == fidx)
+                        {
+                            state_->emitter.rewrite_opcode_at(rhs_start, OP_FIELD_MULADD);
+                        }
+                    }
                     if (val != reg)
                         free_reg(val);
                     if (obj != reg)
@@ -1202,50 +1667,87 @@ namespace zen
                 }
                 /* Augmented assign: self.field += expr  */
                 if (can_assign && (check(TOK_PLUS_EQ) || check(TOK_MINUS_EQ) ||
-                                   check(TOK_STAR_EQ) || check(TOK_SLASH_EQ) || check(TOK_PERCENT_EQ)))
+                                   check(TOK_STAR_EQ) || check(TOK_SLASH_EQ) || check(TOK_PERCENT_EQ) ||
+                                   check(TOK_DSLASH_EQ) || check(TOK_DSTAR_EQ) || check(TOK_AMP_EQ) || check(TOK_PIPE_EQ) || check(TOK_CARET_EQ) || check(TOK_LSHIFT_EQ) || check(TOK_RSHIFT_EQ)))
                 {
                     Token op = current_;
                     advance();
                     OpCode arith;
                     switch (op.type)
                     {
-                    case TOK_PLUS_EQ:
-                        arith = OP_ADD;
-                        break;
-                    case TOK_MINUS_EQ:
-                        arith = OP_SUB;
-                        break;
-                    case TOK_STAR_EQ:
-                        arith = OP_MUL;
-                        break;
-                    case TOK_SLASH_EQ:
-                        arith = OP_DIV;
-                        break;
-                    default:
-                        arith = OP_MOD;
-                        break;
+                    case TOK_PLUS_EQ:   arith = OP_ADD;  break;
+                    case TOK_MINUS_EQ:  arith = OP_SUB;  break;
+                    case TOK_STAR_EQ:   arith = OP_MUL;  break;
+                    case TOK_SLASH_EQ:  arith = OP_DIV;  break;
+                    case TOK_DSLASH_EQ: arith = OP_IDIV; break;
+                    case TOK_DSTAR_EQ:  arith = OP_POW;  break;  case TOK_AMP_EQ:  arith = OP_BAND;  break;  case TOK_PIPE_EQ:  arith = OP_BOR;  break;  case TOK_CARET_EQ:  arith = OP_BXOR;  break;  case TOK_LSHIFT_EQ:  arith = OP_SHL;  break;  case TOK_RSHIFT_EQ:  arith = OP_SHR;  break;
+                    default:            arith = OP_MOD;  break;
                     }
                     int tmp = alloc_reg();
                     state_->emitter.emit_abc(OP_GETFIELD_IDX, tmp, obj, fidx, field.line);
+                    int rhs_start = state_->emitter.current_offset();
                     int rhs = expression(-1);
-                    state_->emitter.emit_abc(arith, tmp, tmp, rhs, op.line);
+                    note_field_class(fidx, false);
+                    /* `self.hp -= 1`: the same ADDI/SUBI folding locals get. */
+                    bool folded = false;
+                    if ((arith == OP_ADD || arith == OP_SUB) &&
+                        state_->emitter.current_offset() == rhs_start + 1)
+                    {
+                        Instruction li = state_->emitter.instruction_at(rhs_start);
+                        int imm = ZEN_SBX(li);
+                        if (ZEN_OP(li) == OP_LOADI && (int)ZEN_A(li) == rhs && imm >= -128 && imm <= 127)
+                        {
+                            state_->emitter.shrink_to(rhs_start);
+                            free_reg(rhs);
+                            state_->emitter.emit_abc(arith == OP_ADD ? OP_ADDI : OP_SUBI,
+                                                     tmp, tmp, (uint8_t)(int8_t)imm, op.line);
+                            folded = true;
+                        }
+                    }
+                    if (!folded)
+                    {
+                        state_->emitter.emit_abc(arith, tmp, tmp, rhs, op.line);
+                        free_reg(rhs);
+                    }
                     state_->emitter.emit_abc(OP_SETFIELD_IDX, obj, fidx, tmp, op.line);
-                    free_reg(rhs);
                     free_reg(tmp);
                     if (obj != reg)
                         free_reg(obj);
                     return reg;
                 }
                 /* Method call: self.method(args) — fall through to normal path */
-                if (!check(TOK_LPAREN) && !generic_call_ahead())
+                if (!check(TOK_LPAREN) && !generic_call_ahead(method_is_generic))
                 {
                     /* Read field */
                     state_->emitter.emit_abc(OP_GETFIELD_IDX, reg, obj, fidx, field.line);
+                    /* `self.left.check()`: if every constructor ever stored
+                    ** in this field was a Tree, the next link dispatches as
+                    ** one (checked forms: a wrong guess only costs speed). */
+                    Token fcls;
+                    if (current_.type == TOK_DOT &&
+                        field_class_guess(current_class_.start, current_class_.length, fidx, fcls))
+                    {
+                        typed_call_reg_ = reg;
+                        typed_call_class_ = fcls;
+                        typed_call_exact_ = false;
+                    }
                     if (obj != reg)
                         free_reg(obj);
                     return reg;
                 }
             }
+        }
+
+        /* A receiver of statically known class other than the one being
+        ** compiled (annotated parameter, inferred local, Array[T] element,
+        ** self-returning chain): use the checked direct-index form, whose
+        ** second word is the by-name access it falls back to. */
+        int checked_fidx = -1;
+        if (receiver_has_static_class)
+        {
+            checked_fidx = registry_field_index(receiver_class_name, receiver_class_len, token_string(field));
+            if (checked_fidx > 255)
+                checked_fidx = -1;
         }
 
         /* Assignment: obj.field = expr */
@@ -1253,43 +1755,229 @@ namespace zen
         {
             int val = expression(-1);
             int name_ki = state_->emitter.add_string_constant(field.start, field.length);
-            state_->emitter.emit_abc(OP_SETFIELD, obj, name_ki, val, previous_.line);
+            if (checked_fidx >= 0)
+            {
+                state_->emitter.emit_abc(OP_SETFIELD_IDXC, obj, checked_fidx, val, previous_.line);
+                state_->emitter.emit((uint32_t)ZEN_ENCODE(OP_SETFIELD, obj, name_ki, val), previous_.line);
+            }
+            else
+                state_->emitter.emit_abc(OP_SETFIELD, obj, name_ki, val, previous_.line);
             free_reg(val);
             if (obj != reg)
                 free_reg(obj);
             return reg;
         }
 
-        /* Method call: obj.method(args) */
-        if (check(TOK_LPAREN) || generic_call_ahead())
+        /* Augmented assignment on any other receiver: obj.field += expr */
+        if (can_assign && (check(TOK_PLUS_EQ) || check(TOK_MINUS_EQ) ||
+                           check(TOK_STAR_EQ) || check(TOK_SLASH_EQ) || check(TOK_PERCENT_EQ) ||
+                           check(TOK_DSLASH_EQ) || check(TOK_DSTAR_EQ) || check(TOK_AMP_EQ) || check(TOK_PIPE_EQ) || check(TOK_CARET_EQ) || check(TOK_LSHIFT_EQ) || check(TOK_RSHIFT_EQ)))
         {
-            /* We need a contiguous [receiver, arg1, arg2, ...] block.
-            ** The return value lands in R[base], so if obj is a local we
-            ** must copy it to a fresh register to avoid clobbering the local. */
-            int base = alloc_reg();
-            if (base != obj)
+            Token op = current_;
+            advance();
+            OpCode arith;
+            switch (op.type)
+            {
+            case TOK_PLUS_EQ:   arith = OP_ADD;  break;
+            case TOK_MINUS_EQ:  arith = OP_SUB;  break;
+            case TOK_STAR_EQ:   arith = OP_MUL;  break;
+            case TOK_SLASH_EQ:  arith = OP_DIV;  break;
+            case TOK_DSLASH_EQ: arith = OP_IDIV; break;
+            case TOK_DSTAR_EQ:  arith = OP_POW;  break;  case TOK_AMP_EQ:  arith = OP_BAND;  break;  case TOK_PIPE_EQ:  arith = OP_BOR;  break;  case TOK_CARET_EQ:  arith = OP_BXOR;  break;  case TOK_LSHIFT_EQ:  arith = OP_SHL;  break;  case TOK_RSHIFT_EQ:  arith = OP_SHR;  break;
+            default:            arith = OP_MOD;  break;
+            }
+            int name_ki = state_->emitter.add_string_constant(field.start, field.length);
+            int tmp = alloc_reg();
+            if (checked_fidx >= 0)
+            {
+                state_->emitter.emit_abc(OP_GETFIELD_IDXC, tmp, obj, checked_fidx, field.line);
+                state_->emitter.emit((uint32_t)ZEN_ENCODE(OP_GETFIELD, tmp, obj, name_ki), field.line);
+            }
+            else
+                state_->emitter.emit_abc(OP_GETFIELD, tmp, obj, name_ki, field.line);
+            int rhs_start = state_->emitter.current_offset();
+            int rhs = expression(-1);
+            bool folded = false;
+            if ((arith == OP_ADD || arith == OP_SUB) &&
+                state_->emitter.current_offset() == rhs_start + 1)
+            {
+                Instruction li = state_->emitter.instruction_at(rhs_start);
+                int imm = ZEN_SBX(li);
+                if (ZEN_OP(li) == OP_LOADI && (int)ZEN_A(li) == rhs && imm >= -128 && imm <= 127)
+                {
+                    state_->emitter.shrink_to(rhs_start);
+                    free_reg(rhs);
+                    state_->emitter.emit_abc(arith == OP_ADD ? OP_ADDI : OP_SUBI,
+                                             tmp, tmp, (uint8_t)(int8_t)imm, op.line);
+                    folded = true;
+                }
+            }
+            if (!folded)
+            {
+                state_->emitter.emit_abc(arith, tmp, tmp, rhs, op.line);
+                free_reg(rhs);
+            }
+            if (checked_fidx >= 0)
+            {
+                state_->emitter.emit_abc(OP_SETFIELD_IDXC, obj, checked_fidx, tmp, op.line);
+                state_->emitter.emit((uint32_t)ZEN_ENCODE(OP_SETFIELD, obj, name_ki, tmp), op.line);
+            }
+            else
+                state_->emitter.emit_abc(OP_SETFIELD, obj, name_ki, tmp, op.line);
+            free_reg(tmp);
+            if (obj != reg)
+                free_reg(obj);
+            return reg;
+        }
+
+        /* Method call: obj.method(args) */
+        if (check(TOK_LPAREN) || generic_call_ahead(method_is_generic))
+        {
+            /* We need a contiguous [receiver, arg1, arg2, ...] block, with
+            ** arguments landing at base+1, base+2, ... — so reusing obj as
+            ** base is only safe when obj is BOTH (a) not a local (the call
+            ** result would clobber it) AND (b) the top of the register
+            ** stack (anything below the top between obj and next_reg is
+            ** still-live state argument placement would overwrite). Case
+            ** (b) is exactly the unnamed temporary a previous call/
+            ** sub-expression just produced with nothing allocated after it
+            ** — the common shape of a chained `x.a().b()` — where reusing
+            ** it in place skips both the MOVE in (obj -> base) and,
+            ** correspondingly, the MOVE out below. Same trick already used
+            ** by logical_and()/logical_or() for their left operand, plus
+            ** the top-of-stack check free_reg() itself relies on. */
+            /* `reg` was allocated speculatively at the top of dot_expr for
+            ** the field-read shape; a method call's result lands in `base`
+            ** instead, so that register is dead here. Give it back BEFORE
+            ** the top-of-stack test below — otherwise it sits above obj and
+            ** makes a receiver that really is the newest temporary (e.g.
+            ** `xs[i].m()`, `f().m()` as a statement) look like it isn't,
+            ** costing a fresh base + MOVE on every such call. */
+            if (dest < 0)
+                free_reg(reg);
+            bool obj_is_local = false;
+            bool obj_captured = false;
+            for (int i = 0; i < state_->local_count; i++)
+            {
+                if (state_->locals[i].reg == obj)
+                {
+                    obj_is_local = true;
+                    obj_captured = state_->locals[i].captured;
+                    break;
+                }
+            }
+            bool obj_is_top = (obj == state_->next_reg - 1);
+            int base = (!obj_is_local && obj_is_top) ? obj : alloc_reg();
+            /* A local receiver of a plain call (`b.m(...)`, `self.m(...)`)
+            ** is copied into `base` by OP_INVOKE_R / OP_INVOKE_VT_R itself,
+            ** saving the MOVE dispatch. Not when a closure could reassign
+            ** the local while the arguments are evaluated (captured local:
+            ** the copy must happen before them, as it would in Python), nor
+            ** inside a multi-assign RHS (C must stay the result count). */
+            bool receiver_in_c = obj_is_local && !obj_captured && !multi_assign_rhs_ &&
+                                 check(TOK_LPAREN) && obj <= 255;
+            if (base != obj && !receiver_in_c)
                 emit_move(base, obj);
-            int nargs;
-            const FuncSig *sig = method_signature(obj, field);
+            const FuncSig *sig = method_sig;
+            int sel = vm_->intern_selector(field.start, field.length);
+            int name_ki = state_->emitter.add_string_constant(field.start, field.length);
+            bool plain_call = false;
+
             if (check(TOK_LPAREN))
             {
+                plain_call = true;
                 advance(); /* consume '(' */
-                nargs = argument_list(base, 0, sig);
+                int nargs = argument_list(base, 0, sig);
                 consume(TOK_RPAREN, "Expected ')' after arguments.");
+
+                /* A call whose receiver has a declared class (including
+                   `self`) can use its selector slot directly. Classes are
+                   closed after their definition, so this is stable; retain
+                   OP_INVOKE for arrays, maps and unknown values. */
+                /* `method_sig` exists for ordinary methods too: it is also
+                ** used to parse keyword arguments. Only a declaration with
+                ** actual type parameters needs OP_INVOKE_GENERIC; those are
+                ** the calls OP_INVOKE_VT cannot represent. */
+                const bool method_has_type_params =
+                    (method_sig && method_sig->generic_count > 0) || is_native_generic;
+                /* Array[T][i].method(...) can take the fully static opcode
+                ** when the scanner knows every value argument is present.
+                ** It is intentionally opt-in through Array[T]: a plain
+                ** dynamic receiver keeps the checked call semantics. */
+                const bool exact_typed_array_call = receiver_is_typed_subscript &&
+                    method_sig && method_sig->takes_keywords &&
+                    !method_has_type_params && !(nargs & 0xC0) &&
+                    nargs == method_sig->param_count && sel <= 255;
+                if (exact_typed_array_call)
+                {
+                    state_->emitter.emit_abc(OP_INVOKE_VT_FAST, base, nargs, sel, field.line);
+                }
+                else if (receiver_has_static_class && !method_has_type_params)
+                {
+                    /* Same two words as OP_INVOKE; the VM tries the vtable
+                    ** slot first and re-enters OP_INVOKE for anything else. */
+                    if (receiver_in_c)
+                        state_->emitter.emit_abc(OP_INVOKE_VT_R, base, nargs, obj, field.line);
+                    else
+                        state_->emitter.emit_abc(OP_INVOKE_VT, base, nargs, 1, field.line);
+                    state_->emitter.emit((uint32_t)((sel << 16) | (name_ki & 0xFFFF)), field.line);
+                }
+                else
+                {
+                    if (receiver_in_c)
+                        state_->emitter.emit_abc(OP_INVOKE_R, base, nargs, obj, field.line);
+                    else
+                        state_->emitter.emit_abc(OP_INVOKE, base, nargs, 1, field.line);
+                    state_->emitter.emit((uint32_t)((sel << 16) | (name_ki & 0xFFFF)), field.line);
+                }
             }
             else
             {
-                nargs = generic_argument_list(base, sig);
+                int ngeneric = 0;
+                int nargs = generic_argument_list(base, sig, &ngeneric);
+                if (nargs & 0x80)
+                {
+                    error("Cannot spread arguments into a generic call.");
+                    nargs &= 0x7F;
+                }
+                /* generic_argument_list only cross-checks ngeneric against a
+                ** script FuncSig (sig!=null); a native generic method has no
+                ** FuncSig, so check its ObjNative::generic_arity here — same
+                ** "wrong number of type arguments" error either way. */
+                if (is_native_generic && ngeneric != native_generic_arity)
+                {
+                    error("Wrong number of type arguments for generic function.");
+                }
+
+                /* 3-word instruction: OP_INVOKE_GENERIC + name constant + ngeneric */
+                state_->emitter.emit_abc(OP_INVOKE_GENERIC, base, nargs, 1, field.line);
+                state_->emitter.emit((uint32_t)((sel << 16) | (name_ki & 0xFFFF)), field.line);
+                state_->emitter.emit((uint32_t)ngeneric, field.line);
             }
 
-            /* 2-word instruction: OP_INVOKE + name constant */
-            int sel = vm_->intern_selector(field.start, field.length);
-            int name_ki = state_->emitter.add_string_constant(field.start, field.length);
-            state_->emitter.emit_abc(OP_INVOKE, base, nargs, 1, field.line);
-            state_->emitter.emit((uint32_t)((sel << 16) | (name_ki & 0xFFFF)), field.line);
-
             state_->next_reg = base + 1;
-            if (dest >= 0 && dest != base)
+            /* A self-returning method on a receiver of known class leaves a
+            ** value of that same class in `base`: the next link of the
+            ** chain (`a.b().c()`) can dispatch statically as well. Recorded
+            ** only when a dot follows at once — the fact never outlives
+            ** this chain. A receiver known only by annotation may be a
+            ** subclass instance, so its override must not change the
+            ** promise. */
+            if (plain_call && receiver_has_static_class && current_.type == TOK_DOT &&
+                static_sig && static_sig->returns_self &&
+                (receiver_exact || !method_overridden_below(receiver_class_name, receiver_class_len, field)))
+            {
+                typed_call_reg_ = base;
+                typed_call_class_.type = TOK_IDENTIFIER;
+                typed_call_class_.start = receiver_class_name;
+                typed_call_class_.length = receiver_class_len;
+                typed_call_class_.line = field.line;
+                typed_call_exact_ = receiver_exact;
+            }
+            /* Defer the move into dest when another link continues the
+            ** chain right after (`a.b().c()`, `a.b()[0]`, `a.b()(x)`) —
+            ** see call_expr()'s identical comment and chain_continues(). */
+            if (dest >= 0 && dest != base && !chain_continues())
             {
                 emit_move(dest, base);
                 free_reg(base);
@@ -1300,7 +1988,21 @@ namespace zen
 
         /* Field read */
         int name_ki = state_->emitter.add_string_constant(field.start, field.length);
-        state_->emitter.emit_abc(OP_GETFIELD, reg, obj, name_ki, field.line);
+        if (checked_fidx >= 0)
+        {
+            state_->emitter.emit_abc(OP_GETFIELD_IDXC, reg, obj, checked_fidx, field.line);
+            state_->emitter.emit((uint32_t)ZEN_ENCODE(OP_GETFIELD, reg, obj, name_ki), field.line);
+            Token fcls;
+            if (current_.type == TOK_DOT &&
+                field_class_guess(receiver_class_name, receiver_class_len, checked_fidx, fcls))
+            {
+                typed_call_reg_ = reg;
+                typed_call_class_ = fcls;
+                typed_call_exact_ = false;
+            }
+        }
+        else
+            state_->emitter.emit_abc(OP_GETFIELD, reg, obj, name_ki, field.line);
         if (obj != reg)
             free_reg(obj);
         return reg;
@@ -1352,8 +2054,11 @@ namespace zen
         /* If reg is truthy (not nil/false), skip right side */
         int jump = state_->emitter.emit_jump(OP_JMPIF, reg, line);
 
-        /* Parse right operand */
-        int right = parse_precedence(PREC_OR + 1, reg);
+        /* Parse right operand. dest=-1, not reg — same reasoning as
+        ** logical_and()/logical_or(): avoids forcing a premature MOVE of a
+        ** bare self/local before a following `.field` can use
+        ** OP_GETFIELD_IDX's O(1) path. */
+        int right = parse_precedence(PREC_OR + 1, -1);
         if (right != reg)
         {
             emit_move(reg, right);
@@ -1385,23 +2090,42 @@ namespace zen
 
         consume(TOK_RBRACKET, "Expected ']' after subscript.");
 
+        const char *element_class_name = nullptr;
+        int32_t element_class_len = 0;
+        const bool has_typed_element =
+            array_element_class(obj, element_class_name, element_class_len);
+
         int reg = (dest >= 0) ? dest : alloc_reg();
 
         /* Assignment: obj[idx] = expr */
         if (can_assign && match(TOK_EQ))
         {
-            /* Preserve container/index across RHS evaluation.
-            ** RHS parsing can allocate/free temporaries and clobber these regs. */
-            int obj_hold = alloc_reg();
-            int idx_hold = alloc_reg();
-            emit_move(obj_hold, obj);
-            emit_move(idx_hold, index);
+            /* Preserve a container/index that lives in a temporary across
+            ** the RHS evaluation. A local needs no copy: it is read after
+            ** the RHS, which is also the order Python evaluates
+            ** `a[i] = f()` in (RHS first, then the target). This is the
+            ** `dist[nb] = d` / `keys[i] = keys[p]` shape of every array
+            ** algorithm — two MOVEs per store otherwise. */
+            int obj_hold = obj;
+            int idx_hold = index;
+            if (!is_local_reg(obj))
+            {
+                obj_hold = alloc_reg();
+                emit_move(obj_hold, obj);
+            }
+            if (!is_local_reg(index))
+            {
+                idx_hold = alloc_reg();
+                emit_move(idx_hold, index);
+            }
 
             int val = expression(-1);
             state_->emitter.emit_abc(OP_SETINDEX, obj_hold, idx_hold, val, previous_.line);
             free_reg(val);
-            free_reg(idx_hold);
-            free_reg(obj_hold);
+            if (idx_hold != index)
+                free_reg(idx_hold);
+            if (obj_hold != obj)
+                free_reg(obj_hold);
             free_reg(index);
             if (obj != reg)
                 free_reg(obj);
@@ -1412,7 +2136,7 @@ namespace zen
         if (can_assign && (check(TOK_PLUS_EQ) || check(TOK_MINUS_EQ) ||
                            check(TOK_STAR_EQ) || check(TOK_SLASH_EQ) ||
                            check(TOK_PERCENT_EQ) || check(TOK_DSLASH_EQ) ||
-                           check(TOK_DSTAR_EQ)))
+                           check(TOK_DSTAR_EQ) || check(TOK_AMP_EQ) || check(TOK_PIPE_EQ) || check(TOK_CARET_EQ) || check(TOK_LSHIFT_EQ) || check(TOK_RSHIFT_EQ)))
         {
             Token op = current_;
             advance();
@@ -1443,6 +2167,21 @@ namespace zen
             case TOK_DSTAR_EQ:
                 arith = OP_POW;
                 break;
+                case TOK_AMP_EQ:
+                arith = OP_BAND;
+                break;
+                case TOK_PIPE_EQ:
+                arith = OP_BOR;
+                break;
+                case TOK_CARET_EQ:
+                arith = OP_BXOR;
+                break;
+                case TOK_LSHIFT_EQ:
+                arith = OP_SHL;
+                break;
+                case TOK_RSHIFT_EQ:
+                arith = OP_SHR;
+                break;
             default:
                 break;
             }
@@ -1457,6 +2196,16 @@ namespace zen
 
         /* Read */
         state_->emitter.emit_abc(OP_GETINDEX, reg, obj, index, previous_.line);
+        if (has_typed_element)
+        {
+            typed_subscript_reg_ = reg;
+            typed_subscript_class_.start = element_class_name;
+            typed_subscript_class_.length = element_class_len;
+        }
+        else
+        {
+            typed_subscript_reg_ = -1;
+        }
         free_reg(index);
         if (obj != reg)
             free_reg(obj);
@@ -1537,6 +2286,124 @@ namespace zen
     ** Array literal: [a, b, c]  or  [expr for var in iterable [if cond]]
     ** ========================================================= */
 
+
+    /* Shared by list/set/dict comprehensions and by a generator expression
+    ** used as a call argument. On entry the caller has: parsed the body once
+    ** and found `for` (current_ is TOK_FOR), rolled the emitter, registers
+    ** and speculative globals back to before it, saved the lexer state at
+    ** the body's start, and emitted the empty container into `reg`. Any
+    ** number of `for` clauses (nested loops, tuple targets allowed), each
+    ** with any number of `if` filters; the body is re-parsed inside the
+    ** innermost loop. kind: 0 list, 1 set, 2 dict (`key: value` body). */
+    void Compiler::comprehension_into(int reg, int kind, const LexerState &body_lex, Token body_cur, Token body_prev, int line)
+    {
+        struct Clause
+        {
+            int iter_reg, var_reg, entry_jump, loop_start, nnames;
+            CondJump filters[8];
+            int nfilters;
+        };
+        static const int kMaxClauses = 4;
+        Clause clauses[kMaxClauses];
+        int nc = 0;
+        while (check(TOK_FOR))
+        {
+            if (nc >= kMaxClauses)
+            {
+                error("Too many 'for' clauses in a comprehension.");
+                return;
+            }
+            advance();
+            Clause &c = clauses[nc++];
+            c.nfilters = 0;
+            begin_scope();
+            Token names[8];
+            int nnames = 0;
+            do
+            {
+                if (!match(TOK_UNDERSCORE)) consume(TOK_IDENTIFIER, "Expected variable name after 'for'.");
+                if (nnames < 8) names[nnames++] = previous_;
+            } while (match(TOK_COMMA) && !check(TOK_IN));
+            consume(TOK_IN, "Expected 'in' after variable name.");
+            c.nnames = nnames;
+
+            c.iter_reg = alloc_reg();
+            int ir = parse_precedence(PREC_OR, c.iter_reg); /* PREC_OR: a following `if` is a filter */
+            if (ir != c.iter_reg)
+                emit_move(c.iter_reg, ir);
+            state_->next_reg = c.iter_reg + 1; /* the index MUST be iter_reg + 1 */
+            int idx_reg = alloc_reg();
+            state_->emitter.emit_asbx(OP_LOADI, idx_reg, 0, line);
+            if (nnames == 1)
+                c.var_reg = add_local(names[0]);
+            else
+            {
+                c.var_reg = alloc_reg(); /* the tuple; the names follow it */
+                for (int vi = 0; vi < nnames; vi++)
+                    add_local(names[vi]);
+            }
+            c.entry_jump = state_->emitter.emit_jump(OP_JMP, 0, line);
+            c.loop_start = state_->emitter.current_offset();
+            if (nnames > 1)
+            {
+                int idx_tmp = alloc_reg();
+                for (int vi = 0; vi < nnames; vi++)
+                {
+                    state_->emitter.emit_asbx(OP_LOADI, idx_tmp, vi, line);
+                    state_->emitter.emit_abc(OP_GETINDEX, c.var_reg + 1 + vi, c.var_reg, idx_tmp, line);
+                }
+                free_reg(idx_tmp);
+            }
+            while (match(TOK_IF))
+            {
+                int cond = parse_precedence(PREC_OR, -1); /* `if a if b`: two filters, not a ternary */
+                bool fused = false;
+                int j = cond_false_jump(cond, fused);
+                if (c.nfilters < 8)
+                {
+                    c.filters[c.nfilters].offset = j;
+                    c.filters[c.nfilters].fused = fused;
+                    c.nfilters++;
+                }
+            }
+        }
+
+        /* The body, re-parsed here so it runs inside the innermost loop. */
+        LexerState lex_after = lexer_.save_state();
+        Token cur_after = current_;
+        Token prev_after = previous_;
+        lexer_.restore_state(body_lex);
+        current_ = body_cur;
+        previous_ = body_prev;
+        if (kind == 2)
+        {
+            int k = expression(-1);
+            consume(TOK_COLON, "Expected ':' in dict comprehension.");
+            int v = expression(-1);
+            state_->emitter.emit_abc(OP_SETINDEX, reg, k, v, line);
+            free_reg(v);
+            free_reg(k);
+        }
+        else
+        {
+            int body = expression(-1);
+            state_->emitter.emit_abc(kind == 1 ? OP_SETADD : OP_APPEND, reg, body, 0, line);
+            free_reg(body);
+        }
+        lexer_.restore_state(lex_after);
+        current_ = cur_after;
+        previous_ = prev_after;
+
+        for (int k = nc - 1; k >= 0; k--)
+        {
+            Clause &c = clauses[k];
+            patch_cond_jumps(c.filters, c.nfilters);
+            state_->emitter.patch_jump(c.entry_jump);
+            state_->emitter.emit_for_next(c.var_reg, c.iter_reg, c.loop_start, line);
+            end_scope();
+        }
+    }
+
     int Compiler::array_literal(int dest)
     {
         int reg;
@@ -1579,74 +2446,7 @@ namespace zen
                     state_->next_reg = reg_save;
                     vm_->shrink_globals(glob_save);
 
-                    advance(); /* consume 'for' */
-                    begin_scope();
-
-                    consume(TOK_IDENTIFIER, "Expected variable name after 'for'.");
-                    Token var_name = previous_;
-                    consume(TOK_IN, "Expected 'in' after variable name.");
-
-                    int iter_reg = alloc_reg();
-                    /* Parse iter at PREC_OR so the comprehension 'if' filter token
-                       is not treated as a ternary operator. */
-                    int iter_result = parse_precedence(PREC_OR, iter_reg);
-                    if (iter_result != iter_reg)
-                        emit_move(iter_reg, iter_result);
-
-                    int idx_reg = alloc_reg();
-                    state_->emitter.emit_asbx(OP_LOADI, idx_reg, 0, line);
-
-                    int len_reg = alloc_reg();
-                    state_->emitter.emit_abc(OP_LEN, len_reg, iter_reg, 1, line);
-
-                    int var_reg = add_local(var_name);
-
-                    int loop_start = state_->emitter.current_offset();
-
-                    int cmp_reg = alloc_reg();
-                    state_->emitter.emit_abc(OP_LT, cmp_reg, idx_reg, len_reg, line);
-                    int exit_jump = state_->emitter.emit_jump(OP_JMPIFNOT, cmp_reg, line);
-                    free_reg(cmp_reg);
-
-                    state_->emitter.emit_abc(OP_GETINDEX, var_reg, iter_reg, idx_reg, line);
-
-                    /* Optional `if cond` filter */
-                    int filter_jump = -1;
-                    if (match(TOK_IF))
-                    {
-                        int cond = expression(-1);
-                        filter_jump = state_->emitter.emit_jump(OP_JMPIFNOT, cond, line);
-                        free_reg(cond);
-                    }
-
-                    /* Save lex state AFTER filter — this is where we continue after the body */
-                    LexerState lex_after_filter = lexer_.save_state();
-                    Token cur_after = current_;
-                    Token prev_after = previous_;
-
-                    /* Restore lex to before the body expression and re-parse it inside the loop */
-                    lexer_.restore_state(lex_save);
-                    current_ = cur_save;
-                    previous_ = prev_save;
-                    (void)first; /* was emitted speculatively — discarded */
-
-                    int body = expression(-1);
-                    state_->emitter.emit_abc(OP_APPEND, reg, body, 0, line);
-                    free_reg(body);
-
-                    /* Restore lex to after the filter (skip re-scanning for/in/iter/if) */
-                    lexer_.restore_state(lex_after_filter);
-                    current_ = cur_after;
-                    previous_ = prev_after;
-
-                    if (filter_jump >= 0)
-                        state_->emitter.patch_jump(filter_jump);
-
-                    state_->emitter.emit_abc(OP_ADDI, idx_reg, idx_reg, 1, line);
-                    state_->emitter.emit_loop(loop_start, 0, line);
-                    state_->emitter.patch_jump(exit_jump);
-
-                    end_scope();
+                    comprehension_into(reg, 0, lex_save, cur_save, prev_save, line);
                     /* Restore next_reg to just above the result array reg */
                     state_->next_reg = reg_save;
                     while (match(TOK_NEWLINE))
@@ -1739,64 +2539,7 @@ namespace zen
                 /* NEWMAP was rolled back — re-emit it */
                 state_->emitter.emit_abc(OP_NEWMAP, reg, 0, 0, line);
 
-                advance(); /* consume 'for' */
-                begin_scope();
-                consume(TOK_IDENTIFIER, "Expected variable name after 'for'.");
-                Token var_name = previous_;
-                consume(TOK_IN, "Expected 'in' after variable name.");
-
-                int iter_reg = alloc_reg();
-                int ir = parse_precedence(PREC_OR, iter_reg);
-                if (ir != iter_reg)
-                    emit_move(iter_reg, ir);
-                int idx_reg = alloc_reg();
-                state_->emitter.emit_asbx(OP_LOADI, idx_reg, 0, line);
-                int len_reg = alloc_reg();
-                state_->emitter.emit_abc(OP_LEN, len_reg, iter_reg, 1, line);
-                int var_reg = add_local(var_name);
-
-                int loop_start = state_->emitter.current_offset();
-                int cmp_reg = alloc_reg();
-                state_->emitter.emit_abc(OP_LT, cmp_reg, idx_reg, len_reg, line);
-                int exit_jump = state_->emitter.emit_jump(OP_JMPIFNOT, cmp_reg, line);
-                free_reg(cmp_reg);
-                state_->emitter.emit_abc(OP_GETINDEX, var_reg, iter_reg, idx_reg, line);
-
-                int filter_jump = -1;
-                if (match(TOK_IF))
-                {
-                    int cond = expression(-1);
-                    filter_jump = state_->emitter.emit_jump(OP_JMPIFNOT, cond, line);
-                    free_reg(cond);
-                }
-
-                LexerState lex_after = lexer_.save_state();
-                Token cur_after = current_;
-                Token prev_after = previous_;
-
-                lexer_.restore_state(lex_save);
-                current_ = cur_save;
-                previous_ = prev_save;
-                (void)first_key;
-                (void)first_val;
-
-                int k = expression(-1);
-                consume(TOK_COLON, "Expected ':' in dict comprehension.");
-                int v = expression(-1);
-                state_->emitter.emit_abc(OP_SETINDEX, reg, k, v, line);
-                free_reg(v);
-                free_reg(k);
-
-                lexer_.restore_state(lex_after);
-                current_ = cur_after;
-                previous_ = prev_after;
-
-                if (filter_jump >= 0)
-                    state_->emitter.patch_jump(filter_jump);
-                state_->emitter.emit_abc(OP_ADDI, idx_reg, idx_reg, 1, line);
-                state_->emitter.emit_loop(loop_start, 0, line);
-                state_->emitter.patch_jump(exit_jump);
-                end_scope();
+                comprehension_into(reg, 2, lex_save, cur_save, prev_save, line);
                 while (match(TOK_NEWLINE))
                 {
                 }
@@ -1854,59 +2597,7 @@ namespace zen
             state_->next_reg = reg_save;
             (void)elem0;
 
-            advance(); /* consume 'for' */
-            begin_scope();
-            consume(TOK_IDENTIFIER, "Expected variable name after 'for'.");
-            Token var_name = previous_;
-            consume(TOK_IN, "Expected 'in' after variable name.");
-
-            int iter_reg = alloc_reg();
-            int ir = parse_precedence(PREC_OR, iter_reg);
-            if (ir != iter_reg)
-                emit_move(iter_reg, ir);
-            int idx_reg = alloc_reg();
-            state_->emitter.emit_asbx(OP_LOADI, idx_reg, 0, line);
-            int len_reg = alloc_reg();
-            state_->emitter.emit_abc(OP_LEN, len_reg, iter_reg, 1, line);
-            int var_reg = add_local(var_name);
-
-            int loop_start = state_->emitter.current_offset();
-            int cmp_reg = alloc_reg();
-            state_->emitter.emit_abc(OP_LT, cmp_reg, idx_reg, len_reg, line);
-            int exit_jump = state_->emitter.emit_jump(OP_JMPIFNOT, cmp_reg, line);
-            free_reg(cmp_reg);
-            state_->emitter.emit_abc(OP_GETINDEX, var_reg, iter_reg, idx_reg, line);
-
-            int filter_jump = -1;
-            if (match(TOK_IF))
-            {
-                int cond = expression(-1);
-                filter_jump = state_->emitter.emit_jump(OP_JMPIFNOT, cond, line);
-                free_reg(cond);
-            }
-
-            LexerState lex_after = lexer_.save_state();
-            Token cur_after = current_;
-            Token prev_after = previous_;
-
-            lexer_.restore_state(lex_before_first);
-            current_ = cur_before;
-            previous_ = prev_before;
-
-            int body = expression(-1);
-            state_->emitter.emit_abc(OP_SETADD, reg, body, 0, line);
-            free_reg(body);
-
-            lexer_.restore_state(lex_after);
-            current_ = cur_after;
-            previous_ = prev_after;
-
-            if (filter_jump >= 0)
-                state_->emitter.patch_jump(filter_jump);
-            state_->emitter.emit_abc(OP_ADDI, idx_reg, idx_reg, 1, line);
-            state_->emitter.emit_loop(loop_start, 0, line);
-            state_->emitter.patch_jump(exit_jump);
-            end_scope();
+            comprehension_into(reg, 1, lex_before_first, cur_before, prev_before, line);
             while (match(TOK_NEWLINE))
             {
             }
@@ -2014,11 +2705,11 @@ namespace zen
         }
         consume(TOK_COLON, "Expected ':' after lambda parameters.");
 
-        /* Body: single expression */
-        int result = expression(0);
-        if (result != 0)
-            emit_move(0, result);
-        state_->emitter.emit_abc(OP_RETURN, 0, 1, 0, previous_.line);
+        /* Body: one expression into a temporary above the parameters —
+        ** compiled with dest 0 it clobbered parameter 0 (`lambda x: f(g(x))`
+        ** read the upvalue f into R[0] before x was used). */
+        int result = expression(-1);
+        state_->emitter.emit_abc(OP_RETURN, result, 1, 0, previous_.line);
 
         ObjFunc *fn = state_->emitter.end(state_->max_reg);
         fn->arity = arity;

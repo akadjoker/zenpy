@@ -118,6 +118,7 @@ namespace zen
         TOK_DOT,        /* . */
         TOK_QDOT,       /* ?. (optional chaining) */
         TOK_DQMARK,     /* ?? (null coalescing) */
+        TOK_QMARK,      /* ? (nullable type annotation: `left: Tree?`) */
         TOK_COLON,      /* : */
         TOK_SEMICOLON,  /* ; (allowed but optional, for one-liners) */
         TOK_ARROW,      /* -> (return type hint) */

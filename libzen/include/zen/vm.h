@@ -79,6 +79,8 @@ namespace zen
     {
         ObjClosure *closure; /* closure a executar (nullptr = top-level script) */
         ObjFunc *func;       /* func shortcut (== closure->func) */
+        Value *constants;    /* == func->constants, cached so LOAD_STATE reads only the frame */
+        ObjUpvalue **upvalues; /* == closure->upvalues, same reason */
         Instruction *ip;     /* instruction pointer (ponteiro directo) */
         Value *base;         /* base dos registos deste frame */
         int ret_reg;         /* registo no caller onde começam os resultados */
@@ -127,6 +129,11 @@ namespace zen
 
         /* --- Natives --- */
         int def_native(const char *name, NativeFn fn, int arity, int flags = 0);
+        /* Keyword arguments of the native call in progress (nullptr when
+        ** none): the compiler passes `f(x, key=v)` to a native as a trailing
+        ** map, the VM parks it here around the call. */
+        ObjMap *kwargs() const { return kwargs_; }
+        ObjMap *kwargs_ = nullptr;
 
         /* --- Module registry --- */
         void register_lib(const NativeLib *lib);  /* make available for import */
@@ -146,7 +153,12 @@ namespace zen
             ClassBuilder(VM *vm, const char *name);
             ClassBuilder &parent(const char *parent_name);
             ClassBuilder &field(const char *name);
-            ClassBuilder &method(const char *name, NativeFn fn, int arity);
+            ClassBuilder &method(const char *name, NativeFn fn, int arity, int flags = 0); /* flags: ZEN_NATIVE_GC_SAFE */
+            /* entity.get_component<Transform>(): a native method taking
+            ** `generic_arity` type arguments ahead of `arity` value
+            ** arguments. Variadic value arity (-1, like plain method()) is
+            ** not supported for generics yet — arity must be >= 0. */
+            ClassBuilder &generic_method(const char *name, GenericNativeFn fn, int generic_arity, int arity);
             ClassBuilder &ctor(NativeClassCtor fn);       /* native constructor (returns void*) */
             ClassBuilder &dtor(NativeClassDtor fn);       /* native destructor */
             ClassBuilder &persistent(bool p = true);      /* instances NOT managed by GC */
@@ -225,6 +237,8 @@ namespace zen
             SLOT_EQ,
             SLOT_LT,
             SLOT_LE,
+            SLOT_GT, /* reflected partner of LT: `a < b` may run b.__gt__(a) */
+            SLOT_GE, /* reflected partner of LE */
             SLOT_STR,
             SLOT_LEN,
             SLOT_OPERATOR_COUNT = kOperatorSlotCount
@@ -288,6 +302,11 @@ namespace zen
         void close_upvalues(ObjFiber *fiber, Value *last);
         bool call_value(ObjFiber *fiber, Value callee, int nargs, int nresults);
         bool call_closure(ObjFiber *fiber, ObjClosure *closure, int nargs, int nresults);
+        /* C++ entry points do not put their arguments on a GC-marked VM
+        ** stack. Keep the public native-call convention in one place. */
+        Value call_native_from_cpp(ObjNative *native, Value receiver,
+                                   Value *args, int nargs, bool has_receiver);
+        Value call_closure_from_cpp(ObjClosure *closure, Value *args, int nargs);
         void run_nested(ObjClosure *closure);
         char *try_read_cb(const char *path, long *out_size); /* read file via callbacks */
 
@@ -344,6 +363,7 @@ namespace zen
         ObjString **selectors_;       /* interned method names (heap-allocated) */
         int num_selectors_;
         int selectors_capacity_;
+        int init_selector_; /* vtable slot of "__init__": -1 until that name is interned */
 
     public:
         bool had_error() const { return had_error_; }
@@ -354,6 +374,11 @@ namespace zen
         int num_selectors() const { return num_selectors_; }
         const char *selector_name(int idx) const { return (idx >= 0 && idx < num_selectors_ && selectors_[idx]) ? selectors_[idx]->chars : nullptr; }
     };
+
+    /* builtin_base.cpp: printf-style "fmt" % rhs (rhs: one value or an array of them) */
+    Value zen_percent_format(VM *vm, Value fmt, Value rhs);
+    /* builtin_base.cpp: ordering with __lt__ on instances, values_compare() otherwise */
+    int zen_compare_vm(VM *vm, Value a, Value b);
 
 } /* namespace zen */
 

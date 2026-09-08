@@ -47,6 +47,7 @@ namespace zen
         "LE",
         "NOT",
         "CONTAINS",
+        "IS",
         "JMP",
         "JMPIF",
         "JMPIFNOT",
@@ -60,6 +61,7 @@ namespace zen
         "NEWFIBER",
         "RESUME",
         "YIELD",
+        "AWAIT",
         "FOR_ITER",
         "NEWARRAY",
         "NEWMAP",
@@ -99,6 +101,39 @@ namespace zen
         "ASSERT",
         "HALT",
         "IMPORT",
+        /* This table was missing OP_IS, OP_AWAIT, OP_CLASSFIELDDEF,
+        ** OP_GETGLOBAL_AUG and OP_SETGLOBAL_AUG (pre-existing drift vs. the
+        ** OpCode enum in opcodes.h — opcode_name() indexes this array
+        ** directly by (int)op, so every entry below IS was silently naming
+        ** the WRONG opcode). Filled in while adding the two generics
+        ** opcodes below, since both must land at their real enum index. */
+        "CLASSFIELDDEF",
+        "GETGLOBAL_AUG",
+        "SETGLOBAL_AUG",
+        "CALL_GENERIC",
+        "INVOKE_GENERIC",
+        "CLASSFLATTEN",
+        "CLASSSEAL",
+        "INVOKE_VT_FAST",
+        "FIELD_MULADD",
+        "LTIJMPIFNOT",
+        "LEIJMPIFNOT",
+        "GTIJMPIFNOT",
+        "GEIJMPIFNOT",
+        "JMPIFNIL",
+        "JMPIFNOTNIL",
+        "JMPIFEQNIL",
+        "JMPIFNEQNIL",
+        "FOR_NEXT",
+        "GETFIELD_IDXC",
+        "SETFIELD_IDXC",
+        "EQIJMPIFNOT",
+        "NEIJMPIFNOT",
+        "INVOKE_R",
+        "INVOKE_VT_R",
+        "EQJMPIFNOT",
+        "NEJMPIFNOT",
+        "RETURNNIL",
     };
 
     const char *opcode_name(OpCode op)
@@ -315,6 +350,24 @@ namespace zen
                 printf("G[%d] = R[%d]", bx, a);
             break;
         }
+        case OP_GETGLOBAL_AUG:
+        {
+            const char *gn = global_name_safe(vm, bx);
+            if (gn)
+                printf("R[%d] = G[%d]  \t; '%s' (aug, unshared read)", a, bx, gn);
+            else
+                printf("R[%d] = G[%d]  \t; (aug, unshared read)", a, bx);
+            break;
+        }
+        case OP_SETGLOBAL_AUG:
+        {
+            const char *gn = global_name_safe(vm, bx);
+            if (gn)
+                printf("G[%d] = R[%d]  \t; '%s' (aug, unshared write)", bx, a, gn);
+            else
+                printf("G[%d] = R[%d]  \t; (aug, unshared write)", bx, a);
+            break;
+        }
 
         /* === Arithmetic === */
         case OP_ADD:  printf("R[%d] = R[%d] + R[%d]", a, b, c); break;
@@ -367,11 +420,51 @@ namespace zen
         case OP_JMPIFNOT:
             printf("if !R[%d]: pc += %d  \t; -> %04d", a, sbx, offset + 1 + sbx);
             break;
+        case OP_JMPIFNIL:
+            printf("if R[%d] is None: -> %04d", a, offset + 1 + sbx);
+            break;
+        case OP_JMPIFNOTNIL:
+            printf("if R[%d] is not None: -> %04d", a, offset + 1 + sbx);
+            break;
+        case OP_JMPIFEQNIL:
+            printf("if R[%d] == None: -> %04d", a, offset + 1 + sbx);
+            break;
+        case OP_JMPIFNEQNIL:
+            printf("if R[%d] != None: -> %04d", a, offset + 1 + sbx);
+            break;
+        case OP_LTIJMPIFNOT:
+        case OP_LEIJMPIFNOT:
+        case OP_GTIJMPIFNOT:
+        case OP_GEIJMPIFNOT:
+        case OP_EQIJMPIFNOT:
+        case OP_NEIJMPIFNOT:
+        {
+            uint32_t word2 = func->code[offset + 1];
+            int jsbx = ZEN_SBX(word2);
+            const char *rel = op == OP_LTIJMPIFNOT ? "<" : op == OP_LEIJMPIFNOT ? "<=" : op == OP_GTIJMPIFNOT ? ">"
+                            : op == OP_GEIJMPIFNOT ? ">=" : op == OP_EQIJMPIFNOT ? "==" : "!=";
+            printf("if !(R[%d] %s %d): -> %04d", b, rel, (int)(int8_t)c, offset + 2 + jsbx);
+            printf("\n");
+            printf("   |  %04d  %-16s", offset + 1, "(jump-offset)");
+            printf("sBx=%d  \t; -> %04d", jsbx, offset + 2 + jsbx);
+            return offset + 2;
+        }
 
         /* === Functions === */
         case OP_CALL:
             printf("R[%d] = R[%d](%d args)  \t; %d results", a, a, b, c);
             break;
+        case OP_CALL_GENERIC:
+        {
+            /* 2-word: word2 = ngeneric (low 16 bits) */
+            uint32_t word2 = func->code[offset + 1];
+            int ngeneric = (int)(word2 & 0xFFFF);
+            printf("R[%d] = R[%d]<%d types>(%d args)  \t; %d results", a, a, ngeneric, b - ngeneric, c);
+            printf("\n");
+            printf("   |  %04d  %-16s", offset + 1, "(ngeneric)");
+            printf("%d", ngeneric);
+            return offset + 2;
+        }
         case OP_CALLGLOBAL:
         {
             /* 2-word: word2 has Bx=global index */
@@ -389,6 +482,9 @@ namespace zen
             if (gn) printf("  \t; '%s'", gn);
             return offset + 2;
         }
+        case OP_RETURNNIL:
+            printf("return None");
+            break;
         case OP_RETURN:
             if (b == 0)
                 printf("return (no value)");
@@ -443,9 +539,25 @@ namespace zen
             break;
 
         /* === Iteration === */
+        case OP_FOR_NEXT:
+        {
+            int32_t joff = (int32_t)func->code[offset + 1];
+            printf("if next(R[%d]) -> R[%d]: -> %04d", b, a, offset + 2 + joff);
+            printf("\n");
+            printf("   |  %04d  %-16s", offset + 1, "(jump-offset)");
+            printf("%d", joff);
+            return offset + 2;
+        }
         case OP_FOR_ITER:
-            printf("R[%d] = next(R[%d]); if done -> ???", a, b);
-            break;
+        {
+            /* 2-word: word2 = signed jump offset (full int32_t, not sBx) */
+            int32_t joff = (int32_t)func->code[offset + 1];
+            printf("R[%d] = next(R[%d]); if done: pc += %d  \t; -> %04d", a, b, joff, offset + 2 + joff);
+            printf("\n");
+            printf("   |  %04d  %-16s", offset + 1, "(jump-offset)");
+            printf("%d", joff);
+            return offset + 2;
+        }
         case OP_ITER_ELEM:
             printf("R[%d] = iter_elem(R[%d], %d)", a, b, c);
             break;
@@ -496,6 +608,26 @@ namespace zen
         case OP_GETFIELD_IDX:
             printf("R[%d] = R[%d].fields[%d]", a, b, c);
             break;
+        case OP_GETFIELD_IDXC:
+        {
+            uint32_t word2 = func->code[offset + 1];
+            const char *fname = const_str(func, ZEN_C(word2));
+            printf("R[%d] = R[%d].fields[%d] if field %d is \"%s\"", a, b, c, c, fname ? fname : "?");
+            printf("\n");
+            printf("   |  %04d  %-16s", offset + 1, "(GETFIELD)");
+            printf("R[%d] = R[%d].%s", ZEN_A(word2), ZEN_B(word2), fname ? fname : "?");
+            return offset + 2;
+        }
+        case OP_SETFIELD_IDXC:
+        {
+            uint32_t word2 = func->code[offset + 1];
+            const char *fname = const_str(func, ZEN_B(word2));
+            printf("R[%d].fields[%d] = R[%d] if field %d is \"%s\"", a, b, c, b, fname ? fname : "?");
+            printf("\n");
+            printf("   |  %04d  %-16s", offset + 1, "(SETFIELD)");
+            printf("R[%d].%s = R[%d]", ZEN_A(word2), fname ? fname : "?", ZEN_C(word2));
+            return offset + 2;
+        }
         case OP_SETFIELD_IDX:
             printf("R[%d].fields[%d] = R[%d]", a, b, c);
             break;
@@ -534,13 +666,24 @@ namespace zen
             return offset + 2;
         }
         case OP_INVOKE_VT:
+        case OP_INVOKE_R:
+        case OP_INVOKE_VT_R:
         {
-            const char *sname = selector_name_safe(vm, c);
-            if (sname)
-                printf("R[%d] = R[%d].vt[%d](%d args)  \t; .%s()", a, a, c, b, sname);
+            /* 2-word, same layout as OP_INVOKE: word2 = (sel_slot << 16) | name_ki.
+            ** The _R forms read the receiver from R[C] instead of R[A]. */
+            uint32_t word2 = func->code[offset + 1];
+            int sel_slot = (int)(word2 >> 16);
+            int name_ki = (int)(word2 & 0xFFFF);
+            const char *mname = const_str(func, name_ki);
+            int rcv = (op == OP_INVOKE_VT) ? a : c;
+            if (op == OP_INVOKE_R)
+                printf("R[%d] = R[%d].%s(%d args)  \t; sel=%d", a, rcv, mname ? mname : "?", b, sel_slot);
             else
-                printf("R[%d] = R[%d].vt[%d](%d args)", a, a, c, b);
-            break;
+                printf("R[%d] = R[%d].vt[%d]:%s(%d args)", a, rcv, sel_slot, mname ? mname : "?", b);
+            printf("\n");
+            printf("   |  %04d  %-16s", offset + 1, "(invoke-data)");
+            printf("sel=%d name_ki=%d", sel_slot, name_ki);
+            return offset + 2;
         }
         case OP_SUPER_INVOKE:
         {
@@ -562,6 +705,27 @@ namespace zen
             printf("   |  %04d  %-16s", offset + 2, "(parent-gidx)");
             printf("G[%d]", pgidx);
             if (pname) printf("  \t; '%s'", pname);
+            return offset + 3;
+        }
+
+        case OP_INVOKE_GENERIC:
+        {
+            /* 3-word: word2=(sel_slot<<16|name_ki) like OP_INVOKE, word3=ngeneric */
+            uint32_t word2 = func->code[offset + 1];
+            uint32_t word3 = func->code[offset + 2];
+            int sel_slot = (int)(word2 >> 16);
+            int name_ki = (int)(word2 & 0xFFFF);
+            int ngeneric = (int)word3;
+            const char *mname = const_str(func, name_ki);
+            printf("R[%d] = R[%d].%s<%d types>(%d args)  \t; sel=%d",
+                   a, a, mname ? mname : "?", ngeneric, b - ngeneric, sel_slot);
+            printf("\n");
+            printf("   |  %04d  %-16s", offset + 1, "(invoke-data)");
+            printf("sel=%d name_ki=%d", sel_slot, name_ki);
+            if (mname) printf("  \t; \"%s\"", mname);
+            printf("\n");
+            printf("   |  %04d  %-16s", offset + 2, "(ngeneric)");
+            printf("%d", ngeneric);
             return offset + 3;
         }
 
@@ -620,6 +784,36 @@ namespace zen
             printf("R[%d].field_default[%d] = K[%d]", a, b, c);
             break;
         }
+        case OP_CLASSFLATTEN:
+        {
+            printf("R[%d].flatten_vtable_from_parent()", a);
+            break;
+        }
+        case OP_CLASSSEAL:
+        {
+            printf("R[%d].seal()", a);
+            break;
+        }
+        case OP_INVOKE_VT_FAST:
+        {
+            printf("R[%d] = R[%d].vt_fast[%d](%d args)", a, a, c, b);
+            break;
+        }
+        case OP_FIELD_MULADD:
+        {
+            uint32_t load_v = func->code[offset + 1];
+            uint32_t mul = func->code[offset + 2];
+            uint32_t add = func->code[offset + 3];
+            uint32_t store = func->code[offset + 4];
+            printf("R[%d].fields[%d] = R[%d].fields[%d] + R[%d].fields[%d] * R[%d]",
+                   ZEN_A(store), ZEN_B(store), ZEN_B(instr), ZEN_C(instr),
+                   ZEN_B(load_v), ZEN_C(load_v), ZEN_C(mul));
+            printf("\n");
+            printf("   |  %04d  %-16s", offset + 1, "(fallback-bytecode)");
+            printf("GETFIELD_MUL / MUL / ADD / SETFIELD_IDX");
+            (void)add;
+            return offset + 5;
+        }
 
         /* === String/Misc === */
         case OP_CONCAT:
@@ -642,6 +836,17 @@ namespace zen
             break;
 
         /* === Fused comparison+jump (2-word) === */
+        case OP_EQJMPIFNOT:
+        case OP_NEJMPIFNOT:
+        {
+            uint32_t word2 = func->code[offset + 1];
+            int jsbx = ZEN_SBX(word2);
+            printf("if !(R[%d] %s R[%d]): -> %04d", b, op == OP_EQJMPIFNOT ? "==" : "!=", c, offset + 2 + jsbx);
+            printf("\n");
+            printf("   |  %04d  %-16s", offset + 1, "(jump-offset)");
+            printf("sBx=%d  \t; -> %04d", jsbx, offset + 2 + jsbx);
+            return offset + 2;
+        }
         case OP_LTJMPIFNOT:
         {
             uint32_t word2 = func->code[offset + 1];
@@ -665,10 +870,10 @@ namespace zen
 
         /* === For loop === */
         case OP_FORPREP:
-            printf("R[%d] -= R[%d+2]; -> %04d  \t; for prep", a, a, offset + 1 + sbx);
+            printf("for R[%d] in range(R[%d], R[%d], R[%d]); if empty -> %04d", a + 3, a, a + 1, a + 2, offset + 1 + sbx);
             break;
         case OP_FORLOOP:
-            printf("R[%d] += R[%d+2]; if < R[%d+1]: -> %04d", a, a, a, offset + 1 + sbx);
+            printf("if --R[%d] > 0: R[%d] += R[%d]; R[%d] = R[%d]; -> %04d", a + 1, a, a + 2, a + 3, a, offset + 1 + sbx);
             break;
 
         /* === Fused field+arith (2-word) === */

@@ -135,8 +135,8 @@ namespace zen
         OP_LEJMPIFNOT, /* if !(R[B] <= R[C]): pc += sBx(next_word) */
 
         /* --- Numeric for loop (superinstruction) --- */
-        OP_FORPREP, /* R[A]-=R[A+2]; if R[A]>=R[A+1]: pc+=sBx (skip) */
-        OP_FORLOOP, /* R[A]+=R[A+2]; if R[A]<R[A+1]: pc+=sBx (loop)  */
+        OP_FORPREP, /* range(R[A],R[A+1],R[A+2]) → count in R[A+1], R[A+3]=R[A]; empty: pc+=sBx */
+        OP_FORLOOP, /* if --R[A+1]>0: R[A]+=R[A+2]; R[A+3]=R[A]; pc+=sBx (loop)  */
 
         /* --- Fused field+arith (2-word superinstructions) --- */
         OP_GETFIELD_MUL, /* word1: R[A]=R[B].fields[C]; word2: R[A]=R[B]*R[C] */
@@ -172,6 +172,101 @@ namespace zen
         ** slot this pair reads and rewrites. */
         OP_GETGLOBAL_AUG,
         OP_SETGLOBAL_AUG,
+
+        /* --- Reified generics: f<T,U>(args) / obj.m<T>(args) ---
+        ** Type args and value args are counted separately (unlike the old
+        ** f<T>(x) == f(T,x) sugar). Registers are still contiguous, no
+        ** allocation: [T0,T1,...,arg0,arg1,...] right after the callee
+        ** (or after 'self' for a method). See ObjFunc::generic_arity. */
+        OP_CALL_GENERIC,   /* word1: R[A](gT..gT+B2-1 | args..) ABC=base,nargs,nresults (2-word)
+                            ** word2: ngeneric (16-bit, low half) — generic arg count */
+        OP_INVOKE_GENERIC, /* like OP_INVOKE, plus a 3rd word carrying ngeneric (3-word) */
+
+        /* as_class(R[A]).flatten_vtable_from_parent() — copies every nil
+        ** slot in R[A]'s vtable from its parent's vtable (recursively
+        ** already-flattened, since a class always compiles/runs before its
+        ** subclasses), so OP_INVOKE's vtable lookup finds an inherited,
+        ** non-overridden method in O(1) instead of walking the parent
+        ** chain. Emitted once, right after a script class body finishes
+        ** (after every OP_SETFIELD that could have added a method) — see
+        ** ClassBuilder::end()'s "Flatten parent vtable" in vm.cpp for the
+        ** equivalent native-class path this mirrors. No-op if R[A] has no
+        ** parent or the parent's vtable is empty. */
+        OP_CLASSFLATTEN,
+
+        /* Marks a completed class immutable. Emitted once at the end of a
+        ** script class body; ClassBuilder::end() does the native equivalent. */
+        OP_CLASSSEAL,
+
+        /* Fully static script-method call. The compiler emits it only for
+        ** an explicitly typed receiver with an exact, non-generic arity. */
+        OP_INVOKE_VT_FAST,
+
+        /* Five-word movement update fusion. The following four words retain
+        ** the original GETFIELD_MUL/MUL/ADD/SETFIELD_IDX sequence so the VM
+        ** can deopt without changing language semantics. */
+        OP_FIELD_MULADD,
+
+        /* --- Compare-with-immediate branches (2-word: sBx in the next word)
+        ** if !(R[B] <op> C), C a signed 8-bit literal — the `i < 10`,
+        ** `hp <= 0`, `n > 2` shape of loop bounds and guards, without a
+        ** LOADI per test. Operand types behave exactly as in LTJMPIFNOT
+        ** with the literal in a register (numbers, strings, __lt__/__le__). */
+        OP_LTIJMPIFNOT, /* if !(R[B] <  C): pc += sBx(next word) */
+        OP_LEIJMPIFNOT, /* if !(R[B] <= C)                        */
+        OP_GTIJMPIFNOT, /* if !(R[B] >  C), i.e. !(C <  R[B])     */
+        OP_GEIJMPIFNOT, /* if !(R[B] >= C), i.e. !(C <= R[B])     */
+
+        /* --- Branches on None (1-word, A + sBx) ---
+        ** `if x is None:` / `if x == None:` and their negations branch on
+        ** R[A] directly instead of LOADNIL + EQ/IS + JMPIFNOT. The EQ pair
+        ** still honours a class's __eq__; the IS pair is pure identity. */
+        OP_JMPIFNIL,    /* if R[A] is None:      pc += sBx  (`x is not None:`) */
+        OP_JMPIFNOTNIL, /* if R[A] is not None:  pc += sBx  (`x is None:`)     */
+        OP_JMPIFEQNIL,  /* if R[A] == None:      pc += sBx  (`x != None:`)     */
+        OP_JMPIFNEQNIL, /* if R[A] != None:      pc += sBx  (`x == None:`)     */
+
+        /* --- for-each step at the bottom of the loop (2-word) ---
+        ** word1: A = loop variable, B = iterable (R[B+1] is the cursor);
+        ** word2: signed offset back to the body. If R[B] has a next element
+        ** it goes to R[A] and pc += offset; otherwise fall through. The loop
+        ** is entered by a JMP to this instruction, so one dispatch per
+        ** iteration replaces FOR_ITER + JMP. */
+        OP_FOR_NEXT,
+
+        /* --- Checked direct field access (2-word) ---
+        ** For a receiver whose class the compiler knows statically but
+        ** cannot vouch for (an annotated parameter, an inferred local, an
+        ** Array[T] element): word1 carries the field index, word2 is the
+        ** ordinary by-name GETFIELD/SETFIELD. If the instance's class has
+        ** that very field name at that index the access is O(1) and word2
+        ** is skipped; otherwise word2 runs as it always would. */
+        OP_GETFIELD_IDXC, /* word1: R[A] = R[B].fields[C] if names match; word2: GETFIELD A,B,name */
+        OP_SETFIELD_IDXC, /* word1: R[A].fields[B] = R[C] if names match; word2: SETFIELD A,name,C */
+
+        /* Equality against an 8-bit literal, fused with the branch (2-word,
+        ** like LTIJMPIFNOT): `if x == 0:` / `if n != 1:`. Same operand
+        ** semantics as EQ with the literal in a register (int/float
+        ** cross-type equality, __eq__ on instances). */
+        OP_EQIJMPIFNOT, /* if !(R[B] == C): pc += sBx(next word) */
+        OP_NEIJMPIFNOT, /* if !(R[B] != C): pc += sBx(next word) */
+
+        /* Method call whose receiver is a local variable (`b.m()`,
+        ** `self.m()`): the VM copies R[C] into R[A] itself instead of a
+        ** separate MOVE. Word 2 as in OP_INVOKE / OP_INVOKE_VT; the result
+        ** count is always 1 (multi-assign keeps the two-instruction form). */
+        OP_INVOKE_R,    /* R[A] = R[C]; R[A] = R[A].method(R[A+1]..R[A+B]) (2-word) */
+        OP_INVOKE_VT_R, /* same, trying the vtable slot first like OP_INVOKE_VT (2-word) */
+
+        /* Register-register equality fused with the branch (2-word, like
+        ** LTJMPIFNOT): `if cur == goal:` / `while a != b:`. Same operand
+        ** semantics as OP_EQ (deep equality, __eq__ on instances). */
+        OP_EQJMPIFNOT, /* if !(R[B] == R[C]): pc += sBx(next word) */
+        OP_NEJMPIFNOT, /* if !(R[B] != R[C]): pc += sBx(next word) */
+
+        /* `return` with no value and the implicit end of a function:
+        ** LOADNIL R[0] + RETURN R[0] as one dispatch (R[0] is dead here). */
+        OP_RETURNNIL,
     };
 
 /* Encode/Decode — ABC format */

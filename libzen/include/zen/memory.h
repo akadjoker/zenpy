@@ -76,6 +76,7 @@ namespace zen
     
     ObjFunc *new_func(GC *gc);
     ObjNative *new_native(GC *gc, NativeFn fn, int arity, ObjString *name, int flags = 0);
+    ObjNative *new_native_generic(GC *gc, GenericNativeFn fn, int generic_arity, int arity, ObjString *name, int flags = 0);
     ObjArray *new_array(GC *gc);
     ObjMap *new_map(GC *gc);
     ObjClass *new_class(GC *gc, ObjString *name, ObjClass *parent);

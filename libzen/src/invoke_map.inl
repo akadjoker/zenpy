@@ -162,6 +162,61 @@ map_key_lookup:
         LOAD_STATE();
         DISPATCH();
     }
+    /* ---- Python dict methods ---- */
+    if (MAP_METHOD("update"))
+    {
+        if (arg_count != 1 || !is_map(args[0])) RT_ERROR("update() expects a dict");
+        ObjMap *src = as_map(args[0]);
+        gc_pause(&gc_);
+        for (int32_t mi = 0; mi < src->capacity; mi++)
+            if (src->nodes[mi].hash != 0xFFFFFFFFu)
+                map_set(&gc_, map, src->nodes[mi].key, src->nodes[mi].value);
+        gc_resume(&gc_);
+        R[base] = val_nil();
+        break;
+    }
+    if (MAP_METHOD("setdefault"))
+    {
+        if (arg_count < 1) RT_ERROR("setdefault() expects a key");
+        bool found;
+        Value cur = map_get(map, args[0], &found);
+        if (found)
+            R[base] = cur;
+        else
+        {
+            Value dflt = arg_count >= 2 ? args[1] : val_nil();
+            map_set(&gc_, map, args[0], dflt);
+            R[base] = dflt;
+        }
+        break;
+    }
+    if (MAP_METHOD("pop"))
+    {
+        if (arg_count < 1) RT_ERROR("pop() expects a key");
+        bool found;
+        Value cur = map_get(map, args[0], &found);
+        if (found)
+        {
+            map_delete(map, args[0]);
+            R[base] = cur;
+        }
+        else if (arg_count >= 2)
+            R[base] = args[1];
+        else
+            RT_ERROR("pop(): key not found");
+        break;
+    }
+    if (MAP_METHOD("copy"))
+    {
+        gc_pause(&gc_);
+        ObjMap *copy = new_map(&gc_);
+        for (int32_t mi = 0; mi < map->capacity; mi++)
+            if (map->nodes[mi].hash != 0xFFFFFFFFu)
+                map_set(&gc_, copy, map->nodes[mi].key, map->nodes[mi].value);
+        gc_resume(&gc_);
+        R[base] = val_obj((Obj *)copy);
+        break;
+    }
     RT_ERROR("map has no method or key '%s'", mname);
 }
 } while (0);

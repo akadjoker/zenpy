@@ -417,6 +417,7 @@ namespace zen
     {
         ObjFunc *fn = (ObjFunc *)alloc_obj(gc, sizeof(ObjFunc), OBJ_FUNC);
         fn->arity = 0;
+        fn->generic_arity = 0;
         fn->num_regs = 0;
         fn->code_count = 0;
         fn->code_capacity = 0;
@@ -441,6 +442,18 @@ namespace zen
         ObjNative *nat = (ObjNative *)alloc_obj(gc, sizeof(ObjNative), OBJ_NATIVE);
         nat->fn = fn;
         nat->arity = arity;
+        nat->generic_arity = 0;
+        nat->flags = flags;
+        nat->name = name;
+        return nat;
+    }
+
+    ObjNative *new_native_generic(GC *gc, GenericNativeFn fn, int generic_arity, int arity, ObjString *name, int flags)
+    {
+        ObjNative *nat = (ObjNative *)alloc_obj(gc, sizeof(ObjNative), OBJ_NATIVE);
+        nat->generic_fn = fn;
+        nat->arity = arity;
+        nat->generic_arity = generic_arity;
         nat->flags = flags;
         nat->name = name;
         return nat;
@@ -813,12 +826,19 @@ namespace zen
                 h = 0x9e3779b9u;
                 break;
             case VAL_BOOL:
-                h = v.as.boolean ? 0x9e3779bbu : 0x9e3779b9u;
+                /* hash(True) == hash(1): a bool key finds the int entry */
+                h = (uint32_t)(v.as.boolean ? 1 : 0) * 2654435761u;
                 break;
             case VAL_INT:
                 __builtin_unreachable();
             case VAL_FLOAT:
             {
+                double d = v.as.number;
+                if (d == (double)(int64_t)d && d > -9.2e18 && d < 9.2e18)
+                {
+                    h = (uint32_t)(int64_t)d * 2654435761u; /* hash(1.0) == hash(1) */
+                    break;
+                }
                 uint64_t bits;
                 memcpy(&bits, &v.as.number, sizeof(bits));
                 h = (uint32_t)((bits ^ (bits >> 32)) * 2654435761ULL);
@@ -1361,6 +1381,7 @@ namespace zen
         cls->native_dtor = nullptr;
         cls->persistent = parent ? parent->persistent : false;
         cls->constructable = true;
+        cls->sealed = false;
         /* Allocate methods map AFTER all fields are safe for GC traversal */
         cls->methods = new_map(gc);
         return cls;
@@ -1370,11 +1391,12 @@ namespace zen
     {
         ObjInstance *inst;
         int nf = klass->num_fields;
+        const size_t total_size = sizeof(ObjInstance) + sizeof(Value) * (size_t)nf;
         if (klass->persistent)
         {
             /* Persistent: arena alloc sem trigger GC, NUNCA entra na lista do GC.
             ** C++ é dono da memória. Chama vm.destroy_instance() para libertar. */
-            inst = (ObjInstance *)zen_alloc_now(gc, sizeof(ObjInstance));
+            inst = (ObjInstance *)zen_alloc_now(gc, total_size);
             inst->obj.type = OBJ_INSTANCE;
             inst->obj.color = GC_BLACK;
             inst->obj.interned = 0;
@@ -1383,29 +1405,23 @@ namespace zen
         }
         else
         {
-            /* The field array allocation below can trigger GC. Until this
-            ** function returns, the new instance is not yet reachable from a
-            ** VM root, so keep GC disabled during construction. */
-            gc_pause(gc);
-            inst = (ObjInstance *)alloc_obj(gc, sizeof(ObjInstance), OBJ_INSTANCE);
+            /* One allocation, header and fields together; alloc_obj never
+            ** collects, so nothing here needs the GC paused. */
+            inst = (ObjInstance *)alloc_obj(gc, total_size, OBJ_INSTANCE);
         }
 
         inst->klass = klass;
         inst->native_data = nullptr;
         inst->num_fields = nf;
+        inst->inline_field_count = nf;
+        /* A zero-field instance still starts in the inline state: if a
+        ** runtime field is later added, it must allocate a detached buffer
+        ** rather than attempt to realloc a null/non-owned pointer. */
+        inst->fields_inline = true;
+        inst->fields = nullptr;
         if (nf > 0)
         {
-            if (klass->persistent)
-            {
-                /* Persistent instance: fields from arena (zen_alloc_now).
-                ** The GC never sweeps these because the persistent instance
-                ** is not in the GC object list. zen_free releases back to arena. */
-                inst->fields = (Value *)zen_alloc_now(gc, sizeof(Value) * nf);
-            }
-            else
-            {
-                inst->fields = (Value *)zen_alloc(gc, sizeof(Value) * nf);
-            }
+            inst->fields = (Value *)(inst + 1);
             /* A field the class body gave a value starts on that value, the
             ** rest on None. This is what makes "class A:" with "speed = 5.0"
             ** work without a constructor, and it runs before __init__ so a
@@ -1418,8 +1434,6 @@ namespace zen
         {
             inst->fields = nullptr;
         }
-        if (!klass->persistent)
-            gc_resume(gc);
         return inst;
     }
 
@@ -1449,13 +1463,14 @@ namespace zen
                 inst->native_data = nullptr;
             }
         }
-        /* Free fields back to arena */
-        if (inst->fields)
+        /* Detached dynamic fields have their own allocation. Inline fields
+        ** live in the block released just below. */
+        if (inst->fields && !inst->fields_inline)
         {
             zen_free(gc, inst->fields, sizeof(Value) * inst->num_fields);
         }
         /* Free the instance itself back to arena */
-        zen_free(gc, inst, sizeof(ObjInstance));
+        zen_free(gc, inst, sizeof(ObjInstance) + sizeof(Value) * inst->inline_field_count);
     }
 
     /* =========================================================
@@ -1727,7 +1742,10 @@ namespace zen
         case OBJ_CLASS:
             return sizeof(ObjClass);
         case OBJ_INSTANCE:
-            return sizeof(ObjInstance);
+        {
+            ObjInstance *inst = (ObjInstance *)obj;
+            return sizeof(ObjInstance) + sizeof(Value) * inst->inline_field_count;
+        }
         case OBJ_RANGE:
             return sizeof(ObjRange);
         }
@@ -1859,7 +1877,7 @@ namespace zen
                     inst->native_data = nullptr;
                 }
             }
-            if (inst->fields)
+            if (inst->fields && !inst->fields_inline)
                 zen_free(gc, inst->fields, sizeof(Value) * inst->num_fields);
             break;
         }
@@ -2054,6 +2072,9 @@ namespace zen
 
     bool values_deep_equal(Value a, Value b)
     {
+        /* Different tags: only numbers can still be equal (1 == 1.0 == True). */
+        if (a.type != b.type)
+            return values_equal(a, b);
         /* Fast path: same type + same bits */
         if (a.type == b.type)
         {
@@ -2111,6 +2132,18 @@ namespace zen
                     return true;
                 }
 
+                case OBJ_SET:
+                {
+                    ObjSet *sa = (ObjSet *)a.as.obj;
+                    ObjSet *sb = (ObjSet *)b.as.obj;
+                    if (sa->count != sb->count)
+                        return false;
+                    for (int32_t i = 0; i < sa->capacity; i++)
+                        if (sa->nodes[i].hash != 0xFFFFFFFFu && !set_contains(sb, sa->nodes[i].key))
+                            return false;
+                    return true;
+                }
+
                 case OBJ_MAP:
                 {
                     ObjMap *ma = (ObjMap *)a.as.obj;
@@ -2165,3 +2198,110 @@ namespace zen
     }
 
 } /* namespace zen */
+
+/* ---- Python-compatible ordering and float text (see value.h) ---- */
+#include <cmath>
+namespace zen
+{
+    int values_compare(Value a, Value b)
+    {
+        if (is_numeric_like(a) && is_numeric_like(b))
+        {
+            if (a.type == VAL_INT && b.type == VAL_INT)
+                return a.as.integer < b.as.integer ? -1 : (a.as.integer > b.as.integer ? 1 : 0);
+            double x = to_number(a), y = to_number(b);
+            return x < y ? -1 : (x > y ? 1 : 0);
+        }
+        if (is_string(a) && is_string(b))
+        {
+            ObjString *sa = as_string(a), *sb = as_string(b);
+            int n = sa->length < sb->length ? sa->length : sb->length;
+            int c = memcmp(sa->chars, sb->chars, (size_t)n);
+            if (c != 0)
+                return c < 0 ? -1 : 1;
+            return sa->length < sb->length ? -1 : (sa->length > sb->length ? 1 : 0);
+        }
+        if (is_array(a) && is_array(b))
+        {
+            ObjArray *aa = as_array(a), *ab = as_array(b);
+            int na = arr_count(aa), nb = arr_count(ab);
+            int n = na < nb ? na : nb;
+            for (int i = 0; i < n; i++)
+            {
+                int c = values_compare(aa->data[i], ab->data[i]);
+                if (c != 0)
+                    return c;
+            }
+            return na < nb ? -1 : (na > nb ? 1 : 0);
+        }
+        return 0;
+    }
+
+    int format_float_py(double d, char *buf, size_t cap)
+    {
+        if (d != d)
+            return snprintf(buf, cap, "nan");
+        if (d == HUGE_VAL)
+            return snprintf(buf, cap, "inf");
+        if (d == -HUGE_VAL)
+            return snprintf(buf, cap, "-inf");
+        /* Shortest precision that round-trips. */
+        char sci[40];
+        int prec = 1;
+        for (; prec <= 17; prec++)
+        {
+            snprintf(sci, sizeof sci, "%.*e", prec - 1, d);
+            if (strtod(sci, nullptr) == d)
+                break;
+        }
+        /* sci = [-]D.DDDDe[+-]XX : split digits and exponent */
+        const char *p = sci;
+        bool neg = false;
+        if (*p == '-') { neg = true; p++; }
+        char digits[24];
+        int nd = 0;
+        for (; *p && *p != 'e'; p++)
+            if (*p != '.')
+                digits[nd++] = *p;
+        int exp10 = atoi(p + 1); /* value = d1.d2d3.. * 10^exp10 */
+        while (nd > 1 && digits[nd - 1] == '0')
+            nd--;
+        digits[nd] = '\0';
+        char *o = buf;
+        char *end = buf + cap - 1;
+        if (neg && o < end) *o++ = '-';
+        if (exp10 >= -4 && exp10 < 16)
+        {
+            if (exp10 < 0)
+            {
+                if (o < end) *o++ = '0';
+                if (o < end) *o++ = '.';
+                for (int i = 0; i < -exp10 - 1 && o < end; i++) *o++ = '0';
+                for (int i = 0; i < nd && o < end; i++) *o++ = digits[i];
+            }
+            else
+            {
+                for (int i = 0; i <= exp10 && o < end; i++) *o++ = i < nd ? digits[i] : '0';
+                if (o < end) *o++ = '.';
+                if (exp10 + 1 < nd)
+                {
+                    for (int i = exp10 + 1; i < nd && o < end; i++) *o++ = digits[i];
+                }
+                else if (o < end)
+                    *o++ = '0';
+            }
+        }
+        else
+        {
+            if (o < end) *o++ = digits[0];
+            if (nd > 1)
+            {
+                if (o < end) *o++ = '.';
+                for (int i = 1; i < nd && o < end; i++) *o++ = digits[i];
+            }
+            o += snprintf(o, (size_t)(end - o + 1), "e%c%02d", exp10 < 0 ? '-' : '+', exp10 < 0 ? -exp10 : exp10);
+        }
+        *o = '\0';
+        return (int)(o - buf);
+    }
+}

@@ -256,3 +256,398 @@ grep -rn "def_native\|register_fn\|add_method" modules/
 - fib(20): ~0.072s  
 - bench_full (list 500K): ~0.033s
 - string 100K build: ~0.002-0.004s
+
+
+
+Medições atuais, no mesmo core:
+
+| Demo | Zen | Lua | Wren | Python |
+|---|---:|---:|---:|---:|
+| fib | 0,246s | 0,109s | 0,209s | 0,245s |
+| for_loop | 0,199s | 0,042s | 0,143s | 0,489s |
+| method_call | 0,207s | 0,185s | 0,095s | 0,191s |
+| binary_trees | 0,360s | 0,515s | 0,206s | 0,367s |
+
+`for_loop` é o caso mais claro. Como corre no topo do módulo, `sum` e `i` são globais. Cada volta faz:
+
+```text
+GETGLOBAL i, LOADK limite, LT, JMPIFNOT,
+GETGLOBAL sum, GETGLOBAL i, ADD, SETGLOBAL sum,
+GETGLOBAL i, ADDI, SETGLOBAL i, JMP
+```
+
+São 12 instruções por iteração. A mesma lógica dentro de `def loop()` caiu de 0,199s para 0,150s só porque passa a usar registos locais. Isto é um ganho geral, não um opcode de bunnymark.
+
+O próximo trabalho deve ser:
+
+1. Fechar o compilador de loops:
+   - `i += 1` hoje gera `LOADI 1 + ADD`; devia emitir `ADDI`, como já faz `i = i + 1`.
+   - `while i < limite` ainda gera `LT` e `JMPIFNOT` separados, apesar de já existir `OP_LTJMPIFNOT`.
+   - constantes como `5000000` são carregadas em cada volta; num loop local podem ficar num registo antes do loop.
+   - terminar a emissão do `for` numérico geral; `OP_FORPREP/OP_FORLOOP` já existe, mas o compilador ainda não o usa.
+
+2. Fechar chamadas normais:
+   - `fib()` ainda compila para `GETGLOBAL fib` + `CALL`.
+   - `OP_CALLGLOBAL` já existe na VM, mas o compilador nunca o emite.
+   - usar isso em toda chamada direta a função global beneficia fib, helpers, callbacks e jogos.
+
+3. Inferência de tipo local para chamadas:
+   - `toggle = Toggle(...)` já prova o tipo de `toggle`, mas o compilador esquece isso.
+   - `activate()` devolve `self`, mas o compilador não propaga `Self` para `activate().value()`.
+   - se propagar esses factos, usa os `INVOKE_VT_FAST` que já criámos, sem inventar outro caminho para o demo.
+
+4. `binary_trees` já está bem melhor:
+   - Zen está ao nível de Python e bate Lua neste caso.
+   - o que falta é tipo de campos, por exemplo `left: Tree?`, para `self.left.check()` deixar de ser dispatch dinâmico.
+
+
+
+### Estado (2026-09-06, branch perf/lua-hot-path-gc)
+
+Feito, cada ponto num commit, suite 60/60 (3 testes novos: 56, 57, 58):
+
+1. Loops: `i += 1` → ADDI e `while a < b` → LTJMPIFNOT já estavam; agora
+   também `if`/`elif` fundem a comparação, a constante de `while i < 5000000`
+   é carregada uma vez antes do loop, e `for i in range(...)` compila para
+   FORPREP/FORLOOP (contagem fixa à entrada, 1 dispatch por volta).
+2. Chamadas: `fib()` compila para CALLGLOBAL (a VM lê a global para R[A] e
+   segue o caminho do OP_CALL, logo classes/bound methods/erros iguais).
+3. Inferência: `toggle = Toggle(...)` regista a classe (local ou global de
+   módulo); `activate()` que devolve self (`-> Self` ou todos os `return`
+   são `return self`) propaga a classe em `activate().value()`; ambos os
+   elos saem INVOKE_VT. INVOKE_VT passou a 2 palavras com fallback para
+   OP_INVOKE, portanto nunca muda comportamento.
+4. `local = expr` / `return expr` escrevem o resultado direto no registo
+   destino (sem MOVE) quando o RHS é linear.
+
+Medições (mesma janela, best of 3): fib 0,271→0,204s; for_loop (globais)
+0,162→0,157s; for_loop com locais 0,104→0,061s (Lua 0,042s); method_call
+0,238→0,189s; binary_trees 0,371→0,339s. Tabela completa em
+tests/manual/cross_lang_bench/RESULTS.md.
+
+Bugs pré-existentes corrigidos pelo caminho: OP_INVOKE não empacotava
+`*args` em métodos variádicos com receptor dinâmico; `resolve_upvalue`
+marcava `captured` no local com índice==registo, por isso uma variável de
+loop capturada por closure nunca recebia OP_CLOSE (as lambdas viam lixo).
+
+Bunnymark raylib (tests/manual/bunnymark_raylib, 4 linguagens, mesmo host,
+mesma classe Bunny, 60 fps): Zen 70 400, Lua 63 000, Wren 54 600, Python
+30 800 sprites.
+
+Próximo: o que resta no method_call é custo por chamada (push de frame,
+dois memsets de registos, LOAD_STATE, limpeza no RETURN) — ~49 ns por
+call+return; `Toggle.value` já são só 2 instruções. Ponto 4 (tipo de campos
+`left: Tree?`) continua por fazer.
+
+
+### Ronda 2 (2026-09-06, commits 6c7b950..415a011)
+
+Modelo de custo com microbenchmarks (função vazia, 3 args, 33 registos,
+método tipado/dinâmico) + profiler por opcode (`-DZEN_OPCODE_PROFILE`, rdtsc
+em cada DISPATCH; comparar opcodes entre si, não com o relógio). Conclusões:
+INVOKE vs INVOKE_VT < 1 ns; o custo estava no call/return (~20 ns → ~16 ns
+agora; Lua ~9 ns) e, em binary_trees, na construção `Tree(...)` (36% do
+tempo: `intern_string("__init__")` + `map_get` em cada construção).
+
+Feito:
+- `__init__` resolvido pela vtable (slot do selector; `init_selector_` fica
+  definido quando o nome é internado, também via bytecode carregado);
+  `new_instance` sem pause/resume do GC.
+- Fast path de chamada em OP_CALL/OP_INVOKE (um teste: aridade exacta, sem
+  defaults/*args, não genérico, não generator); `clear_new_regs` em stores
+  directos para frames pequenos; memset de saída do RETURN removido
+  (registos foram vistos vivos pelo GC; ficam conservadoramente vivos até
+  serem reutilizados, como em Lua); `call_global`/`call_fn` limpam o frame.
+- Saltos fundidos: `x < 2`/`<=`/`>`/`>=` com literal int8
+  (LTI/LEI/GTI/GEI JMPIFNOT, 2 palavras) e `x == None`/`!= None`/`is None`
+  (JMPIFNIL/JMPIFNOTNIL identidade; JMPIFEQNIL/JMPIFNEQNIL respeitam
+  `__eq__`). Bytecode 2.5.
+- `for x in iterável` com OP_FOR_NEXT no fim do corpo (1 dispatch/iteração,
+  arrays primeiro); local lido como operando esquerdo/objecto de acesso já
+  não é copiado para `dest`; LOAD_STATE sem o ramo de closure nulo.
+
+Medições finais do dia (best of 3, mesma janela): fib 0,271→0,161s (Lua
+0,109); for_loop locais 0,104→0,061s (Lua 0,042); method_call 0,238→0,167s
+(Lua 0,176); binary_trees 0,371→0,243s (Lua 0,547, Python 0,367).
+
+Pré-existente, encontrado agora e NÃO corrigido: `v > 2` / `2 < v` com `v`
+instância que define `__gt__` devolve False — o compilador troca operandos
+(`LT 2, v`) e a VM despacha pelo slot `__lt__` sem reflectir para `__gt__`.
+Igual antes e depois desta ronda (tests/59 não o fixa).
+
+Próximos candidatos: GETFIELD verificado (2 palavras: idx + nome) para
+receptores de classe estática que não a actual (parâmetros anotados
+`e: Enemy`, locais inferidos de outra classe, elementos `Array[T]`) — hoje
+só `self`/classe actual usam GETFIELD_IDX; o resto faz varrimento linear
+por nome. E o custo restante por chamada (frame push + LOAD_STATE).
+
+- Acesso a campos verificado (commit 15a3d81): `OP_GETFIELD_IDXC`/`OP_SETFIELD_IDXC`
+  (palavra 1 = índice directo aceite só se `klass->field_names[idx]` for o
+  nome pedido; palavra 2 = o GETFIELD/SETFIELD por nome original, executado
+  caso contrário). Emitidos para qualquer receptor de classe estática que
+  não `self`: parâmetros anotados, locais inferidos, elementos `Array[T]`,
+  cadeias que devolvem self, globais de módulo. As anotações de parâmetros
+  (`p: P`, `xs: Array[T]`) passam a ser registadas como tipo do local, logo
+  `p.x` usa o índice verificado e `p.m()` a vtable. Só `self` mantém o
+  GETFIELD_IDX sem verificação. Microbench `sum5(p: P)` com 5 campos:
+  0,092→0,075s (−19%). Suite 63/63.
+
+
+### Ronda 3 (2026-09-06, commit d042203)
+
+- FIX `a > b` / `a >= b` em instâncias: o compilador troca para `LT b, a` e a
+  VM usava o mesmo slot como reflexo, logo `__gt__`/`__ge__` nunca eram
+  chamados (corria `__lt__`/`__le__` com operandos trocados). Slots novos
+  `SLOT_GT`/`SLOT_GE` como reflexo de LT/LE (kOperatorSlotCount 16→18).
+- FIX `obj.campo += x` em receptor que não `self` era ERRO DE COMPILAÇÃO
+  ("Expected expression"). Agora compila (índice verificado se a classe é
+  conhecida; ADDI/SUBI para literais pequenos; `self` ganha `//=` e `**=`).
+- `if x == 0` / `while n != 0`: OP_EQIJMPIFNOT/OP_NEIJMPIFNOT (literal int8).
+- Classe inferida por campo: `self.left = Tree(...)` (só construtores de uma
+  classe, ou None) → `self.left.check()` é INVOKE_VT e `self.left.item` é
+  GETFIELD_IDXC; formas verificadas, um palpite errado só custa velocidade.
+- `ObjFiber::stack_end` para o CHECK_STACK_SPACE; OP_RETURN com fast path
+  de um teste (1 valor, caller script, sem stop depth). call_f0 0,130→0,126s.
+- Microbenchmarks guardados em tests/manual/microbench (README com números).
+
+Estado final do dia (best of 3): fib 0,160s (Lua 0,109) · for_loop locais
+0,061s (Lua 0,042) · method_call 0,166s (Lua 0,176) · binary_trees 0,243s
+(Lua 0,547, Wren 0,206) · call+return ~15 ns (Lua ~9) · suite 64/64 + stress-GC.
+
+### Ronda 4 (2026-09-07, commits 5e0cef0..7cf79a8)
+
+Baseline do dia (best of 3) igual à de ontem: fib 0,163 · method_call 0,167 ·
+call_f0 0,129 — comparar sempre intercalado.
+
+- **Frames a partir de registos** (5e0cef0): o LOAD_STATE depois de um push
+  relia `fiber->frame_count` (acabado de escrever) e depois cada campo do
+  frame (acabados de escrever): cadeia store→load forwarding em cada chamada.
+  `ENTER_FRAME(nf, fn, cl, base)` põe frame/ip/R/K/UV a partir dos valores
+  ainda em registos; `LOAD_STATE_FROM(caller_frame)` no RETURN. `CallFrame`
+  ganhou `constants`/`upvalues` (sem loads dependentes `func->`/`closure->`).
+  Só guardar constants/upvalues no frame não deu nada mensurável; o ganho
+  veio de evitar o round-trip por `frame_count`. call_f0 0,129→0,110,
+  fib 0,162→0,134, method_call 0,168→0,128. call+return ~15→~12,6 ns.
+- **`OP_INVOKE_R` / `OP_INVOKE_VT_R`** (0b54b22, bytecode 2.6): receptor
+  local não capturado (`b.m()`, `self.m()`) vai em C; a VM copia para a
+  base. `invoke_nresults` (function scope, como `call_a`) é fixado a 1 pelas
+  formas _R e lido de C por INVOKE/INVOKE_VT; todos os `goto op_invoke_entry`
+  passam por aí. Multi-assign (`a, b = o.m()`) faz `patch_c_at` no C da
+  chamada → `multi_assign_rhs_` suprime a forma _R nesse RHS. Local capturado
+  mantém o MOVE (um closure nos argumentos podia reatribuir o receptor).
+  Sem ganho mensurável (o MOVE corria em paralelo com a cadeia de
+  dependências da chamada), mas menos bytecode e um dispatch a menos.
+- FIX `obj.m(a, *xs)`: OP_INVOKE nunca desempacotava a lista (B=0x80|n
+  usado como contagem → 129 argumentos de lixo). Mesmo em OP_SUPER_INVOKE.
+- FIX `super().m(...)` para método `*args` do pai nunca empacotava os extras.
+- FIX `x is not None` era `x is (not None)` → sempre False (5151fd3).
+  `comparison()` consome o `not` depois de `is`; funde para JMPIFNIL.
+- **Anotações de campo no corpo da classe**: `item: int = 0`, `left: Node?`,
+  `right: Node | None = None`, `tag: str` (sem `=`: só declara). Alimentam
+  `class_field_class_` com estado 3 (anotado; a inferência nunca o altera;
+  `field_class_guess` aceita 1 ou 3). Parâmetros e locais aceitam o mesmo
+  sufixo `?` / `| None` (`skip_nullable_suffix()`); `?` é TOK_QMARK novo.
+- **Comprehensions** (lista/dict/set) com o loop do for_statement
+  (JMP de entrada + OP_FOR_NEXT): 1 dispatch por elemento em vez de 5, e
+  iteram ranges/strings/generators (antes só indexáveis). Filtro fundido
+  por `emit_cond_jump`.
+- **Local lido no sítio antes de `.`/`[`/`(`** (7cf79a8): `n = self.item`
+  gerava MOVE R1=R0 + GETFIELD por nome (o receptor deixava de ser reg 0).
+  `named_variable()` devolve o registo do local se `chain_continues()`.
+  Microbench `selffield` 0,191→0,126s (−34%).
+- tests/62 (INVOKE_R e spreads) e tests/63 (is not, anotações, comprehensions).
+  Suite 66/66 + stress-GC. Docs: README (tabela dos opcodes do hot path e
+  "tipo estático é dica"), RESULTS.md com Wren de volta via `wren_test`.
+
+Estado final do dia (best of 3): fib 0,134 (Lua 0,109, Wren 0,208) ·
+for_loop globais 0,158 (Wren 0,159) · for_loop locais 0,064 (Lua 0,044) ·
+method_call 0,131 (Lua 0,175, Wren 0,109) · binary_trees 0,266 (Wren 0,245,
+Lua 0,560) · call+return ~12,6 ns (Lua ~9,8).
+
+### Ronda 4b (2026-09-07, tarde: benchmarks de algoritmos → codegen)
+
+Mudança de rumo pedida pelo utilizador: pausa nas micro-optimizações da VM,
+medir cargas reais e só mexer onde o perfil mostra margem. Benchmarks em
+`tests/manual/algo_bench/` (A*, Dijkstra, quadtree, octree, Hanói, flood
+fill; Zen/Python/Lua/Wren; mesmo `py/*.py` corre em CPython e Zen; checksums
+iguais; `run.sh` faz a tabela). Perfil por opcode do Dijkstra: 18% MOVEs.
+
+- `a[i] = expr`: contentor/índice locais já não são copiados para registos
+  auxiliares antes do RHS (2 MOVEs por store).
+- Condições `if`/`elif`/`while`: `condition()` compila cadeias `and`/`or`
+  como saltos (sem booleano, sem MOVE); `cond_false_jump()` transforma
+  `not x` em JMPIF e `a != b` em NEJMPIFNOT; `EQJMPIFNOT`/`NEJMPIFNOT`
+  registo-registo (bytecode 2.7); `if` sem `else` deixa de executar um
+  `JMP +0` no fim do corpo.
+- FIX `not a == b` era `(not a) == b` (operando do `not` agora inclui
+  comparações). FIX fusão de branch em comparações encadeadas
+  (`a != b != c`): o salto de curto-circuito aterrava no compare fundido;
+  `cmp_chain_end_` recusa fusão nesse ponto (o bug do LT existia antes).
+- `OP_RETURNNIL` (return vazio / fim de função): fast path próprio; neutro
+  no Hanói (o LOADNIL corria em paralelo com a cadeia call/return), mas
+  microbench `call_m_void` 0,169→0,158s (−6,5%): o `update()` típico de jogo.
+- Resultado: Dijkstra 0,227→0,188s, octree 0,087→0,071, quadtree
+  0,062→0,053, astar 0,062→0,056; dispatches −25%. Tabela completa em
+  tests/manual/algo_bench/README.md (Zen à frente de Python e Wren em
+  tudo; Lua ganha 10-20% só em Dijkstra e flood fill).
+- Lições: remover trabalho independente (MOVE do receptor, LOADNIL) não
+  mexe no tempo — o loop é latency-bound na chamada; só encurtar cadeias de
+  dependência (ENTER_FRAME) ou tirar dispatches do caminho de dados
+  (holds, `and`) conta. Subconjunto Python/Zen partilhado documentado no
+  README do algo_bench.
+- Sobra (medido, não feito): GETGLOBAL de constantes de módulo dentro de
+  funções (5% do Dijkstra; Lua usa upvalues), MOVE do resultado de chamada
+  para um local (`cur = heap.pop()`, 2,4%), APPEND a ~46 ciclos nas
+  comprehensions grandes (crescimento do array), marshalling de argumentos
+  (22% do Hanói, inerente).
+
+### Ronda 5 (2026-09-07, noite: cobertura Python pelo método diferencial)
+
+Critério combinado com o utilizador: **não somos uma cópia do Python; sem
+crash e com resultado previsível está bom.** Ferramenta: `tools/diff_cpython.py`
+corre cada `tests/diff/*.py` chunk a chunk em CPython e Zen e compara a
+saída (um chunk que o Zen não compila fica de fora dos seguintes; cascatas
+detectadas por nome). Corpus de 10 ficheiros por tema. Evolução: 159 →
+258 chunks iguais; compile-errors 58 → 24; runtime-errors 86 → 34.
+
+Corrigido (commits 86aa4e8, fa5a159, b88b02d, bf83647):
+- **Resultados errados silenciosos**: `for x in [literal]` saltava o 1.º
+  elemento (índice do FOR_NEXT não era iter_reg+1, temporários do literal
+  ainda alocados; também nas comprehensions); `lambda x: f(g(x))` esmagava
+  o parâmetro (corpo compilado para R0); `print(x, end="")` compilava como
+  atribuição a uma global `end`; `True + True` = 0 e `True == 1` False;
+  `[1] + [2]`, `[0] * n` davam 0; `[1] < [1, 0]` False; `-5.0 % 2` = -1;
+  `strip("x")`, `int(s, base)`, `replace(a, b, n)`, `find(s, start)`
+  ignoravam argumentos; `str([1])` = `<array>`; `filter` ignorava 0;
+  `xs.sort(reverse=True)` ignorado; `{1,2} == {2,1}` False; `max` de
+  instâncias com `__lt__` errado; `"%d %s" % (1, "a")` era "modulo by zero";
+  `round(2.675, 2)` = 2.68; `zen /dev/stdin` buffer overflow (ftell).
+- **Novo**: builtins abs min max round sum sorted reversed any all list
+  tuple set dict bool repr chr hex oct bin divmod pow callable getattr
+  hasattr (a tabela tinha `41` hardcoded: tudo o que vinha depois
+  desaparecia!); kwargs para nativos (mapa no último slot, flag 0x40,
+  `vm->kwargs()`; `sorted(key=, reverse=)`, `min/max(key=, default=)`,
+  `dict(a=1)`, `print(sep=, end=)`); genexpr como argumento; comprehensions
+  com vários `for`/`if` e alvos em tuplo (`comprehension_into()`); ternário
+  encadeado; `_` como variável; `&= |= ^= <<= >>=`; métodos str (title,
+  capitalize, swapcase, is*, index, rfind, rindex, center, ljust, rjust,
+  zfill, splitlines, rsplit, partition), list (count, extend, copy, pop(i),
+  sort(key=, reverse=)), dict (update, setdefault, pop, copy, `for k in d`),
+  set (discard, remove, issubset, issuperset, isdisjoint, union,
+  intersection, difference, symmetric_difference, `| & - ^`);
+  `isinstance(x, (A, B))` e com `int/str/list/...`; `type(x).__name__`,
+  `f.__name__`; `%s/%r/%i` no format; floats impressos como repr do Python
+  (mais curto que faz round-trip: `1/3` → 0.3333333333333333, `3.0` → 3.0).
+- tests/65_python_semantics.py corre igual em CPython e Zen.
+
+Diferenças de desenho (ficam, documentadas): tuplos são listas (`(1, 2)`
+imprime `[1, 2]`, `[1,2] == (1,2)`); inteiros de 64 bits (sem bigint, `2**63`
+vira float); dicts sem ordem de inserção garantida; strings indexadas por
+byte (UTF-8 multi-byte parte); variável do `for` não sobrevive ao loop;
+`a += [x]` cria lista nova (não é in-place); `sum` de floats sem
+compensação; `"%s" % [lista]` espalha a lista; `for/while ... else` não
+existe; try/except não existe (decisão do utilizador).
+
+Ainda não suportado (erro claro, não silencioso): `yield` como expressão /
+`yield from`; `a, *b = ...`, `(m, n), o = ...`, `for a, (b, c) in`; `def
+f(a, *, b)`, `**kwargs`; defaults em lambda; `f(**d)`; `[*a]`; f-string
+`!r`; strings `r"..."` e escapes octais; `x = []` no corpo da classe;
+generators em `list()/sum()`; iter/next/hash/id/slice/frozenset;
+str.format/encode; atributos novos em instâncias (classes seladas);
+`Base.who(obj)` (método sem bind); `counts.get` como valor.
+
+### Plano para a próxima sessão (por ordem)
+
+1. Validar: `cd build_release && ninja`, suite normal + `--stress-gc`, bench
+   intercalado (script: best-of-3 dos 5 cross_lang + 11 microbench).
+2. **Custo por chamada restante (~12,6 vs Lua ~9,8 ns)**: o que sobra é a
+   cadeia `*ip` → tabela → jump indirecto duas vezes (CALL, RETURN) mais
+   8 stores no frame. Ideias por medir: (a) `ret_reg`/`ret_count` num só
+   `uint32`; (b) não escrever `new_frame->ip` no push (só é lido por
+   stack traces/SAVE_IP — verificar se algum caminho lê `frame->ip` sem
+   SAVE_IP antes, p.ex. GC/erros dentro do callee usam `ip` local?);
+   (c) OP_RETURN fast path testar `nresults==1` já em compile-time (opcode
+   `RETURN1`?) — provavelmente marginal.
+3. **method_call vs Wren (0,131 vs 0,109)**: perfil por opcode do
+   method_call; ver se `self.x` no callee (GETFIELD_IDX) e o `INVOKE_VT_R`
+   têm branches evitáveis (p.ex. `is_instance` + `slot < vtable_size` +
+   `is_closure` + arity: 4 testes — fundir em 1 comparando `klass` com um
+   cache inline por call-site? Requer escrever no bytecode: word2 tem
+   sel+name_ki, não há espaço → só com 3ª palavra).
+4. **binary_trees vs Wren (0,266 vs 0,245)**: alocação — `new_instance`
+   + `fields` array; ver se `ObjInstance` com campos inline (uma alocação)
+   já está feito (memória diz que era 2 alocações).
+5. **Globais de módulo em loops** (for_loop globais 0,158 vs locais 0,064):
+   continua a ser a maior diferença relativa. Ideia segura: no top-level,
+   `while`/`for` cujo corpo só chama funções que não escrevem essas globais
+   (`fn_written_global_count_` já existe) → copiar para registos e escrever
+   de volta à saída. Avaliar risco vs ganho (só afecta scripts sem `def`).
+6. **Integração engine (Kinetix2D/Radion)**: modelo mínimo em
+   tests/manual/bunnymark_raylib/bunny_zen.cpp (`def_native` +
+   `call_global`); padrão recomendado: `typed: Array[Bunny] = lista` +
+   loop por índice, parâmetros anotados (`p: P`), campos anotados no corpo
+   da classe (`left: Node?`) para métodos/campos O(1).
+7. Docs: passar a tabela dos opcodes do README para docs/ se o site for
+   regenerado (build_docs.py só lê docs/*.md).
+
+### Plano de 2026-09-06 (feito nesta ronda, mantido para referência)
+
+1. **Validar o dia**: `cd build_release && ninja`, `ZEN=build_release/bin/zen
+   ./run_tests.sh`, `./run_tests.sh --stress-gc`; correr os 4 benchmarks
+   (`tests/manual/cross_lang_bench/zen/*.py`) e `tests/manual/microbench`
+   para ter a baseline da máquina nesse dia (varia 8-40% entre sessões:
+   comparar sempre intercalado, nunca com números antigos).
+
+2. **Custo por chamada (~15 ns vs Lua ~9)** — o que sobra em fib/method_call:
+   - guardar `constants` e `upvalues` no `CallFrame` ao empurrar o frame
+     (`new_frame->constants = fn->constants; new_frame->upvalues =
+     cl->upvalues`) e fazer `LOAD_STATE` ler só do frame (hoje: 2 loads
+     dependentes `frame->func->constants` e `frame->closure->upvalues`).
+     Sítios: todos os `new_frame->closure = cl` em vm_dispatch.cpp
+     (OP_CALL fast+slow, class __init__, OP_INVOKE fast+slow, INVOKE_VT,
+     INVOKE_VT_FAST, SUPER_INVOKE, CALL_GENERIC, INVOKE_GENERIC), vm.cpp
+     (call_global, call_fn, run, fibers). Medir com call_f0/call_m_typed.
+   - no fast path de OP_CALL/INVOKE, saltar o loop de "marcar strings
+     partilhadas" quando `nargs == 0`.
+   - juntar `frame_count >= kMaxFrames` + `CHECK_STACK_SPACE` num só teste
+     se `frames` e `stack` forem dimensionados juntos.
+   Objectivo realista: 15 → 12 ns.
+
+3. **`INVOKE_VT` com receptor noutro registo** (`b.m()` com `b` local gera
+   `MOVE base = b` + INVOKE): opcode `OP_INVOKE_VT_R` A=base, B=receptor,
+   C=nargs, word2 = sel/nome — a VM copia o receptor para `base` ela
+   própria: um dispatch a menos por chamada de método em locais (foreach,
+   `self.left.check()` não, esse já é temp). Ver `dot_expr` ramo
+   `obj_is_local` em compiler_expressions.cpp.
+
+4. **Anotações de campos na classe** (`left: Tree = None`, `left: Tree?`):
+   alimentar `class_field_class_` explicitamente (hoje só por inferência de
+   construtores). Ver `class_field_literal`/CLASSFIELDDEF em
+   compiler_statements.cpp (corpo da classe) — decidir sintaxe do `?`.
+
+5. **Comprehensions** ainda usam FOR_ITER+JMP: passar para OP_FOR_NEXT
+   (mesma transformação que for_statement; grep `emit_for_iter`).
+
+6. **Globais de módulo em loops** (for_loop globais 0,156 vs Wren 0,143):
+   só se sobrar tempo — GETGLOBAL/SETGLOBAL por acesso; hipótese barata:
+   `while` no topo do módulo copiar globais lidas-e-escritas para registos
+   não é seguro sem análise de chamadas; provavelmente deixar.
+
+7. **Verificar `x is not None`**: confirmar como é analisado (pode estar a
+   ler `x is (not None)`); se for bug, corrigir em comparison()/Pratt e
+   ligar ao OP_JMPIFNIL.
+
+8. **Docs**: docs/ (build_docs.py) — listar os opcodes novos (2.5): CALLGLOBAL,
+   FORPREP/FORLOOP, INVOKE_VT 2 palavras, LTI/LEI/GTI/GEI/EQI/NEI JMPIFNOT,
+   JMPIF*NIL, FOR_NEXT, GETFIELD_IDXC/SETFIELD_IDXC; e a semântica de
+   "tipo estático é dica, nunca promessa".
+
+9. **Wren**: recompilar `wren_cli` (fontes em
+   /media/projectos/projects/languages/wren-0.4.0) para voltar a ter a
+   coluna Wren nos microbenchmarks.
+
+10. **Integração engine (Kinetix2D/Radion)**: o host do bunnymark
+    (tests/manual/bunnymark_raylib/bunny_zen.cpp) é o modelo mínimo de
+    embedding: `def_native` + `call_global`; padrão de script recomendado:
+    `typed: Array[Bunny] = lista` + loop por índice, parâmetros anotados
+    (`p: P`) para campos/métodos O(1).

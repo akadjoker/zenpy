@@ -145,8 +145,22 @@ namespace zen
             return (double)v.as.integer;
         if (v.type == VAL_FLOAT)
             return v.as.number;
+        if (v.type == VAL_BOOL)
+            return v.as.boolean ? 1.0 : 0.0; /* bool is a number, as in Python */
         return 0.0;
     }
+
+    /* int, float or bool: the operands arithmetic and == accept as numbers. */
+    inline bool is_numeric_like(Value v)
+    {
+        return v.type == VAL_INT || v.type == VAL_FLOAT || v.type == VAL_BOOL;
+    }
+    /* Ordering of two values as Python defines it for numbers, strings and
+    ** lists (lexicographic, recursive). 0 for incomparable values. */
+    int values_compare(Value a, Value b);
+    /* Python's repr of a float: the shortest string that reads back to the
+    ** same double, always with a '.' or an exponent (1.0, 0.1, 1e-05, inf). */
+    int format_float_py(double d, char *buf, size_t cap);
 
     /* Conversão para inteiro (bitwise ops) */
     inline int64_t to_integer(Value v)
@@ -191,13 +205,9 @@ namespace zen
             }
             }
         }
-        /* Mixed int/float: compare numerically (like Lua) */
-        if (a.type == VAL_INT && b.type == VAL_FLOAT) {
-            return (double)a.as.integer == b.as.number;
-        }
-        if (a.type == VAL_FLOAT && b.type == VAL_INT) {
-            return a.as.number == (double)b.as.integer;
-        }
+        /* Mixed numbers: int/float by value, bool as 0/1 (True == 1 in Python) */
+        if (is_numeric_like(a) && is_numeric_like(b))
+            return to_number(a) == to_number(b);
         return false;
     }
 

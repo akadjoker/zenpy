@@ -28,6 +28,7 @@ bin/zen
 bin/test_*
 bin/zen_*
 bin/fuzz_zen
+bin/fuzz_embedding
 
 # Ignorar tudo dentro de bin/
 #bin/*
@@ -39,3 +40,14 @@ bin/fuzz_zen
 
 # leftovers if an io/os test aborts before its cleanup
 /_zen_*_tmp/
+
+# libFuzzer output: corpus entries it discovers, and the input for a crash it
+# found. The seed corpus (the .py files) is tracked; these are not — they are
+# machine-generated, hundreds of them, and regenerated on every run.
+tests/fuzz/corpus/*
+!tests/fuzz/corpus/*.py
+tests/fuzz/corpus_embedding/*
+!tests/fuzz/corpus_embedding/*.py
+/crash-*
+/leak-*
+/timeout-*

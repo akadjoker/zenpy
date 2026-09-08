@@ -2612,6 +2612,38 @@ namespace zen
             ++ip;
             R[call_a] = globals_[ZEN_BX(*ip)];
             ++ip;
+            /* Calling a native with plain positional arguments — a script
+            ** driving engine code does this every frame — needs none of the
+            ** general path: no spread to expand, no keyword map, no class or
+            ** struct construction, no frame to push. Those checks are what
+            ** OP_CALL's 400 lines are for, and jumping into them cost the
+            ** whole body's register pressure for a call that just forwards
+            ** its arguments. Everything else still falls through unchanged. */
+            {
+                Value gcallee = R[call_a];
+                if (__builtin_expect(is_native(gcallee) &&
+                                     !(call_nargs & 0xC0), 1))
+                {
+                    ObjNative *nat = as_native(gcallee);
+                    if (__builtin_expect(nat->generic_arity == 0, 1))
+                    {
+                        SAVE_IP();
+                        /* Mark string args shared, as the general path does:
+                        ** a native may hold on to one past the call. */
+                        for (int ai = 0; ai < call_nargs; ai++)
+                        {
+                            Value av = R[call_a + 1 + ai];
+                            if (__builtin_expect(is_obj(av) && is_string(av), 0))
+                                av.as.obj->flags |= OBJ_FLAG_SHARED;
+                        }
+                        int nret = call_native(this, nat, &R[call_a + 1], call_nargs);
+                        if (had_error_)
+                            return;
+                        copy_native_results(&R[call_a], &R[call_a + 1], nret, call_nresults);
+                        DISPATCH();
+                    }
+                }
+            }
             goto op_call_shared;
         }
 

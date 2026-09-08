@@ -68,6 +68,28 @@ jobs:
       - name: Fuzz the compiler + VM (bounded)
         run: ./bin/fuzz_zen -max_total_time=60 -max_len=4096 -timeout=5
 
+  # Exercises the public C++ embedding API + native re-entrancy, independent
+  # of fuzz_zen's source-parsing corpus (see tests/fuzz/CMakeLists.txt).
+  fuzz-embedding:
+    name: fuzz-embedding (clang, ASan+UBSan, stress-GC)
+    runs-on: ubuntu-latest
+    env:
+      ASAN_OPTIONS: halt_on_error=1:detect_leaks=0
+      UBSAN_OPTIONS: halt_on_error=1
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            -DZEN_BUILD_FUZZ=ON
+      - name: Build
+        run: cmake --build build --target fuzz_embedding -j"$(nproc)"
+      - name: Fuzz the embedding API (bounded)
+        run: ./bin/fuzz_embedding tests/fuzz/corpus_embedding -max_total_time=60 -max_len=4096 -timeout=5
+
   # The switch dispatch path is what MSVC and any non-GNU compiler take, and it
   # is dead code under gcc/clang — build it here so it cannot rot unnoticed.
   linux-switch-dispatch:
@@ -233,7 +255,6 @@ jobs:
       matrix:
         include:
           - { abi: arm64-v8a,   expect: 'ARM aarch64' }
-          - { abi: armeabi-v7a, expect: 'ARM, EABI5' }
           - { abi: x86_64,      expect: 'x86-64' }
     steps:
       - uses: actions/checkout@v4
@@ -283,7 +304,6 @@ jobs:
             artifacts/zen-windows-mingw-x64/zen.exe \
             artifacts/zen-web-wasm/zen.wasm \
             artifacts/zen-android-arm64-v8a/zen \
-            artifacts/zen-android-armeabi-v7a/zen \
             artifacts/zen-android-x86_64/zen
           do
             if [ -f "$expected" ]; then

@@ -18,6 +18,15 @@ if(NOT WIN32 AND NOT EMSCRIPTEN AND NOT ANDROID)
     target_link_options(zen PRIVATE -rdynamic)
 endif()
 
+if(MSVC)
+    # Windows defaults to a 1 MiB thread stack; Linux/macOS default to 8 MiB.
+    # VM::execute() recurses into itself on each nested fiber resume (see
+    # vm.cpp), so deep fiber/async chains overflow the smaller Windows stack
+    # — same root cause as the wasm STACK_SIZE fix below, just a different
+    # platform default. Match the 8 MiB Linux/macOS gets for free.
+    target_link_options(zen PRIVATE /STACK:8388608)
+endif()
+
 if(EMSCRIPTEN)
     # A CLI on the web means node: NODERAWFS gives it the real filesystem so
     # `node zen.js script.py` behaves like the native binary. The default 64KB

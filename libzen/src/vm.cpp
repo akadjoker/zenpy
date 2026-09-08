@@ -851,9 +851,36 @@ namespace zen
         buf_method_ = (uint8_t *)calloc(n, 1);
         if (!str_method_ || !arr_method_ || !map_method_ || !set_method_ || !buf_method_)
         {
+            /* Leave the bound at zero so every *_method() lookup returns
+            ** *_NONE instead of indexing a table that was never allocated —
+            ** the bound is what the accessors check, and a partial
+            ** allocation here would otherwise be a null dereference on the
+            ** first builtin method call. Dispatch then falls through to the
+            ** "no method" error, which is survivable; a crash is not. */
+            num_builtin_selectors_ = 0;
+            free(str_method_); str_method_ = nullptr;
+            free(arr_method_); arr_method_ = nullptr;
+            free(map_method_); map_method_ = nullptr;
+            free(set_method_); set_method_ = nullptr;
+            free(buf_method_); buf_method_ = nullptr;
             runtime_error("out of memory building builtin method tables");
             return;
         }
+
+        /* A method added to BuiltinSelectors and init_builtin_selectors() but
+        ** forgotten here would silently stop dispatching — the table entry
+        ** would stay 0 (*_NONE) and the call would report "no method". These
+        ** pin each enum's last id, so inserting a method in the middle — which
+        ** renumbers every id after it and silently remaps existing entries —
+        ** is a compile error. Appending at the end does NOT trip them: bump
+        ** the expected value here and add the matching MAP_METHOD line.
+        ** tests/67_builtin_methods.py calls every method, so a forgotten
+        ** entry fails the suite rather than shipping. */
+        static_assert(STR_RPARTITION == 44, "string method enum changed: update init_builtin_method_tables()");
+        static_assert(ARR_COPY == 18, "array method enum changed: update init_builtin_method_tables()");
+        static_assert(MAP_COPY == 14, "map method enum changed: update init_builtin_method_tables()");
+        static_assert(SET_COPY == 17, "set method enum changed: update init_builtin_method_tables()");
+        static_assert(BUF_TYPE_NAME == 7, "buffer method enum changed: update init_builtin_method_tables()");
 
 #define MAP_METHOD(table, field, id) table[bsel_.field] = (uint8_t)(id)
         MAP_METHOD(str_method_, str_len, STR_LEN);

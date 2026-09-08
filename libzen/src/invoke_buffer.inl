@@ -8,14 +8,15 @@
 
 ObjBuffer *buf = as_buffer(receiver);
 
-do
+const uint8_t vm_method = buf_method(sel_slot);
+switch (vm_method)
 {
-if (sel_slot == bsel_.buf_len)
+case BUF_LEN:
 {
     R[base] = val_int(buf->count);
     break;
 }
-if (sel_slot == bsel_.buf_fill)
+case BUF_FILL:
 {
     if (arg_count != 1)
     {
@@ -34,12 +35,12 @@ if (sel_slot == bsel_.buf_fill)
     R[base] = receiver;
     break;
 }
-if (sel_slot == bsel_.buf_byte_len)
+case BUF_BYTE_LEN:
 {
     R[base] = val_int(buf->count * buffer_elem_size[buf->btype]);
     break;
 }
-if (sel_slot == bsel_.buf_tolist)
+case BUF_TOLIST:
 {
     ObjArray *arr = new_array(&gc_);
     R[base] = val_obj((Obj *)arr); /* root before push triggers GC */
@@ -52,7 +53,7 @@ if (sel_slot == bsel_.buf_tolist)
     }
     break;
 }
-if (sel_slot == bsel_.buf_copy)
+case BUF_COPY:
 {
     ObjBuffer *dst = new_buffer(&gc_, buf->btype, buf->count);
     int32_t byte_count = buf->count * buffer_elem_size[buf->btype];
@@ -60,7 +61,7 @@ if (sel_slot == bsel_.buf_copy)
     R[base] = val_obj((Obj *)dst);
     break;
 }
-if (sel_slot == bsel_.buf_slice)
+case BUF_SLICE:
 {
     if (arg_count < 1 || arg_count > 2) { RT_ERROR("slice() expects 1-2 arguments"); }
     if (!is_int(args[0])) { RT_ERROR("slice() start must be integer"); }
@@ -82,7 +83,7 @@ if (sel_slot == bsel_.buf_slice)
     R[base] = val_obj((Obj *)dst);
     break;
 }
-if (sel_slot == bsel_.buf_type_name)
+case BUF_TYPE_NAME:
 {
     static const char *names[] = {
         "Int8Array", "Int16Array", "Int32Array",
@@ -94,7 +95,8 @@ if (sel_slot == bsel_.buf_type_name)
     R[base] = val_obj((Obj *)s);
     break;
 }
+default:
 {
     RT_ERROR("buffer has no method '%s'", mname);
 }
-} while (0);
+}

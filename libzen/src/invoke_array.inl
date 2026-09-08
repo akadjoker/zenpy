@@ -17,9 +17,11 @@
 
 ObjArray *arr = as_array(receiver);
 
-do
+const uint8_t vm_method = arr_method(sel_slot);
+switch (vm_method)
 {
-if (sel_slot == bsel_.arr_push || sel_slot == bsel_.arr_append)
+case ARR_PUSH:
+case ARR_APPEND:
 {
     /* arr.push(val) → append, returns new length */
     if (arg_count < 1)
@@ -31,7 +33,7 @@ if (sel_slot == bsel_.arr_push || sel_slot == bsel_.arr_append)
     R[base] = val_int(arr_count(arr));
     break;
 }
-if (sel_slot == bsel_.arr_pop)
+case ARR_POP:
 {
     /* arr.pop() → remove+return last element; arr.pop(i) → at index i */
     if (arr_count(arr) == 0)
@@ -51,13 +53,13 @@ if (sel_slot == bsel_.arr_pop)
     R[base] = *--arr->end;
     break;
 }
-if (sel_slot == bsel_.arr_len)
+case ARR_LEN:
 {
     /* arr.len() → length */
     R[base] = val_int(arr_count(arr));
     break;
 }
-if (sel_slot == bsel_.arr_remove)
+case ARR_REMOVE:
 {
     /* arr.remove(idx) → remove at index, return removed value */
     if (arg_count != 1 || !is_int(args[0]))
@@ -76,7 +78,7 @@ if (sel_slot == bsel_.arr_remove)
     R[base] = removed;
     break;
 }
-if (sel_slot == bsel_.arr_insert)
+case ARR_INSERT:
 {
     /* arr.insert(idx, val) → insert at position */
     if (arg_count != 2 || !is_int(args[0]))
@@ -96,7 +98,7 @@ if (sel_slot == bsel_.arr_insert)
     R[base] = val_int(arr_count(arr));
     break;
 }
-if (sel_slot == bsel_.arr_slice)
+case ARR_SLICE:
 {
     /* arr.slice(start, end?) → new array [start, end) */
     int32_t count = arr_count(arr);
@@ -125,21 +127,21 @@ if (sel_slot == bsel_.arr_slice)
     }
     break;
 }
-if (sel_slot == bsel_.arr_reverse)
+case ARR_REVERSE:
 {
     /* arr.reverse() → in-place reverse, returns arr */
     array_reverse(arr);
     R[base] = receiver;
     break;
 }
-if (sel_slot == bsel_.arr_clear)
+case ARR_CLEAR:
 {
     /* arr.clear() → empty the array */
     array_clear(arr);
     R[base] = val_nil();
     break;
 }
-if (sel_slot == bsel_.arr_contains)
+case ARR_CONTAINS:
 {
     /* arr.contains(val) → bool */
     if (arg_count != 1)
@@ -149,7 +151,7 @@ if (sel_slot == bsel_.arr_contains)
     R[base] = val_bool(array_contains(arr, args[0]));
     break;
 }
-if (sel_slot == bsel_.arr_join)
+case ARR_JOIN:
 {
     /* arr.join(sep?) → string */
     const char *sep = "";
@@ -231,7 +233,7 @@ if (sel_slot == bsel_.arr_join)
     free(buf);
     break;
 }
-if (sel_slot == bsel_.arr_sort)
+case ARR_SORT:
 {
     /* arr.sort() / arr.sort("desc") / arr.sort(key=f, reverse=True): stable,
     ** in place, __lt__ on instances. */
@@ -274,7 +276,8 @@ if (sel_slot == bsel_.arr_sort)
     R[base] = val_nil();
     break;
 }
-if (sel_slot == bsel_.arr_index_of || sel_slot == bsel_.arr_index)
+case ARR_INDEX_OF:
+case ARR_INDEX:
 {
     /* arr.index_of(val) → index or -1 */
     if (arg_count != 1)
@@ -284,7 +287,7 @@ if (sel_slot == bsel_.arr_index_of || sel_slot == bsel_.arr_index)
     R[base] = val_int(array_find(arr, args[0]));
     break;
 }
-if (sel_slot == bsel_.arr_dump)
+case ARR_DUMP:
 {
     /* arr.dump() → pretty-print contents recursively */
     dump_value_rec(receiver, 0);
@@ -293,7 +296,7 @@ if (sel_slot == bsel_.arr_dump)
     break;
 }
 /* ---- Python list methods ---- */
-if (sel_slot == bsel_.arr_count)
+case ARR_COUNT:
 {
     if (arg_count != 1) RT_ERROR("count() expects 1 argument");
     int32_t n = 0;
@@ -302,7 +305,7 @@ if (sel_slot == bsel_.arr_count)
     R[base] = val_int(n);
     break;
 }
-if (sel_slot == bsel_.arr_extend)
+case ARR_EXTEND:
 {
     if (arg_count != 1) RT_ERROR("extend() expects 1 argument");
     if (is_array(args[0]))
@@ -331,7 +334,7 @@ if (sel_slot == bsel_.arr_extend)
     R[base] = val_nil();
     break;
 }
-if (sel_slot == bsel_.arr_copy)
+case ARR_COPY:
 {
     gc_pause(&gc_);
     ObjArray *copy = new_array(&gc_);
@@ -341,7 +344,8 @@ if (sel_slot == bsel_.arr_copy)
     R[base] = val_obj((Obj *)copy);
     break;
 }
+default:
 {
     RT_ERROR("array has no method '%s'", mname);
 }
-} while (0);
+}

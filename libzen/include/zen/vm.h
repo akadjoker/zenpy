@@ -401,6 +401,70 @@ namespace zen
         BuiltinSelectors bsel_;
         void init_builtin_selectors();
 
+        /* Dense method ids, per receiver type.
+        **
+        ** bsel_ turned each builtin method name into a selector slot, which
+        ** removed the memcmp chain but left a linear scan of int comparisons
+        ** (44 of them for the last string method). These tables collapse that
+        ** scan into one array read: sel_slot indexes straight into a dense
+        ** id, and the invoke_*.inl files switch() on that id — case labels
+        ** are enum constants, so the compiler builds a real jump table on
+        ** every target, MSVC's switch-dispatch mode included.
+        **
+        ** Per type, not global: `len`, `copy`, `count` and 13 other names are
+        ** shared between receivers and intern to the SAME slot (101 fields,
+        ** 79 distinct slots), so one global table could not tell
+        ** string.len from array.len. */
+        enum StrMethod : uint8_t { STR_NONE = 0, STR_LEN, STR_SUB, STR_FIND,
+            STR_UPPER, STR_LOWER, STR_SPLIT, STR_TRIM, STR_STRIP, STR_REPLACE,
+            STR_STARTS_WITH, STR_STARTSWITH, STR_ENDS_WITH, STR_ENDSWITH,
+            STR_CHAR_AT, STR_BYTE_AT, STR_REPEAT, STR_COUNT, STR_PAD_LEFT,
+            STR_PAD_RIGHT, STR_CONTAINS, STR_REVERSE, STR_JOIN, STR_LSTRIP,
+            STR_RSTRIP, STR_TITLE, STR_CAPITALIZE, STR_SWAPCASE, STR_ISALPHA,
+            STR_ISDIGIT, STR_ISALNUM, STR_ISSPACE, STR_ISUPPER, STR_ISLOWER,
+            STR_INDEX, STR_RFIND, STR_RINDEX, STR_CENTER, STR_LJUST, STR_RJUST,
+            STR_ZFILL, STR_SPLITLINES, STR_RSPLIT, STR_PARTITION,
+            STR_RPARTITION };
+        enum ArrMethod : uint8_t { ARR_NONE = 0, ARR_PUSH, ARR_APPEND, ARR_POP,
+            ARR_LEN, ARR_REMOVE, ARR_INSERT, ARR_SLICE, ARR_REVERSE, ARR_CLEAR,
+            ARR_CONTAINS, ARR_JOIN, ARR_SORT, ARR_INDEX_OF, ARR_INDEX, ARR_DUMP,
+            ARR_COUNT, ARR_EXTEND, ARR_COPY };
+        enum MapMethod : uint8_t { MAP_NONE = 0, MAP_SET, MAP_GET, MAP_HAS,
+            MAP_DELETE, MAP_KEYS, MAP_VALUES, MAP_ITEMS, MAP_SIZE, MAP_CLEAR,
+            MAP_DUMP, MAP_UPDATE, MAP_SETDEFAULT, MAP_POP, MAP_COPY };
+        enum SetMethod : uint8_t { SET_NONE = 0, SET_ADD, SET_HAS, SET_DELETE,
+            SET_SIZE, SET_CLEAR, SET_VALUES, SET_DUMP, SET_DISCARD, SET_REMOVE,
+            SET_ISSUBSET, SET_ISSUPERSET, SET_ISDISJOINT, SET_UNION,
+            SET_INTERSECTION, SET_DIFFERENCE, SET_SYMMETRIC_DIFFERENCE,
+            SET_COPY };
+        enum BufMethod : uint8_t { BUF_NONE = 0, BUF_LEN, BUF_FILL,
+            BUF_BYTE_LEN, BUF_TOLIST, BUF_COPY, BUF_SLICE, BUF_TYPE_NAME };
+
+        /* Sized to the builtin selectors, which are interned first and so
+        ** occupy slots [0, num_builtin_selectors_). A sel_slot at or past
+        ** that bound is a user-defined method name and cannot name a builtin
+        ** — the bound check below is what keeps the lookup in range. */
+        int num_builtin_selectors_ = 0;
+        uint8_t *str_method_ = nullptr;
+        uint8_t *arr_method_ = nullptr;
+        uint8_t *map_method_ = nullptr;
+        uint8_t *set_method_ = nullptr;
+        uint8_t *buf_method_ = nullptr;
+        void init_builtin_method_tables();
+
+        /* One array read, bounds-checked. Returns *_NONE for anything that is
+        ** not a builtin method of that receiver type. */
+        inline uint8_t str_method(int sel) const
+        { return (unsigned)sel < (unsigned)num_builtin_selectors_ ? str_method_[sel] : 0; }
+        inline uint8_t arr_method(int sel) const
+        { return (unsigned)sel < (unsigned)num_builtin_selectors_ ? arr_method_[sel] : 0; }
+        inline uint8_t map_method(int sel) const
+        { return (unsigned)sel < (unsigned)num_builtin_selectors_ ? map_method_[sel] : 0; }
+        inline uint8_t set_method(int sel) const
+        { return (unsigned)sel < (unsigned)num_builtin_selectors_ ? set_method_[sel] : 0; }
+        inline uint8_t buf_method(int sel) const
+        { return (unsigned)sel < (unsigned)num_builtin_selectors_ ? buf_method_[sel] : 0; }
+
     public:
         bool had_error() const { return had_error_; }
 

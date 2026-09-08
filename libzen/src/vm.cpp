@@ -142,6 +142,15 @@ namespace zen
         init_selector_ = -1;
         }
 
+        /* Free the per-type builtin method tables (plain uint8_t arrays,
+        ** not GC-owned). */
+        free(str_method_); str_method_ = nullptr;
+        free(arr_method_); arr_method_ = nullptr;
+        free(map_method_); map_method_ = nullptr;
+        free(set_method_); set_method_ = nullptr;
+        free(buf_method_); buf_method_ = nullptr;
+        num_builtin_selectors_ = 0;
+
         /* Free all objects via GC sweep */
         gc_sweep_all(&gc_);
 
@@ -818,6 +827,140 @@ namespace zen
         SEL(buf_slice, "slice");
         SEL(buf_type_name, "type_name");
 #undef SEL
+
+        init_builtin_method_tables();
+    }
+
+    /* Build the per-type sel_slot -> dense id tables.
+    **
+    ** Runs straight after init_builtin_selectors(), so num_selectors_ is
+    ** exactly the builtin count: every slot below it names a builtin method
+    ** of at least one receiver type, and every slot above it is a
+    ** user-defined name interned later. One table per type because a shared
+    ** name interns once — `len` is a single slot that must mean STR_LEN when
+    ** the receiver is a string and ARR_LEN when it is an array. */
+    void VM::init_builtin_method_tables()
+    {
+        num_builtin_selectors_ = num_selectors_;
+        const size_t n = (size_t)num_builtin_selectors_;
+
+        str_method_ = (uint8_t *)calloc(n, 1);
+        arr_method_ = (uint8_t *)calloc(n, 1);
+        map_method_ = (uint8_t *)calloc(n, 1);
+        set_method_ = (uint8_t *)calloc(n, 1);
+        buf_method_ = (uint8_t *)calloc(n, 1);
+        if (!str_method_ || !arr_method_ || !map_method_ || !set_method_ || !buf_method_)
+        {
+            runtime_error("out of memory building builtin method tables");
+            return;
+        }
+
+#define MAP_METHOD(table, field, id) table[bsel_.field] = (uint8_t)(id)
+        MAP_METHOD(str_method_, str_len, STR_LEN);
+        MAP_METHOD(str_method_, str_sub, STR_SUB);
+        MAP_METHOD(str_method_, str_find, STR_FIND);
+        MAP_METHOD(str_method_, str_upper, STR_UPPER);
+        MAP_METHOD(str_method_, str_lower, STR_LOWER);
+        MAP_METHOD(str_method_, str_split, STR_SPLIT);
+        MAP_METHOD(str_method_, str_trim, STR_TRIM);
+        MAP_METHOD(str_method_, str_strip, STR_STRIP);
+        MAP_METHOD(str_method_, str_replace, STR_REPLACE);
+        MAP_METHOD(str_method_, str_starts_with, STR_STARTS_WITH);
+        MAP_METHOD(str_method_, str_startswith, STR_STARTSWITH);
+        MAP_METHOD(str_method_, str_ends_with, STR_ENDS_WITH);
+        MAP_METHOD(str_method_, str_endswith, STR_ENDSWITH);
+        MAP_METHOD(str_method_, str_char_at, STR_CHAR_AT);
+        MAP_METHOD(str_method_, str_byte_at, STR_BYTE_AT);
+        MAP_METHOD(str_method_, str_repeat, STR_REPEAT);
+        MAP_METHOD(str_method_, str_count, STR_COUNT);
+        MAP_METHOD(str_method_, str_pad_left, STR_PAD_LEFT);
+        MAP_METHOD(str_method_, str_pad_right, STR_PAD_RIGHT);
+        MAP_METHOD(str_method_, str_contains, STR_CONTAINS);
+        MAP_METHOD(str_method_, str_reverse, STR_REVERSE);
+        MAP_METHOD(str_method_, str_join, STR_JOIN);
+        MAP_METHOD(str_method_, str_lstrip, STR_LSTRIP);
+        MAP_METHOD(str_method_, str_rstrip, STR_RSTRIP);
+        MAP_METHOD(str_method_, str_title, STR_TITLE);
+        MAP_METHOD(str_method_, str_capitalize, STR_CAPITALIZE);
+        MAP_METHOD(str_method_, str_swapcase, STR_SWAPCASE);
+        MAP_METHOD(str_method_, str_isalpha, STR_ISALPHA);
+        MAP_METHOD(str_method_, str_isdigit, STR_ISDIGIT);
+        MAP_METHOD(str_method_, str_isalnum, STR_ISALNUM);
+        MAP_METHOD(str_method_, str_isspace, STR_ISSPACE);
+        MAP_METHOD(str_method_, str_isupper, STR_ISUPPER);
+        MAP_METHOD(str_method_, str_islower, STR_ISLOWER);
+        MAP_METHOD(str_method_, str_index, STR_INDEX);
+        MAP_METHOD(str_method_, str_rfind, STR_RFIND);
+        MAP_METHOD(str_method_, str_rindex, STR_RINDEX);
+        MAP_METHOD(str_method_, str_center, STR_CENTER);
+        MAP_METHOD(str_method_, str_ljust, STR_LJUST);
+        MAP_METHOD(str_method_, str_rjust, STR_RJUST);
+        MAP_METHOD(str_method_, str_zfill, STR_ZFILL);
+        MAP_METHOD(str_method_, str_splitlines, STR_SPLITLINES);
+        MAP_METHOD(str_method_, str_rsplit, STR_RSPLIT);
+        MAP_METHOD(str_method_, str_partition, STR_PARTITION);
+        MAP_METHOD(str_method_, str_rpartition, STR_RPARTITION);
+
+        MAP_METHOD(arr_method_, arr_push, ARR_PUSH);
+        MAP_METHOD(arr_method_, arr_append, ARR_APPEND);
+        MAP_METHOD(arr_method_, arr_pop, ARR_POP);
+        MAP_METHOD(arr_method_, arr_len, ARR_LEN);
+        MAP_METHOD(arr_method_, arr_remove, ARR_REMOVE);
+        MAP_METHOD(arr_method_, arr_insert, ARR_INSERT);
+        MAP_METHOD(arr_method_, arr_slice, ARR_SLICE);
+        MAP_METHOD(arr_method_, arr_reverse, ARR_REVERSE);
+        MAP_METHOD(arr_method_, arr_clear, ARR_CLEAR);
+        MAP_METHOD(arr_method_, arr_contains, ARR_CONTAINS);
+        MAP_METHOD(arr_method_, arr_join, ARR_JOIN);
+        MAP_METHOD(arr_method_, arr_sort, ARR_SORT);
+        MAP_METHOD(arr_method_, arr_index_of, ARR_INDEX_OF);
+        MAP_METHOD(arr_method_, arr_index, ARR_INDEX);
+        MAP_METHOD(arr_method_, arr_dump, ARR_DUMP);
+        MAP_METHOD(arr_method_, arr_count, ARR_COUNT);
+        MAP_METHOD(arr_method_, arr_extend, ARR_EXTEND);
+        MAP_METHOD(arr_method_, arr_copy, ARR_COPY);
+
+        MAP_METHOD(map_method_, map_set, MAP_SET);
+        MAP_METHOD(map_method_, map_get, MAP_GET);
+        MAP_METHOD(map_method_, map_has, MAP_HAS);
+        MAP_METHOD(map_method_, map_delete, MAP_DELETE);
+        MAP_METHOD(map_method_, map_keys, MAP_KEYS);
+        MAP_METHOD(map_method_, map_values, MAP_VALUES);
+        MAP_METHOD(map_method_, map_items, MAP_ITEMS);
+        MAP_METHOD(map_method_, map_size, MAP_SIZE);
+        MAP_METHOD(map_method_, map_clear, MAP_CLEAR);
+        MAP_METHOD(map_method_, map_dump, MAP_DUMP);
+        MAP_METHOD(map_method_, map_update, MAP_UPDATE);
+        MAP_METHOD(map_method_, map_setdefault, MAP_SETDEFAULT);
+        MAP_METHOD(map_method_, map_pop, MAP_POP);
+        MAP_METHOD(map_method_, map_copy, MAP_COPY);
+
+        MAP_METHOD(set_method_, set_add, SET_ADD);
+        MAP_METHOD(set_method_, set_has, SET_HAS);
+        MAP_METHOD(set_method_, set_delete, SET_DELETE);
+        MAP_METHOD(set_method_, set_size, SET_SIZE);
+        MAP_METHOD(set_method_, set_clear, SET_CLEAR);
+        MAP_METHOD(set_method_, set_values, SET_VALUES);
+        MAP_METHOD(set_method_, set_dump, SET_DUMP);
+        MAP_METHOD(set_method_, set_discard, SET_DISCARD);
+        MAP_METHOD(set_method_, set_remove, SET_REMOVE);
+        MAP_METHOD(set_method_, set_issubset, SET_ISSUBSET);
+        MAP_METHOD(set_method_, set_issuperset, SET_ISSUPERSET);
+        MAP_METHOD(set_method_, set_isdisjoint, SET_ISDISJOINT);
+        MAP_METHOD(set_method_, set_union, SET_UNION);
+        MAP_METHOD(set_method_, set_intersection, SET_INTERSECTION);
+        MAP_METHOD(set_method_, set_difference, SET_DIFFERENCE);
+        MAP_METHOD(set_method_, set_symmetric_difference, SET_SYMMETRIC_DIFFERENCE);
+        MAP_METHOD(set_method_, set_copy, SET_COPY);
+
+        MAP_METHOD(buf_method_, buf_len, BUF_LEN);
+        MAP_METHOD(buf_method_, buf_fill, BUF_FILL);
+        MAP_METHOD(buf_method_, buf_byte_len, BUF_BYTE_LEN);
+        MAP_METHOD(buf_method_, buf_tolist, BUF_TOLIST);
+        MAP_METHOD(buf_method_, buf_copy, BUF_COPY);
+        MAP_METHOD(buf_method_, buf_slice, BUF_SLICE);
+        MAP_METHOD(buf_method_, buf_type_name, BUF_TYPE_NAME);
+#undef MAP_METHOD
     }
 
     int VM::def_native(const char *name, NativeFn fn, int arity, int flags)

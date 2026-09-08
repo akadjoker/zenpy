@@ -10,13 +10,13 @@
 ObjMap *map = as_map(receiver);
 
 /* Modules are ObjMaps but should NOT expose built-in map methods.
-** When is_module is set, jump straight to key lookup. */
-if (map->is_module)
-    goto map_key_lookup;
-
-do
+** Modules never expose the builtin map methods, so force the switch to its
+** default (the key lookup below) rather than jumping over vm_method's
+** initialisation — a goto across it does not compile. */
+const uint8_t vm_method = map->is_module ? (uint8_t)MAP_NONE : map_method(sel_slot);
+switch (vm_method)
 {
-if (sel_slot == bsel_.map_set)
+case MAP_SET:
 {
     /* map.set(key, val) → sets key, returns val */
     if (arg_count != 2)
@@ -27,7 +27,7 @@ if (sel_slot == bsel_.map_set)
     R[base] = args[1];
     break;
 }
-if (sel_slot == bsel_.map_get)
+case MAP_GET:
 {
     /* map.get(key) or map.get(key, default) → value or nil/default */
     if (arg_count < 1)
@@ -42,7 +42,7 @@ if (sel_slot == bsel_.map_get)
         R[base] = (arg_count >= 2) ? args[1] : val_nil();
     break;
 }
-if (sel_slot == bsel_.map_has)
+case MAP_HAS:
 {
     /* map.has(key) → bool */
     if (arg_count != 1)
@@ -52,7 +52,7 @@ if (sel_slot == bsel_.map_has)
     R[base] = val_bool(map_contains(map, args[0]));
     break;
 }
-if (sel_slot == bsel_.map_delete)
+case MAP_DELETE:
 {
     /* map.delete(key) → removes key, returns true if existed */
     if (arg_count != 1)
@@ -62,7 +62,7 @@ if (sel_slot == bsel_.map_delete)
     R[base] = val_bool(map_delete(map, args[0]));
     break;
 }
-if (sel_slot == bsel_.map_keys)
+case MAP_KEYS:
 {
     /* map.keys() → array of keys */
     ObjArray *result = new_array(&gc_);
@@ -70,7 +70,7 @@ if (sel_slot == bsel_.map_keys)
     map_keys(&gc_, map, as_array(R[base]));
     break;
 }
-if (sel_slot == bsel_.map_values)
+case MAP_VALUES:
 {
     /* map.values() → array of values */
     ObjArray *result = new_array(&gc_);
@@ -78,7 +78,7 @@ if (sel_slot == bsel_.map_values)
     map_values(&gc_, map, as_array(R[base]));
     break;
 }
-if (sel_slot == bsel_.map_items)
+case MAP_ITEMS:
 {
     /* map.items() → array of [key, value] pairs */
     gc_pause(&gc_);
@@ -97,20 +97,20 @@ if (sel_slot == bsel_.map_items)
     gc_resume(&gc_);
     break;
 }
-if (sel_slot == bsel_.map_size)
+case MAP_SIZE:
 {
     /* map.size() → number of entries */
     R[base] = val_int(map->count);
     break;
 }
-if (sel_slot == bsel_.map_clear)
+case MAP_CLEAR:
 {
     /* map.clear() → remove all entries */
     map_clear(&gc_, map);
     R[base] = val_nil();
     break;
 }
-if (sel_slot == bsel_.map_dump)
+case MAP_DUMP:
 {
     /* map.dump() → pretty-print contents recursively */
     dump_value_rec(receiver, 0);
@@ -118,8 +118,63 @@ if (sel_slot == bsel_.map_dump)
     R[base] = val_nil();
     break;
 }
+    /* ---- Python dict methods ---- */
+    case MAP_UPDATE:
+    {
+        if (arg_count != 1 || !is_map(args[0])) RT_ERROR("update() expects a dict");
+        ObjMap *src = as_map(args[0]);
+        gc_pause(&gc_);
+        for (int32_t mi = 0; mi < src->capacity; mi++)
+            if (src->nodes[mi].hash != 0xFFFFFFFFu)
+                map_set(&gc_, map, src->nodes[mi].key, src->nodes[mi].value);
+        gc_resume(&gc_);
+        R[base] = val_nil();
+        break;
+    }
+    case MAP_SETDEFAULT:
+    {
+        if (arg_count < 1) RT_ERROR("setdefault() expects a key");
+        bool found;
+        Value cur = map_get(map, args[0], &found);
+        if (found)
+            R[base] = cur;
+        else
+        {
+            Value dflt = arg_count >= 2 ? args[1] : val_nil();
+            map_set(&gc_, map, args[0], dflt);
+            R[base] = dflt;
+        }
+        break;
+    }
+    case MAP_POP:
+    {
+        if (arg_count < 1) RT_ERROR("pop() expects a key");
+        bool found;
+        Value cur = map_get(map, args[0], &found);
+        if (found)
+        {
+            map_delete(map, args[0]);
+            R[base] = cur;
+        }
+        else if (arg_count >= 2)
+            R[base] = args[1];
+        else
+            RT_ERROR("pop(): key not found");
+        break;
+    }
+    case MAP_COPY:
+    {
+        gc_pause(&gc_);
+        ObjMap *copy = new_map(&gc_);
+        for (int32_t mi = 0; mi < map->capacity; mi++)
+            if (map->nodes[mi].hash != 0xFFFFFFFFu)
+                map_set(&gc_, copy, map->nodes[mi].key, map->nodes[mi].value);
+        gc_resume(&gc_);
+        R[base] = val_obj((Obj *)copy);
+        break;
+    }
+default:
 {
-map_key_lookup:
     /* Not a built-in map method — check if the map contains a callable
     ** with this name (module function dispatch: math.sin(x)) */
     ObjString *key = intern_string(&gc_, mname, (int)strlen(mname),
@@ -162,61 +217,5 @@ map_key_lookup:
         LOAD_STATE();
         DISPATCH();
     }
-    /* ---- Python dict methods ---- */
-    if (sel_slot == bsel_.map_update)
-    {
-        if (arg_count != 1 || !is_map(args[0])) RT_ERROR("update() expects a dict");
-        ObjMap *src = as_map(args[0]);
-        gc_pause(&gc_);
-        for (int32_t mi = 0; mi < src->capacity; mi++)
-            if (src->nodes[mi].hash != 0xFFFFFFFFu)
-                map_set(&gc_, map, src->nodes[mi].key, src->nodes[mi].value);
-        gc_resume(&gc_);
-        R[base] = val_nil();
-        break;
-    }
-    if (sel_slot == bsel_.map_setdefault)
-    {
-        if (arg_count < 1) RT_ERROR("setdefault() expects a key");
-        bool found;
-        Value cur = map_get(map, args[0], &found);
-        if (found)
-            R[base] = cur;
-        else
-        {
-            Value dflt = arg_count >= 2 ? args[1] : val_nil();
-            map_set(&gc_, map, args[0], dflt);
-            R[base] = dflt;
-        }
-        break;
-    }
-    if (sel_slot == bsel_.map_pop)
-    {
-        if (arg_count < 1) RT_ERROR("pop() expects a key");
-        bool found;
-        Value cur = map_get(map, args[0], &found);
-        if (found)
-        {
-            map_delete(map, args[0]);
-            R[base] = cur;
-        }
-        else if (arg_count >= 2)
-            R[base] = args[1];
-        else
-            RT_ERROR("pop(): key not found");
-        break;
-    }
-    if (sel_slot == bsel_.map_copy)
-    {
-        gc_pause(&gc_);
-        ObjMap *copy = new_map(&gc_);
-        for (int32_t mi = 0; mi < map->capacity; mi++)
-            if (map->nodes[mi].hash != 0xFFFFFFFFu)
-                map_set(&gc_, copy, map->nodes[mi].key, map->nodes[mi].value);
-        gc_resume(&gc_);
-        R[base] = val_obj((Obj *)copy);
-        break;
-    }
-    RT_ERROR("map has no method or key '%s'", mname);
 }
-} while (0);
+}

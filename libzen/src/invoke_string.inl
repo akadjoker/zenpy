@@ -16,14 +16,15 @@
 
 ObjString *str = as_string(receiver);
 
-do
+const uint8_t vm_method = str_method(sel_slot);
+switch (vm_method)
 {
-if (sel_slot == bsel_.str_len)
+case STR_LEN:
 {
     R[base] = val_int(str->length);
     break;
 }
-if (sel_slot == bsel_.str_sub)
+case STR_SUB:
 {
     /* str.sub(start, end?) → substring [start, end) */
     int32_t slen = str->length;
@@ -46,7 +47,7 @@ if (sel_slot == bsel_.str_sub)
         R[base] = val_obj((Obj *)create_string(&gc_, str->chars + start, end - start));
     break;
 }
-if (sel_slot == bsel_.str_find)
+case STR_FIND:
 {
     /* str.find(needle[, start]) → index or -1 */
     if (arg_count < 1 || !is_string(args[0]))
@@ -72,7 +73,7 @@ if (sel_slot == bsel_.str_find)
     }
     break;
 }
-if (sel_slot == bsel_.str_upper)
+case STR_UPPER:
 {
     /* str.upper() → new uppercase string */
     char *buf = (char *)malloc(str->length);
@@ -82,7 +83,7 @@ if (sel_slot == bsel_.str_upper)
     free(buf);
     break;
 }
-if (sel_slot == bsel_.str_lower)
+case STR_LOWER:
 {
     /* str.lower() → new lowercase string */
     char *buf = (char *)malloc(str->length);
@@ -92,7 +93,7 @@ if (sel_slot == bsel_.str_lower)
     free(buf);
     break;
 }
-if (sel_slot == bsel_.str_split)
+case STR_SPLIT:
 {
     if (arg_count > 1 || (arg_count == 1 && !is_string(args[0])))
         RT_ERROR("split() expects zero args or a string separator");
@@ -158,7 +159,8 @@ if (sel_slot == bsel_.str_split)
     gc_resume(&gc_);
     break;
 }
-if (sel_slot == bsel_.str_trim || sel_slot == bsel_.str_strip)
+case STR_TRIM:
+case STR_STRIP:
 {
     /* str.strip() → whitespace; str.strip(chars) → any of those characters */
     const char *set = " \t\n\r\v\f";
@@ -176,7 +178,7 @@ if (sel_slot == bsel_.str_trim || sel_slot == bsel_.str_strip)
     R[base] = val_obj((Obj *)create_string(&gc_, str->chars + start, end - start));
     break;
 }
-if (sel_slot == bsel_.str_replace)
+case STR_REPLACE:
 {
     /* str.replace(old, new[, count]) → new string with occurrences replaced */
     if (arg_count < 2 || !is_string(args[0]) || !is_string(args[1]))
@@ -239,7 +241,8 @@ if (sel_slot == bsel_.str_replace)
     }
     break;
 }
-if (sel_slot == bsel_.str_starts_with || sel_slot == bsel_.str_startswith)
+case STR_STARTS_WITH:
+case STR_STARTSWITH:
 {
     if (arg_count != 1 || !is_string(args[0]))
     {
@@ -251,7 +254,8 @@ if (sel_slot == bsel_.str_starts_with || sel_slot == bsel_.str_startswith)
     R[base] = val_bool(match);
     break;
 }
-if (sel_slot == bsel_.str_ends_with || sel_slot == bsel_.str_endswith)
+case STR_ENDS_WITH:
+case STR_ENDSWITH:
 {
     if (arg_count != 1 || !is_string(args[0]))
     {
@@ -263,7 +267,7 @@ if (sel_slot == bsel_.str_ends_with || sel_slot == bsel_.str_endswith)
     R[base] = val_bool(match);
     break;
 }
-if (sel_slot == bsel_.str_char_at)
+case STR_CHAR_AT:
 {
     /* str.char_at(idx) → single-char string */
     if (arg_count != 1 || !is_int(args[0]))
@@ -281,7 +285,7 @@ if (sel_slot == bsel_.str_char_at)
     }
     break;
 }
-if (sel_slot == bsel_.str_byte_at)
+case STR_BYTE_AT:
 {
     /* str.byte_at(idx) → integer byte value */
     if (arg_count != 1 || !is_int(args[0]))
@@ -299,7 +303,7 @@ if (sel_slot == bsel_.str_byte_at)
     }
     break;
 }
-if (sel_slot == bsel_.str_repeat)
+case STR_REPEAT:
 {
     /* str.repeat(n) → string repeated n times */
     if (arg_count != 1 || !is_int(args[0]))
@@ -320,7 +324,7 @@ if (sel_slot == bsel_.str_repeat)
     free(buf);
     break;
 }
-if (sel_slot == bsel_.str_count)
+case STR_COUNT:
 {
     /* str.count(needle) → number of non-overlapping occurrences */
     if (arg_count != 1 || !is_string(args[0]))
@@ -347,7 +351,7 @@ if (sel_slot == bsel_.str_count)
     R[base] = val_int(cnt);
     break;
 }
-if (sel_slot == bsel_.str_pad_left)
+case STR_PAD_LEFT:
 {
     /* str.pad_left(width [, char=' ']) → right-justify string in field of width */
     if (arg_count < 1 || !is_int(args[0]))
@@ -371,7 +375,7 @@ if (sel_slot == bsel_.str_pad_left)
     free(buf);
     break;
 }
-if (sel_slot == bsel_.str_pad_right)
+case STR_PAD_RIGHT:
 {
     /* str.pad_right(width [, char=' ']) → left-justify string in field of width */
     if (arg_count < 1 || !is_int(args[0]))
@@ -395,7 +399,7 @@ if (sel_slot == bsel_.str_pad_right)
     free(buf);
     break;
 }
-if (sel_slot == bsel_.str_contains)
+case STR_CONTAINS:
 {
     /* str.contains(needle) → bool */
     if (arg_count != 1 || !is_string(args[0]))
@@ -412,7 +416,7 @@ if (sel_slot == bsel_.str_contains)
     R[base] = val_bool(f != nullptr);
     break;
 }
-if (sel_slot == bsel_.str_reverse)
+case STR_REVERSE:
 {
     /* str.reverse() → reversed string (byte-level, not UTF-8 aware) */
     char *buf = (char *)malloc(str->length);
@@ -422,7 +426,7 @@ if (sel_slot == bsel_.str_reverse)
     free(buf);
     break;
 }
-if (sel_slot == bsel_.str_join)
+case STR_JOIN:
 {
     /* sep.join(array) → join elements with sep */
     if (arg_count != 1 || !is_array(args[0]))
@@ -464,7 +468,7 @@ if (sel_slot == bsel_.str_join)
     free(buf);
     break;
 }
-if (sel_slot == bsel_.str_lstrip)
+case STR_LSTRIP:
 {
     /* str.lstrip() → strip leading whitespace */
     int start = 0;
@@ -474,7 +478,7 @@ if (sel_slot == bsel_.str_lstrip)
     R[base] = val_obj((Obj *)create_string(&gc_, str->chars + start, str->length - start));
     break;
 }
-if (sel_slot == bsel_.str_rstrip)
+case STR_RSTRIP:
 {
     /* str.rstrip() → strip trailing whitespace */
     int end = str->length;
@@ -484,9 +488,11 @@ if (sel_slot == bsel_.str_rstrip)
     R[base] = val_obj((Obj *)create_string(&gc_, str->chars, end));
     break;
 }
-if (sel_slot == bsel_.str_title || sel_slot == bsel_.str_capitalize || sel_slot == bsel_.str_swapcase)
+case STR_TITLE:
+case STR_CAPITALIZE:
+case STR_SWAPCASE:
 {
-    bool title = sel_slot == bsel_.str_title, cap = sel_slot == bsel_.str_capitalize;
+    bool title = vm_method == STR_TITLE, cap = vm_method == STR_CAPITALIZE;
     gc_pause(&gc_);
     ObjString *out = create_string(&gc_, str->chars, str->length);
     char *p = (char *)out->chars;
@@ -505,9 +511,14 @@ if (sel_slot == bsel_.str_title || sel_slot == bsel_.str_capitalize || sel_slot 
     R[base] = val_obj((Obj *)out);
     break;
 }
-if (sel_slot == bsel_.str_isalpha || sel_slot == bsel_.str_isdigit || sel_slot == bsel_.str_isalnum || sel_slot == bsel_.str_isspace || sel_slot == bsel_.str_isupper || sel_slot == bsel_.str_islower)
+case STR_ISALPHA:
+case STR_ISDIGIT:
+case STR_ISALNUM:
+case STR_ISSPACE:
+case STR_ISUPPER:
+case STR_ISLOWER:
 {
-    int kind = sel_slot == bsel_.str_isalpha ? 0 : sel_slot == bsel_.str_isdigit ? 1 : sel_slot == bsel_.str_isalnum ? 2 : sel_slot == bsel_.str_isspace ? 3 : sel_slot == bsel_.str_isupper ? 4 : 5;
+    int kind = vm_method == STR_ISALPHA ? 0 : vm_method == STR_ISDIGIT ? 1 : vm_method == STR_ISALNUM ? 2 : vm_method == STR_ISSPACE ? 3 : vm_method == STR_ISUPPER ? 4 : 5;
     bool ok = str->length > 0, cased = false;
     for (int k = 0; k < str->length && ok; k++)
     {
@@ -526,7 +537,9 @@ if (sel_slot == bsel_.str_isalpha || sel_slot == bsel_.str_isdigit || sel_slot =
     R[base] = val_bool(ok);
     break;
 }
-if (sel_slot == bsel_.str_index || sel_slot == bsel_.str_rfind || sel_slot == bsel_.str_rindex)
+case STR_INDEX:
+case STR_RFIND:
+case STR_RINDEX:
 {
     if (arg_count < 1 || !is_string(args[0]))
         RT_ERROR("%s() expects a string argument", mname);
@@ -546,24 +559,27 @@ if (sel_slot == bsel_.str_index || sel_slot == bsel_.str_rfind || sel_slot == bs
             pos = found ? (int)(found - str->chars) : -1;
         }
     }
-    if (pos < 0 && (sel_slot == bsel_.str_index || sel_slot == bsel_.str_rindex))
+    if (pos < 0 && (vm_method == STR_INDEX || vm_method == STR_RINDEX))
         RT_ERROR("substring not found");
     R[base] = val_int(pos);
     break;
 }
-if (sel_slot == bsel_.str_center || sel_slot == bsel_.str_ljust || sel_slot == bsel_.str_rjust || sel_slot == bsel_.str_zfill)
+case STR_CENTER:
+case STR_LJUST:
+case STR_RJUST:
+case STR_ZFILL:
 {
     if (arg_count < 1 || !is_int(args[0]))
         RT_ERROR("%s() expects a width", mname);
     int width = (int)args[0].as.integer;
-    char fill = sel_slot == bsel_.str_zfill ? '0' : ' ';
+    char fill = vm_method == STR_ZFILL ? '0' : ' ';
     if (arg_count >= 2 && is_string(args[1]) && as_string(args[1])->length == 1)
         fill = as_string(args[1])->chars[0];
     int padn = width > str->length ? width - str->length : 0;
-    int left = sel_slot == bsel_.str_ljust ? 0 : (sel_slot == bsel_.str_rjust || sel_slot == bsel_.str_zfill) ? padn : padn / 2;
+    int left = vm_method == STR_LJUST ? 0 : (vm_method == STR_RJUST || vm_method == STR_ZFILL) ? padn : padn / 2;
     char *p = (char *)malloc((size_t)str->length + padn + 1);
     int k = 0;
-    if (sel_slot == bsel_.str_zfill && str->length > 0 && (str->chars[0] == '-' || str->chars[0] == '+') && padn > 0)
+    if (vm_method == STR_ZFILL && str->length > 0 && (str->chars[0] == '-' || str->chars[0] == '+') && padn > 0)
     {
         p[k++] = str->chars[0];
         for (int z = 0; z < padn; z++) p[k++] = '0';
@@ -580,7 +596,7 @@ if (sel_slot == bsel_.str_center || sel_slot == bsel_.str_ljust || sel_slot == b
     free(p);
     break;
 }
-if (sel_slot == bsel_.str_splitlines)
+case STR_SPLITLINES:
 {
     gc_pause(&gc_);
     ObjArray *result = new_array(&gc_);
@@ -600,7 +616,9 @@ if (sel_slot == bsel_.str_splitlines)
     gc_resume(&gc_);
     break;
 }
-if (sel_slot == bsel_.str_rsplit || sel_slot == bsel_.str_partition || sel_slot == bsel_.str_rpartition)
+case STR_RSPLIT:
+case STR_PARTITION:
+case STR_RPARTITION:
 {
     if (arg_count < 1 || !is_string(args[0]) || as_string(args[0])->length == 0)
         RT_ERROR("%s() expects a non-empty separator", mname);
@@ -608,7 +626,7 @@ if (sel_slot == bsel_.str_rsplit || sel_slot == bsel_.str_partition || sel_slot 
     gc_pause(&gc_);
     ObjArray *result = new_array(&gc_);
     R[base] = val_obj((Obj *)result);
-    if (sel_slot == bsel_.str_rsplit)
+    if (vm_method == STR_RSPLIT)
     {
         int maxsplit = (arg_count >= 2 && is_int(args[1])) ? (int)args[1].as.integer : -1;
         int endp = str->length, splits = 0;
@@ -628,7 +646,7 @@ if (sel_slot == bsel_.str_rsplit || sel_slot == bsel_.str_partition || sel_slot 
     }
     else
     {
-        bool right = sel_slot == bsel_.str_rpartition;
+        bool right = vm_method == STR_RPARTITION;
         int k = -1;
         if (right) { for (int j = str->length - sep->length; j >= 0; j--) if (memcmp(str->chars + j, sep->chars, (size_t)sep->length) == 0) { k = j; break; } }
         else { const char *f = find_sep(str->chars, str->length, sep->chars, sep->length); k = f ? (int)(f - str->chars) : -1; }
@@ -648,7 +666,8 @@ if (sel_slot == bsel_.str_rsplit || sel_slot == bsel_.str_partition || sel_slot 
     gc_resume(&gc_);
     break;
 }
+default:
 {
     RT_ERROR("string has no method '%s'", mname);
 }
-} while (0);
+}

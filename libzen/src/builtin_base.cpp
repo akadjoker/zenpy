@@ -1683,6 +1683,24 @@ namespace zen
         return 1;
     }
 
+    /* (a * b) % m for int64 without a 128-bit intermediate — __int128 is a
+       GCC/Clang extension, not available on MSVC. "Peasant" multiplication:
+       double a and conditionally add, reducing mod m at every step so the
+       running values never reach m and the doubling itself never overflows
+       uint64_t (2*(m-1) < 2^64 for any m that fits in int64_t). Assumes
+       0 <= a < m and b >= 0, same as the __int128 version it replaces. */
+    static inline int64_t mulmod64(int64_t a_, int64_t b_, int64_t m_)
+    {
+        uint64_t m = (uint64_t)m_, a = (uint64_t)a_, b = (uint64_t)b_, result = 0;
+        while (b > 0)
+        {
+            if (b & 1) { result += a; if (result >= m) result -= m; }
+            a += a; if (a >= m) a -= m;
+            b >>= 1;
+        }
+        return (int64_t)result;
+    }
+
     static int nat_pow(VM *vm, Value *args, int nargs)
     {
         if (nargs < 2) { vm->runtime_error("pow() takes two or three arguments"); return -1; }
@@ -1691,7 +1709,7 @@ namespace zen
             int64_t b = to_integer(args[0]), e = to_integer(args[1]), m = to_integer(args[2]);
             if (m == 0) { vm->runtime_error("pow(): modulus is zero"); return -1; }
             int64_t r = 1; b %= m; if (b < 0) b += m;
-            while (e > 0) { if (e & 1) r = (int64_t)(((__int128)r * b) % m); b = (int64_t)(((__int128)b * b) % m); e >>= 1; }
+            while (e > 0) { if (e & 1) r = mulmod64(r, b, m); b = mulmod64(b, b, m); e >>= 1; }
             args[0] = val_int(r);
             return 1;
         }

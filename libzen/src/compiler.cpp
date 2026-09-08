@@ -1037,9 +1037,48 @@ namespace zen
 
         if (can_assign && match(TOK_EQ))
         {
+            /* `g = g + x` is the same operation as `g += x`, and the += path
+            ** already emits the non-marking AUG pair so ADD can append a
+            ** string in place. Written the long way it took OP_GETGLOBAL,
+            ** which marks the string shared, so every append copied the whole
+            ** accumulator: 200k appends went from 0.01s to 51s, quadratic.
+            **
+            ** Detect it after the fact: the RHS is one instruction, that
+            ** instruction reads the global we are assigning, and it was
+            ** loaded by the GETGLOBAL immediately before. Rewrite the pair
+            ** rather than re-parse. */
+            int rhs_start = state_->emitter.current_offset();
             int val = expression(r);
             if (val != r) emit_move(r, val);
-            state_->emitter.emit_abx(OP_SETGLOBAL, r, gidx, previous_.line);
+
+            bool aug = false;
+            int off = state_->emitter.current_offset() - 1;
+            if (off >= rhs_start + 1)
+            {
+                Instruction last = state_->emitter.instruction_at(off);
+                OpCode lop = (OpCode)ZEN_OP(last);
+                /* Only the ops whose AUG form is meaningful — a string
+                ** accumulator is ADD; the rest are here because += accepts
+                ** them and the shape is identical. */
+                if ((lop == OP_ADD || lop == OP_SUB || lop == OP_MUL ||
+                     lop == OP_DIV || lop == OP_MOD || lop == OP_IDIV ||
+                     lop == OP_POW || lop == OP_BAND || lop == OP_BOR ||
+                     lop == OP_BXOR || lop == OP_SHL || lop == OP_SHR) &&
+                    ZEN_A(last) == r)
+                {
+                    Instruction first = state_->emitter.instruction_at(rhs_start);
+                    if (ZEN_OP(first) == OP_GETGLOBAL &&
+                        (int)ZEN_BX(first) == gidx &&
+                        ZEN_B(last) == (int)ZEN_A(first))
+                    {
+                        state_->emitter.rewrite_opcode_at(rhs_start, OP_GETGLOBAL_AUG);
+                        aug = true;
+                    }
+                }
+            }
+
+            state_->emitter.emit_abx(aug ? OP_SETGLOBAL_AUG : OP_SETGLOBAL,
+                                     r, gidx, previous_.line);
             note_global_written_in_function(gidx);
             infer_assigned_class_global(gidx);
             return r;

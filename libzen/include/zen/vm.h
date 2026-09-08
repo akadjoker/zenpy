@@ -401,6 +401,12 @@ namespace zen
         BuiltinSelectors bsel_;
         void init_builtin_selectors();
 
+        /* Rare branches pulled out of execute(). Keeping them inline made the
+        ** interpreter body large enough that ip/R/K/frame could not all stay
+        ** in machine registers, so every opcode paid reload traffic. */
+        bool call_make_struct(Value *R, int a, int nargs, Value callee);
+        void call_make_native_struct(Value *R, int a, int nargs, Value callee);
+
         /* Dense method ids, per receiver type.
         **
         ** bsel_ turned each builtin method name into a selector slot, which

@@ -608,6 +608,53 @@ namespace zen
     }
 #endif
 
+
+    /* Struct construction, out of line — see the call sites in OP_CALL.
+    ** Returns false when it raised a runtime error. */
+    ZEN_NOINLINE bool VM::call_make_struct(Value *R, int a, int nargs, Value callee)
+    {
+        ObjStructDef *def = as_struct_def(callee);
+        if (nargs != def->num_fields)
+        {
+            runtime_error("struct '%s' expects %d args but got %d",
+                          def->name->chars, def->num_fields, nargs);
+            return false;
+        }
+        ObjStruct *s = (ObjStruct *)zen_alloc_now(&gc_, sizeof(ObjStruct));
+        s->obj.type = OBJ_STRUCT;
+        s->obj.color = GC_WHITE;
+        s->obj.interned = 0;
+        s->obj.flags = 0;
+        s->obj.hash = 0;
+        s->obj.gc_next = gc_.objects;
+        gc_.objects = (Obj *)s;
+        s->def = def;
+        s->fields = (Value *)zen_alloc_now(&gc_, sizeof(Value) * def->num_fields);
+        for (int fi = 0; fi < def->num_fields; fi++)
+            s->fields[fi] = R[a + 1 + fi];
+        R[a] = val_obj((Obj *)s);
+        return true;
+    }
+
+    ZEN_NOINLINE void VM::call_make_native_struct(Value *R, int a, int nargs, Value callee)
+    {
+        NativeStructDef *def = as_native_struct_def(callee);
+        ObjNativeStruct *ns = (ObjNativeStruct *)zen_alloc_now(&gc_, sizeof(ObjNativeStruct));
+        ns->obj.type = OBJ_NATIVE_STRUCT;
+        ns->obj.color = GC_WHITE;
+        ns->obj.hash = 0;
+        ns->obj.interned = 0;
+        ns->obj.flags = 0;
+        ns->obj.gc_next = gc_.objects;
+        gc_.objects = (Obj *)ns;
+        ns->def = def;
+        ns->data = zen_alloc_now(&gc_, def->struct_size);
+        memset(ns->data, 0, def->struct_size);
+        if (def->ctor)
+            def->ctor(this, ns->data, nargs, &R[a + 1]);
+        R[a] = val_obj((Obj *)ns);
+    }
+
     void VM::execute(ObjFiber *fiber)
     {
         /* Cache hot state em locals */
@@ -927,7 +974,10 @@ namespace zen
             ** it (locals, other frames) — mark it shared so in-place append
             ** never mutates something a register still holds. The AUG pair
             ** below is the one read that legitimately skips this. */
-            if (__builtin_expect(is_string(v) && is_obj(v), 0))
+            /* is_string() also accepts VAL_SMALL_STRING, which has no
+            ** object behind it — the is_obj() is what keeps this from
+            ** writing through a non-pointer. */
+            if (__builtin_expect(is_obj(v) && is_string(v), 0))
                 v.as.obj->flags |= OBJ_FLAG_SHARED;
             R[ZEN_A(i)] = v;
             NEXT();
@@ -2427,44 +2477,18 @@ namespace zen
                 /* No init and no args (or native_ctor consumed them) — just return the instance */
                 DISPATCH();
             }
+            /* Struct construction: allocate and fill, no frame pushed and no
+            ** re-entry, so it lives outside execute() where it does not add
+            ** to the register pressure every other opcode pays for. */
             if (is_struct_def(callee))
             {
-                ObjStructDef *def = as_struct_def(callee);
-                if (nargs != def->num_fields)
-                    RT_ERROR("struct '%s' expects %d args but got %d",
-                             def->name->chars, def->num_fields, nargs);
-                ObjStruct *s = (ObjStruct *)zen_alloc_now(&gc_, sizeof(ObjStruct));
-                s->obj.type = OBJ_STRUCT;
-                s->obj.color = GC_WHITE;
-                s->obj.interned = 0;
-                s->obj.flags = 0;
-                s->obj.hash = 0;
-                s->obj.gc_next = gc_.objects;
-                gc_.objects = (Obj *)s;
-                s->def = def;
-                s->fields = (Value *)zen_alloc_now(&gc_, sizeof(Value) * def->num_fields);
-                for (int fi = 0; fi < def->num_fields; fi++)
-                    s->fields[fi] = R[a + 1 + fi];
-                R[a] = val_obj((Obj *)s);
+                if (!call_make_struct(R, a, nargs, callee))
+                    return;
                 DISPATCH();
             }
             if (is_native_struct_def(callee))
             {
-                NativeStructDef *def = as_native_struct_def(callee);
-                ObjNativeStruct *ns = (ObjNativeStruct *)zen_alloc_now(&gc_, sizeof(ObjNativeStruct));
-                ns->obj.type = OBJ_NATIVE_STRUCT;
-                ns->obj.color = GC_WHITE;
-                ns->obj.hash = 0;
-                ns->obj.interned = 0;
-                ns->obj.flags = 0;
-                ns->obj.gc_next = gc_.objects;
-                gc_.objects = (Obj *)ns;
-                ns->def = def;
-                ns->data = zen_alloc_now(&gc_, def->struct_size);
-                memset(ns->data, 0, def->struct_size);
-                if (def->ctor)
-                    def->ctor(this, ns->data, nargs, &R[a + 1]);
-                R[a] = val_obj((Obj *)ns);
+                call_make_native_struct(R, a, nargs, callee);
                 DISPATCH();
             }
             RT_ERROR("attempt to call non-function (got %s)", val_type_str(R[a]));

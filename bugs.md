@@ -700,3 +700,56 @@ serem conscientes de UTF-8, ou a divergência ficar documentada.
 
 Testes usados: tmp/ (não commitado) — reproduzir com
 `print(len("héllo"))` e o exemplo do ternário acima.
+
+## Round 10 — o que passou e o que falta (2026-09-08)
+
+Continuação do round 9, a varrer áreas que ainda não tinham sido testadas
+contra o CPython lado a lado.
+
+### Passou tudo (nenhuma divergência)
+
+- **Colecções**: índices negativos, fatias fora de limites (`a[5:]`, `a[-10:]`),
+  cópia por fatia, igualdade, chaves de tipos diferentes no mesmo dict
+  (`d[1]` e `d["1"]` distintos), `get` com default, `sorted`/`reversed`/
+  `min`/`max`/`sum`/`any`/`all` incluindo os casos vazios.
+- **Closures e funções**: captura por chamada num ciclo, closures aninhadas
+  três níveis, defaults, `*args`, recursão a 100 níveis.
+- **Classes**: herança a três níveis, `super().__init__`, `super().method()`,
+  despacho virtual através de um método da base, `isinstance` em toda a
+  cadeia, `__eq__`/`__lt__`/`__add__`/`__str__`, e `sorted` a usar `__lt__`.
+- **Aliasing de strings**: o `OBJ_FLAG_SHARED` aguenta os casos que o podiam
+  furar — string guardada numa lista antes de ser estendida, usada como
+  chave e depois reatribuída, num campo de instância, e alias local dentro
+  de uma função. Todos batem certo com o CPython.
+- **Stress**: recursão infinita dá "stack overflow" limpo, não crash;
+  100k estruturas cíclicas não incomodam o GC; 2M elementos numa lista em
+  0.09s/51MB; 500k entradas num dict em 37MB.
+
+### 5. `next()` não existe
+
+```python
+g = gen()
+print(next(g))     # attempt to call non-function (got nil)
+```
+
+Geradores funcionam em `for`, em comprehensions e em generator expressions
+(`sum(v for v in gen())`) — só falta o builtin que os consome um a um. É a
+forma de usar um gerador como stream, que é metade da razão para os ter.
+
+### 6. `list(generator)` falha
+
+```python
+print(list(gen()))    # list: object is not iterable
+```
+
+`list()` aceita array, map e set (builtin_base.cpp: a verificação é
+`is_array`/`is_map`/`is_set`), e um gerador não é nenhum deles. `[v for v in
+gen()]` funciona e produz o mesmo, portanto é só a conversão directa que
+falta.
+
+### 7. Tuplos são listas
+
+`(1, 2)` produz um array, `type()` diz "list", e `(1,2) == [1,2]` é True
+(CPython: False). Decisão de desenho defensável — um tipo a menos — mas
+divergente, e código Python que usa tuplos como chaves de dict ou que
+distingue os dois tipos vai comportar-se de outra forma.

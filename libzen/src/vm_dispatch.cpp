@@ -1062,8 +1062,27 @@ namespace zen
                     array_push_n(&gc_, r, xa->data, arr_count(xa));
                 if (arr_count(xb) > 0)
                     array_push_n(&gc_, r, xb->data, arr_count(xb));
-                gc_resume(&gc_);
+                /* Rooted before the resume so the collection below cannot
+                ** take it.
+                **
+                ** `a = a + [i]` in a loop builds a fresh array each time and
+                ** drops the previous one, but every allocation happens inside
+                ** the pause above, so the normal threshold check never sees
+                ** an unpaused moment and nothing is ever collected: 4.7 GB
+                ** resident for a 20k-element list, with 16k munmap calls
+                ** handing pages back one at a time. Checking here, where the
+                ** result is reachable, bounds it. Not in gc_resume() itself —
+                ** the compiler holds a pause across a whole compilation and
+                ** returns an ObjFunc nothing roots yet, so collecting on
+                ** every resume segfaults under stress-GC. */
                 R[ZEN_A(i)] = val_obj((Obj *)r);
+                gc_resume(&gc_);
+                if (gc_.bytes_allocated > gc_.next_gc)
+                {
+                    SAVE_IP();
+                    gc_collect(this);
+                    LOAD_STATE();
+                }
             }
             else if (is_instance(vb) || is_instance(vc))
             {
@@ -1255,8 +1274,27 @@ namespace zen
                 ObjArray *r = new_array(&gc_);
                 for (int64_t k = 0; k < n && cnt > 0; k++)
                     array_push_n(&gc_, r, src->data, cnt);
-                gc_resume(&gc_);
+                /* Rooted before the resume so the collection below cannot
+                ** take it.
+                **
+                ** `a = a + [i]` in a loop builds a fresh array each time and
+                ** drops the previous one, but every allocation happens inside
+                ** the pause above, so the normal threshold check never sees
+                ** an unpaused moment and nothing is ever collected: 4.7 GB
+                ** resident for a 20k-element list, with 16k munmap calls
+                ** handing pages back one at a time. Checking here, where the
+                ** result is reachable, bounds it. Not in gc_resume() itself —
+                ** the compiler holds a pause across a whole compilation and
+                ** returns an ObjFunc nothing roots yet, so collecting on
+                ** every resume segfaults under stress-GC. */
                 R[ZEN_A(i)] = val_obj((Obj *)r);
+                gc_resume(&gc_);
+                if (gc_.bytes_allocated > gc_.next_gc)
+                {
+                    SAVE_IP();
+                    gc_collect(this);
+                    LOAD_STATE();
+                }
             }
             else if (is_instance(vb) || is_instance(vc))
             {

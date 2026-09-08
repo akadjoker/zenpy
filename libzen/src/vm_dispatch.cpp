@@ -873,6 +873,12 @@ namespace zen
             &&lbl_OP_RETURNNIL,
         };
 
+        /* Same rule as s_opnames in debug.cpp, and worse when it breaks: a
+        ** missing entry here shifts every later label, so DISPATCH() jumps
+        ** into the wrong handler and the VM misbehaves with a clean build. */
+        static_assert(sizeof(dispatch_table) / sizeof(dispatch_table[0]) == (size_t)OP_RETURNNIL + 1,
+                      "dispatch_table is out of sync with the OpCode enum");
+
 #ifdef ZEN_OPCODE_PROFILE
 /* Per-opcode cycle profile (build with -DZEN_OPCODE_PROFILE). Every
 ** dispatch charges the cycles since the previous dispatch to the opcode

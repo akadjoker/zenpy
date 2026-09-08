@@ -26,6 +26,7 @@ bin/zen_gl
 bin/zen
 bin/test_*
 bin/zen_*
+bin/fuzz_zen
 
 # Ignorar tudo dentro de bin/
 #bin/*

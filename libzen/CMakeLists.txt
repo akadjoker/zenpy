@@ -58,6 +58,14 @@ endif()
 target_compile_definitions(zen_static PRIVATE $<$<CONFIG:Release>:NDEBUG>)
 set_target_properties(zen_static PROPERTIES OUTPUT_NAME zen POSITION_INDEPENDENT_CODE ON)
 
+# tests/fuzz forces a GC cycle on every allocation via ZEN_DEBUG_STRESS_GC —
+# but that macro is checked inside memory.cpp, which is compiled here, not in
+# fuzz_zen's own translation unit. Propagate it so stress mode actually takes
+# effect while fuzzing.
+if(ZEN_BUILD_FUZZ)
+    target_compile_definitions(zen_static PRIVATE ZEN_DEBUG_STRESS_GC)
+endif()
+
 # --- libzen (shared library) ---
 # add_library(zen_shared SHARED ${CORE_SRCS})
 # target_include_directories(zen_shared PUBLIC include include/zen PRIVATE src ${ZEN_VENDOR_INCLUDES})

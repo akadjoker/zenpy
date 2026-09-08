@@ -2,20 +2,28 @@
 ** invoke_string.inl — String method dispatch for OP_INVOKE.
 ** Included inside CASE(OP_INVOKE) when receiver is OBJ_STRING.
 **
-** Available variables: base, arg_count, receiver, mname, mlen, args, R, K
+** Available variables: base, arg_count, receiver, mname, mlen, args, R, K,
+** sel_slot (compile-time-resolved method selector — see BuiltinSelectors in
+** vm.h and docs/plano-selector-dispatch-builtins.md).
+**
+** Dispatches on sel_slot instead of comparing mname against a chain of
+** literals: same idea as the class-vtable path just above, applied to a
+** builtin receiver. A handful of methods share one case (aliases, or names
+** that only differ in a small runtime flag) — those re-check sel_slot
+** against the specific BuiltinSelectors field instead of re-comparing the
+** name string, which is what the pre-switch version did via STR_METHOD().
 */
 
 ObjString *str = as_string(receiver);
-#define STR_METHOD(lit) (method->length == (int)(sizeof(lit) - 1) && memcmp(mname, lit, sizeof(lit) - 1) == 0)
 
 do
 {
-if (STR_METHOD("len"))
+if (sel_slot == bsel_.str_len)
 {
     R[base] = val_int(str->length);
     break;
 }
-if (STR_METHOD("sub"))
+if (sel_slot == bsel_.str_sub)
 {
     /* str.sub(start, end?) → substring [start, end) */
     int32_t slen = str->length;
@@ -38,7 +46,7 @@ if (STR_METHOD("sub"))
         R[base] = val_obj((Obj *)create_string(&gc_, str->chars + start, end - start));
     break;
 }
-if (STR_METHOD("find"))
+if (sel_slot == bsel_.str_find)
 {
     /* str.find(needle[, start]) → index or -1 */
     if (arg_count < 1 || !is_string(args[0]))
@@ -64,7 +72,7 @@ if (STR_METHOD("find"))
     }
     break;
 }
-if (STR_METHOD("upper"))
+if (sel_slot == bsel_.str_upper)
 {
     /* str.upper() → new uppercase string */
     char *buf = (char *)malloc(str->length);
@@ -74,7 +82,7 @@ if (STR_METHOD("upper"))
     free(buf);
     break;
 }
-if (STR_METHOD("lower"))
+if (sel_slot == bsel_.str_lower)
 {
     /* str.lower() → new lowercase string */
     char *buf = (char *)malloc(str->length);
@@ -84,7 +92,7 @@ if (STR_METHOD("lower"))
     free(buf);
     break;
 }
-if (STR_METHOD("split"))
+if (sel_slot == bsel_.str_split)
 {
     if (arg_count > 1 || (arg_count == 1 && !is_string(args[0])))
         RT_ERROR("split() expects zero args or a string separator");
@@ -97,7 +105,7 @@ if (STR_METHOD("split"))
     if (arg_count == 0)
     {
         /* Lookup table — mais rápido que 4 comparisons por char */
-       
+
         int i = 0;
         const char *chars = str->chars;
         const int len = str->length;
@@ -150,7 +158,7 @@ if (STR_METHOD("split"))
     gc_resume(&gc_);
     break;
 }
-if (STR_METHOD("trim") || STR_METHOD("strip"))
+if (sel_slot == bsel_.str_trim || sel_slot == bsel_.str_strip)
 {
     /* str.strip() → whitespace; str.strip(chars) → any of those characters */
     const char *set = " \t\n\r\v\f";
@@ -168,7 +176,7 @@ if (STR_METHOD("trim") || STR_METHOD("strip"))
     R[base] = val_obj((Obj *)create_string(&gc_, str->chars + start, end - start));
     break;
 }
-if (STR_METHOD("replace"))
+if (sel_slot == bsel_.str_replace)
 {
     /* str.replace(old, new[, count]) → new string with occurrences replaced */
     if (arg_count < 2 || !is_string(args[0]) || !is_string(args[1]))
@@ -231,7 +239,7 @@ if (STR_METHOD("replace"))
     }
     break;
 }
-if (STR_METHOD("starts_with") || STR_METHOD("startswith"))
+if (sel_slot == bsel_.str_starts_with || sel_slot == bsel_.str_startswith)
 {
     if (arg_count != 1 || !is_string(args[0]))
     {
@@ -243,7 +251,7 @@ if (STR_METHOD("starts_with") || STR_METHOD("startswith"))
     R[base] = val_bool(match);
     break;
 }
-if (STR_METHOD("ends_with") || STR_METHOD("endswith"))
+if (sel_slot == bsel_.str_ends_with || sel_slot == bsel_.str_endswith)
 {
     if (arg_count != 1 || !is_string(args[0]))
     {
@@ -255,7 +263,7 @@ if (STR_METHOD("ends_with") || STR_METHOD("endswith"))
     R[base] = val_bool(match);
     break;
 }
-if (STR_METHOD("char_at"))
+if (sel_slot == bsel_.str_char_at)
 {
     /* str.char_at(idx) → single-char string */
     if (arg_count != 1 || !is_int(args[0]))
@@ -273,7 +281,7 @@ if (STR_METHOD("char_at"))
     }
     break;
 }
-if (STR_METHOD("byte_at"))
+if (sel_slot == bsel_.str_byte_at)
 {
     /* str.byte_at(idx) → integer byte value */
     if (arg_count != 1 || !is_int(args[0]))
@@ -291,7 +299,7 @@ if (STR_METHOD("byte_at"))
     }
     break;
 }
-if (STR_METHOD("repeat"))
+if (sel_slot == bsel_.str_repeat)
 {
     /* str.repeat(n) → string repeated n times */
     if (arg_count != 1 || !is_int(args[0]))
@@ -312,7 +320,7 @@ if (STR_METHOD("repeat"))
     free(buf);
     break;
 }
-if (STR_METHOD("count"))
+if (sel_slot == bsel_.str_count)
 {
     /* str.count(needle) → number of non-overlapping occurrences */
     if (arg_count != 1 || !is_string(args[0]))
@@ -339,7 +347,7 @@ if (STR_METHOD("count"))
     R[base] = val_int(cnt);
     break;
 }
-if (STR_METHOD("pad_left"))
+if (sel_slot == bsel_.str_pad_left)
 {
     /* str.pad_left(width [, char=' ']) → right-justify string in field of width */
     if (arg_count < 1 || !is_int(args[0]))
@@ -363,7 +371,7 @@ if (STR_METHOD("pad_left"))
     free(buf);
     break;
 }
-if (STR_METHOD("pad_right"))
+if (sel_slot == bsel_.str_pad_right)
 {
     /* str.pad_right(width [, char=' ']) → left-justify string in field of width */
     if (arg_count < 1 || !is_int(args[0]))
@@ -387,7 +395,7 @@ if (STR_METHOD("pad_right"))
     free(buf);
     break;
 }
-if (STR_METHOD("contains"))
+if (sel_slot == bsel_.str_contains)
 {
     /* str.contains(needle) → bool */
     if (arg_count != 1 || !is_string(args[0]))
@@ -404,7 +412,7 @@ if (STR_METHOD("contains"))
     R[base] = val_bool(f != nullptr);
     break;
 }
-if (STR_METHOD("reverse"))
+if (sel_slot == bsel_.str_reverse)
 {
     /* str.reverse() → reversed string (byte-level, not UTF-8 aware) */
     char *buf = (char *)malloc(str->length);
@@ -414,7 +422,7 @@ if (STR_METHOD("reverse"))
     free(buf);
     break;
 }
-if (STR_METHOD("join"))
+if (sel_slot == bsel_.str_join)
 {
     /* sep.join(array) → join elements with sep */
     if (arg_count != 1 || !is_array(args[0]))
@@ -456,7 +464,7 @@ if (STR_METHOD("join"))
     free(buf);
     break;
 }
-if (STR_METHOD("lstrip"))
+if (sel_slot == bsel_.str_lstrip)
 {
     /* str.lstrip() → strip leading whitespace */
     int start = 0;
@@ -466,7 +474,7 @@ if (STR_METHOD("lstrip"))
     R[base] = val_obj((Obj *)create_string(&gc_, str->chars + start, str->length - start));
     break;
 }
-if (STR_METHOD("rstrip"))
+if (sel_slot == bsel_.str_rstrip)
 {
     /* str.rstrip() → strip trailing whitespace */
     int end = str->length;
@@ -476,11 +484,9 @@ if (STR_METHOD("rstrip"))
     R[base] = val_obj((Obj *)create_string(&gc_, str->chars, end));
     break;
 }
-
-/* ---- Python string methods (added by the CPython differential pass) ---- */
-if (STR_METHOD("title") || STR_METHOD("capitalize") || STR_METHOD("swapcase"))
+if (sel_slot == bsel_.str_title || sel_slot == bsel_.str_capitalize || sel_slot == bsel_.str_swapcase)
 {
-    bool title = STR_METHOD("title"), cap = STR_METHOD("capitalize");
+    bool title = sel_slot == bsel_.str_title, cap = sel_slot == bsel_.str_capitalize;
     gc_pause(&gc_);
     ObjString *out = create_string(&gc_, str->chars, str->length);
     char *p = (char *)out->chars;
@@ -499,10 +505,9 @@ if (STR_METHOD("title") || STR_METHOD("capitalize") || STR_METHOD("swapcase"))
     R[base] = val_obj((Obj *)out);
     break;
 }
-if (STR_METHOD("isalpha") || STR_METHOD("isdigit") || STR_METHOD("isalnum") || STR_METHOD("isspace") ||
-    STR_METHOD("isupper") || STR_METHOD("islower"))
+if (sel_slot == bsel_.str_isalpha || sel_slot == bsel_.str_isdigit || sel_slot == bsel_.str_isalnum || sel_slot == bsel_.str_isspace || sel_slot == bsel_.str_isupper || sel_slot == bsel_.str_islower)
 {
-    int kind = STR_METHOD("isalpha") ? 0 : STR_METHOD("isdigit") ? 1 : STR_METHOD("isalnum") ? 2 : STR_METHOD("isspace") ? 3 : STR_METHOD("isupper") ? 4 : 5;
+    int kind = sel_slot == bsel_.str_isalpha ? 0 : sel_slot == bsel_.str_isdigit ? 1 : sel_slot == bsel_.str_isalnum ? 2 : sel_slot == bsel_.str_isspace ? 3 : sel_slot == bsel_.str_isupper ? 4 : 5;
     bool ok = str->length > 0, cased = false;
     for (int k = 0; k < str->length && ok; k++)
     {
@@ -521,7 +526,7 @@ if (STR_METHOD("isalpha") || STR_METHOD("isdigit") || STR_METHOD("isalnum") || S
     R[base] = val_bool(ok);
     break;
 }
-if (STR_METHOD("index") || STR_METHOD("rfind") || STR_METHOD("rindex"))
+if (sel_slot == bsel_.str_index || sel_slot == bsel_.str_rfind || sel_slot == bsel_.str_rindex)
 {
     if (arg_count < 1 || !is_string(args[0]))
         RT_ERROR("%s() expects a string argument", mname);
@@ -541,24 +546,24 @@ if (STR_METHOD("index") || STR_METHOD("rfind") || STR_METHOD("rindex"))
             pos = found ? (int)(found - str->chars) : -1;
         }
     }
-    if (pos < 0 && (STR_METHOD("index") || STR_METHOD("rindex")))
+    if (pos < 0 && (sel_slot == bsel_.str_index || sel_slot == bsel_.str_rindex))
         RT_ERROR("substring not found");
     R[base] = val_int(pos);
     break;
 }
-if (STR_METHOD("center") || STR_METHOD("ljust") || STR_METHOD("rjust") || STR_METHOD("zfill"))
+if (sel_slot == bsel_.str_center || sel_slot == bsel_.str_ljust || sel_slot == bsel_.str_rjust || sel_slot == bsel_.str_zfill)
 {
     if (arg_count < 1 || !is_int(args[0]))
         RT_ERROR("%s() expects a width", mname);
     int width = (int)args[0].as.integer;
-    char fill = STR_METHOD("zfill") ? '0' : ' ';
+    char fill = sel_slot == bsel_.str_zfill ? '0' : ' ';
     if (arg_count >= 2 && is_string(args[1]) && as_string(args[1])->length == 1)
         fill = as_string(args[1])->chars[0];
     int padn = width > str->length ? width - str->length : 0;
-    int left = STR_METHOD("ljust") ? 0 : STR_METHOD("rjust") || STR_METHOD("zfill") ? padn : padn / 2;
+    int left = sel_slot == bsel_.str_ljust ? 0 : (sel_slot == bsel_.str_rjust || sel_slot == bsel_.str_zfill) ? padn : padn / 2;
     char *p = (char *)malloc((size_t)str->length + padn + 1);
     int k = 0;
-    if (STR_METHOD("zfill") && str->length > 0 && (str->chars[0] == '-' || str->chars[0] == '+') && padn > 0)
+    if (sel_slot == bsel_.str_zfill && str->length > 0 && (str->chars[0] == '-' || str->chars[0] == '+') && padn > 0)
     {
         p[k++] = str->chars[0];
         for (int z = 0; z < padn; z++) p[k++] = '0';
@@ -575,7 +580,7 @@ if (STR_METHOD("center") || STR_METHOD("ljust") || STR_METHOD("rjust") || STR_ME
     free(p);
     break;
 }
-if (STR_METHOD("splitlines"))
+if (sel_slot == bsel_.str_splitlines)
 {
     gc_pause(&gc_);
     ObjArray *result = new_array(&gc_);
@@ -595,7 +600,7 @@ if (STR_METHOD("splitlines"))
     gc_resume(&gc_);
     break;
 }
-if (STR_METHOD("rsplit") || STR_METHOD("partition") || STR_METHOD("rpartition"))
+if (sel_slot == bsel_.str_rsplit || sel_slot == bsel_.str_partition || sel_slot == bsel_.str_rpartition)
 {
     if (arg_count < 1 || !is_string(args[0]) || as_string(args[0])->length == 0)
         RT_ERROR("%s() expects a non-empty separator", mname);
@@ -603,7 +608,7 @@ if (STR_METHOD("rsplit") || STR_METHOD("partition") || STR_METHOD("rpartition"))
     gc_pause(&gc_);
     ObjArray *result = new_array(&gc_);
     R[base] = val_obj((Obj *)result);
-    if (STR_METHOD("rsplit"))
+    if (sel_slot == bsel_.str_rsplit)
     {
         int maxsplit = (arg_count >= 2 && is_int(args[1])) ? (int)args[1].as.integer : -1;
         int endp = str->length, splits = 0;
@@ -623,7 +628,7 @@ if (STR_METHOD("rsplit") || STR_METHOD("partition") || STR_METHOD("rpartition"))
     }
     else
     {
-        bool right = STR_METHOD("rpartition");
+        bool right = sel_slot == bsel_.str_rpartition;
         int k = -1;
         if (right) { for (int j = str->length - sep->length; j >= 0; j--) if (memcmp(str->chars + j, sep->chars, (size_t)sep->length) == 0) { k = j; break; } }
         else { const char *f = find_sep(str->chars, str->length, sep->chars, sep->length); k = f ? (int)(f - str->chars) : -1; }
@@ -647,5 +652,3 @@ if (STR_METHOD("rsplit") || STR_METHOD("partition") || STR_METHOD("rpartition"))
     RT_ERROR("string has no method '%s'", mname);
 }
 } while (0);
-
-#undef STR_METHOD

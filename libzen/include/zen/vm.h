@@ -365,6 +365,42 @@ namespace zen
         int selectors_capacity_;
         int init_selector_; /* vtable slot of "__init__": -1 until that name is interned */
 
+        /* Builtin-method selector slots — resolved once at construction so
+        ** invoke_string.inl (and friends) can dispatch via switch(sel_slot)
+        ** instead of the memcmp chain OP_INVOKE otherwise falls back to for
+        ** non-instance receivers. See docs/plano-selector-dispatch-builtins.md. */
+        struct BuiltinSelectors
+        {
+            int str_len, str_sub, str_find, str_upper, str_lower, str_split,
+                str_trim, str_strip, str_replace, str_starts_with, str_startswith,
+                str_ends_with, str_endswith, str_char_at, str_byte_at, str_repeat,
+                str_count, str_pad_left, str_pad_right, str_contains, str_reverse,
+                str_join, str_lstrip, str_rstrip, str_title, str_capitalize,
+                str_swapcase, str_isalpha, str_isdigit, str_isalnum, str_isspace,
+                str_isupper, str_islower, str_index, str_rfind, str_rindex,
+                str_center, str_ljust, str_rjust, str_zfill, str_splitlines,
+                str_rsplit, str_partition, str_rpartition;
+
+            int arr_push, arr_append, arr_pop, arr_len, arr_remove, arr_insert,
+                arr_slice, arr_reverse, arr_clear, arr_contains, arr_join,
+                arr_sort, arr_index_of, arr_index, arr_dump, arr_count,
+                arr_extend, arr_copy;
+
+            int map_set, map_get, map_has, map_delete, map_keys, map_values,
+                map_items, map_size, map_clear, map_dump, map_update,
+                map_setdefault, map_pop, map_copy;
+
+            int set_add, set_has, set_delete, set_size, set_clear, set_values,
+                set_dump, set_discard, set_remove, set_issubset, set_issuperset,
+                set_isdisjoint, set_union, set_intersection, set_difference,
+                set_symmetric_difference, set_copy;
+
+            int buf_len, buf_fill, buf_byte_len, buf_tolist, buf_copy,
+                buf_slice, buf_type_name;
+        };
+        BuiltinSelectors bsel_;
+        void init_builtin_selectors();
+
     public:
         bool had_error() const { return had_error_; }
 

@@ -1,20 +1,21 @@
 /*
 ** invoke_buffer.inl — Buffer method dispatch for OP_INVOKE.
 ** Minimal API — raw speed via buf[i] / buf[i]=x is the primary interface.
+**
+** sel_slot — compile-time-resolved method selector (see BuiltinSelectors in
+** vm.h and docs/plano-selector-dispatch-builtins.md).
 */
 
 ObjBuffer *buf = as_buffer(receiver);
 
-#define BUFFER_METHOD(lit) (method->length == (int)(sizeof(lit) - 1) && memcmp(mname, lit, sizeof(lit) - 1) == 0)
-
 do
 {
-if (BUFFER_METHOD("len"))
+if (sel_slot == bsel_.buf_len)
 {
     R[base] = val_int(buf->count);
     break;
 }
-if (BUFFER_METHOD("fill"))
+if (sel_slot == bsel_.buf_fill)
 {
     if (arg_count != 1)
     {
@@ -33,12 +34,12 @@ if (BUFFER_METHOD("fill"))
     R[base] = receiver;
     break;
 }
-if (BUFFER_METHOD("byte_len"))
+if (sel_slot == bsel_.buf_byte_len)
 {
     R[base] = val_int(buf->count * buffer_elem_size[buf->btype]);
     break;
 }
-if (BUFFER_METHOD("tolist"))
+if (sel_slot == bsel_.buf_tolist)
 {
     ObjArray *arr = new_array(&gc_);
     R[base] = val_obj((Obj *)arr); /* root before push triggers GC */
@@ -51,7 +52,7 @@ if (BUFFER_METHOD("tolist"))
     }
     break;
 }
-if (BUFFER_METHOD("copy"))
+if (sel_slot == bsel_.buf_copy)
 {
     ObjBuffer *dst = new_buffer(&gc_, buf->btype, buf->count);
     int32_t byte_count = buf->count * buffer_elem_size[buf->btype];
@@ -59,7 +60,7 @@ if (BUFFER_METHOD("copy"))
     R[base] = val_obj((Obj *)dst);
     break;
 }
-if (BUFFER_METHOD("slice"))
+if (sel_slot == bsel_.buf_slice)
 {
     if (arg_count < 1 || arg_count > 2) { RT_ERROR("slice() expects 1-2 arguments"); }
     if (!is_int(args[0])) { RT_ERROR("slice() start must be integer"); }
@@ -81,7 +82,7 @@ if (BUFFER_METHOD("slice"))
     R[base] = val_obj((Obj *)dst);
     break;
 }
-if (BUFFER_METHOD("type_name"))
+if (sel_slot == bsel_.buf_type_name)
 {
     static const char *names[] = {
         "Int8Array", "Int16Array", "Int32Array",
@@ -97,5 +98,3 @@ if (BUFFER_METHOD("type_name"))
     RT_ERROR("buffer has no method '%s'", mname);
 }
 } while (0);
-
-#undef BUFFER_METHOD

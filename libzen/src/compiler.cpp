@@ -449,7 +449,7 @@ namespace zen
             if (check(TOK_IF) && current_.line == previous_.line)
             {
                 advance();
-                reg = infix_rule(previous_, reg, -1);
+                reg = infix_rule(previous_, reg, -1, nullptr); /* no snapshot on this path */
             }
             return reg;
         }

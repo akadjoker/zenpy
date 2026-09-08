@@ -176,9 +176,17 @@ case MAP_DUMP:
 default:
 {
     /* Not a built-in map method — check if the map contains a callable
-    ** with this name (module function dispatch: math.sin(x)) */
-    ObjString *key = intern_string(&gc_, mname, (int)strlen(mname),
-                                   hash_string(mname, (int)strlen(mname)));
+    ** with this name (module function dispatch: math.sin(x)).
+    **
+    ** The key is the selector's own interned string when we have one: the
+    ** compiler already interned that name and its hash is stored. Rebuilding
+    ** it here meant strlen + hash_string + a lookup in the intern table on
+    ** every single call, which is why `math.sqrt(x)` in a loop cost nearly
+    ** twice what `from math import sqrt` did. */
+    ObjString *key = (sel_slot >= 0) ? selector_obj(sel_slot) : nullptr;
+    if (!key)
+        key = intern_string(&gc_, mname, (int)strlen(mname),
+                            hash_string(mname, (int)strlen(mname)));
     bool found;
     Value callable = map_get(map, val_obj((Obj *)key), &found);
     if (found && is_native(callable))

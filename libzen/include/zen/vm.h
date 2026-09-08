@@ -473,6 +473,9 @@ namespace zen
         int find_selector(const char *name, int len) const;
         int num_selectors() const { return num_selectors_; }
         const char *selector_name(int idx) const { return (idx >= 0 && idx < num_selectors_ && selectors_[idx]) ? selectors_[idx]->chars : nullptr; }
+        /* The interned ObjString behind a selector slot, hash already
+        ** computed — module dispatch needs the key, not just the chars. */
+        ObjString *selector_obj(int idx) const { return (idx >= 0 && idx < num_selectors_) ? selectors_[idx] : nullptr; }
     };
 
     /* builtin_base.cpp: printf-style "fmt" % rhs (rhs: one value or an array of them) */

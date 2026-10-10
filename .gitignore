@@ -51,3 +51,6 @@ tests/fuzz/corpus_embedding/*
 /crash-*
 /leak-*
 /timeout-*
+/build_prof/
+/build_pgo/
+/build_pgo2/

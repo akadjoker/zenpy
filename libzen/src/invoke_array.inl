@@ -253,24 +253,28 @@ case ARR_SORT:
     if (count > 1)
     {
         SAVE_IP();
-        std::vector<std::pair<Value, Value>> keyed((size_t)count);
+        struct Keyed { Value key; Value val; };
+        ct::Vector<Keyed> keyed;
+        keyed.resize((size_t)count);
         for (int32_t k = 0; k < count; k++)
         {
-            keyed[k].second = arr->data[k];
+            keyed[k].val = arr->data[k];
             if (is_nil(keyfn))
-                keyed[k].first = arr->data[k];
+                keyed[k].key = arr->data[k];
             else
             {
                 Value arg = arr->data[k];
-                keyed[k].first = call_fn(keyfn, &arg, 1);
+                keyed[k].key = call_fn(keyfn, &arg, 1);
                 if (had_error_) return;
             }
         }
         VM *self_vm = this;
-        std::stable_sort(keyed.begin(), keyed.end(), [self_vm](const std::pair<Value, Value> &x, const std::pair<Value, Value> &y) { return zen_compare_vm(self_vm, x.first, y.first) < 0; });
+        ct::stable_sort(keyed.begin(), keyed.end(), [self_vm](const Keyed &x, const Keyed &y) {
+            return zen_compare_vm(self_vm, x.key, y.key) < 0; /* stable, as Python's sort */
+        });
         if (had_error_) return;
         for (int32_t k = 0; k < count; k++)
-            arr->data[descending ? count - 1 - k : k] = keyed[k].second;
+            arr->data[descending ? count - 1 - k : k] = keyed[k].val;
         LOAD_STATE();
     }
     R[base] = val_nil();

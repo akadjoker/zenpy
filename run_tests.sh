@@ -4,6 +4,8 @@
 # Usage:
 #   ./run_tests.sh              # normal run
 #   ./run_tests.sh --stress-gc  # rebuild with stress GC, then run
+#   ./run_tests.sh --switch-dispatch  # rebuild with the switch dispatch (MSVC path), then run
+#   ./run_tests.sh --bytecode   # also run each script through --dump + .zbc and compare output
 #   ./run_tests.sh --filter 11  # run only tests matching "11"
 #   ./run_tests.sh --verbose    # show output of failing tests
 #
@@ -35,12 +37,16 @@ else
 fi
 
 STRESS_GC=0
+SWITCH_DISPATCH=0
+BYTECODE=0
 FILTER=""
 VERBOSE=0
 
 for arg in "$@"; do
     case "$arg" in
         --stress-gc) STRESS_GC=1 ;;
+        --switch-dispatch) SWITCH_DISPATCH=1 ;;
+        --bytecode) BYTECODE=1 ;;
         --verbose|-v) VERBOSE=1 ;;
         --filter=*) FILTER="${arg#--filter=}" ;;
         --filter) shift_next=1 ;;
@@ -59,6 +65,9 @@ rebuild() {
     if [[ "$STRESS_GC" == "1" ]]; then
         extra_defs="-DCMAKE_CXX_FLAGS=-DZEN_DEBUG_STRESS_GC -DCMAKE_C_FLAGS=-DZEN_DEBUG_STRESS_GC"
     fi
+    if [[ "$SWITCH_DISPATCH" == "1" ]]; then
+        extra_defs="-DCMAKE_CXX_FLAGS=-DZEN_DISPATCH_MODE=1 -DCMAKE_C_FLAGS=-DZEN_DISPATCH_MODE=1"
+    fi
 
     echo "=== Rebuilding (stress_gc=$STRESS_GC) ==="
     rm -rf "$BUILD"
@@ -70,7 +79,7 @@ rebuild() {
     echo ""
 }
 
-if [[ "$STRESS_GC" == "1" ]]; then
+if [[ "$STRESS_GC" == "1" || "$SWITCH_DISPATCH" == "1" ]]; then
     rebuild
 elif ! have_zen; then
     echo "zen binary not found, building..."
@@ -108,6 +117,18 @@ for test_file in "$ROOT"/tests/[0-9]*.py; do
 
     output=$("${ZEN_CMD[@]}" "$test_file" 2>&1) && ret=0 || ret=$?
 
+    if [[ $ret -eq 0 && "$BYTECODE" == "1" ]]; then
+        # Serialisation round trip: dump to .zbc, run the .zbc, same output.
+        zbc="$ROOT/tmp/rt_$$.zbc"
+        mkdir -p "$ROOT/tmp"
+        "${ZEN_CMD[@]}" --dump "$zbc" "$test_file" >/dev/null 2>&1 || ret=3   # --dump compiles and writes, does not run
+        out_zbc=$("${ZEN_CMD[@]}" "$zbc" 2>&1) || ret=4
+        if [[ $ret -eq 0 && "$out_zbc" != "$output" ]]; then
+            ret=5
+            output="$out_zbc"
+        fi
+        rm -f "$zbc"
+    fi
     if [[ $ret -eq 0 ]]; then
         echo -e "${GREEN}OK${NC}"
         passed=$((passed + 1))
@@ -119,6 +140,29 @@ for test_file in "$ROOT"/tests/[0-9]*.py; do
             echo "    --- output ---"
             echo "$output" | head -20 | sed 's/^/    /'
             echo "    ---"
+        fi
+    fi
+done
+
+# --- Expected-error tests: first line `# expect: <substring of the message>` ---
+for test_file in "$ROOT"/tests/errors/*.py; do
+    [[ -f "$test_file" ]] || continue
+    name="errors/$(basename "$test_file")"
+    if [[ -n "$FILTER" && "$name" != *"$FILTER"* ]]; then
+        continue
+    fi
+    printf "  %-40s" "$name"
+    expect=$(head -1 "$test_file" | sed -n 's/^# expect: *//p')
+    output=$("${ZEN_CMD[@]}" "$test_file" 2>&1) && ret=0 || ret=$?
+    if [[ $ret -ne 0 && "$output" == *"$expect"* ]]; then
+        echo -e "${GREEN}OK${NC}"
+        passed=$((passed + 1))
+    else
+        echo -e "${RED}FAIL${NC} (exit $ret, expected '$expect')"
+        failed=$((failed + 1))
+        failures+=("$name")
+        if [[ "$VERBOSE" == "1" ]]; then
+            echo "$output" | head -5 | sed 's/^/    /'
         fi
     fi
 done

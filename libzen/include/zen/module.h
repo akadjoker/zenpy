@@ -60,6 +60,7 @@ namespace zen
     extern const NativeLib zen_lib_os;     /* import os */
     extern const NativeLib zen_lib_path;   /* import path */
     extern const NativeLib zen_lib_json;   /* import json */
+    extern const NativeLib zen_lib_xml;    /* import xml (ct::Xml) */
     extern const NativeLib zen_lib_net;    /* import net */
     extern const NativeLib zen_lib_http;   /* import http */
 

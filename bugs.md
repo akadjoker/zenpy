@@ -556,6 +556,99 @@ generators em `list()/sum()`; iter/next/hash/id/slice/frozenset;
 str.format/encode; atributos novos em instâncias (classes seladas);
 `Base.who(obj)` (método sem bind); `counts.get` como valor.
 
+### Ronda 6 (2026-09-07, noite: port std → ct::containers, branch port/containers)
+
+Pedido: retirar todo o `std::` do libzen e usar https://github.com/akadjoker/containers
+(header-only, `ct::`). Antes: `tools/speed_report.sh <label>` grava em
+`tests/manual/baseline/<label>.md` tempos de build limpo (release e debug),
+tamanhos, tempo da suite, cross_lang, microbench, algo_bench e tempo de
+compilação de scripts (`zen --check`, novo). Baseline: `baseline-1aaa13b.md`;
+binários originais em `zenpy_backups/baseline-1aaa13b/`.
+
+Âmbito real do `std::` no libzen: pequeno e quase todo da ronda 5
+(`std::vector`/`std::string`/`std::pair`/`stable_sort` em builtin_base.cpp e
+invoke_array.inl), mais `std::string` no bytecode.cpp, um `std::vector` no
+vm.cpp (`call_args`), `numeric_limits` em bytecode/math, e prefixos `std::`
+em funções C (cctype/cstdio/cmath). Os headers `ct` usados (vector, string,
+sort, span, detail/utils) estão vendorizados em `libzen/third_party/ct` com
+o commit de origem em VERSION; `third_party` entrou no include path privado
+do zen_static. `ct::sort` não é estável: a ordenação Python (sorted, list.sort)
+usa uma struct `{key, val, index}` e desempata pelo índice original.
+`isnan/isinf/isfinite` viraram `zen_isnan/...` em value.h (os de <cmath> só
+existem como `std::`). `grep std:: libzen/src libzen/include` → 0.
+
+Resultado (mesma janela, best of 3): tempos de execução iguais dentro do
+ruído (fib 0,131/0,131, dijkstra 0,187/0,188, suite 2,1 s); build limpo
+igual (9,5→9,8 s release, 8,7→8,9 s debug: o std nunca esteve no caminho
+quente da compilação); tamanho: `zen` 653 128 → 628 792 bytes (−3,7 %),
+libzen.a release 978 → 958 KB, libzen.a debug 18,9 → 17,7 MB (−6 %).
+Conclusão: o port limpa dependências e encolhe o binário; não muda
+velocidade, porque as estruturas quentes da VM (arrays, maps, strings do
+GC) já eram próprias.
+
+- (cont. ronda 6) `ct::stable_sort` adicionado ao `containers` (merge sort,
+  buffer n/2, runs por insertion sort; 13 testes contra std::stable_sort,
+  paridade no bench) e usado nos sorts Python do zenpy sem desempate por
+  índice. `builtin_json.cpp`: StrBuf → `ct::String`. Módulo `xml` novo
+  (`builtin_xml.cpp`) em cima do `ct::Xml`: `parse` → dicts/listas
+  (`tag/attrs/text/children`), `stringify(node[, indent])`; tests/66_xml.py,
+  docs/zenpy_xml.md. Decisão: o json continua a converter directo para
+  objectos Zen (sem árvore `ct::Json` intermédia), porque é o caminho mais
+  rápido e já não tem dependências.
+
+### Ronda 7 (2026-09-07, noite: docs internos + testes de cobertura)
+
+- `docs/internals/` (README, dispatch-and-frames, calling-convention,
+  natives-and-embedding, compiler-conditions-and-peepholes, gc-and-roots,
+  testing): uma página por subsistema, em PT, com os nomes reais do código.
+  Regra: quem muda o código muda a página no mesmo commit.
+- `run_tests.sh`: `--bytecode` (cada script via `--dump` + `.zbc`, saída
+  igual), `--switch-dispatch` (rebuild com `-DZEN_DISPATCH_MODE=1`, o
+  caminho do MSVC), e `tests/errors/*.py` (`# expect: <substring>` na 1.ª
+  linha; exit != 0 e a substring no stderr). 10 casos de erro.
+- `tools/speed_gate.sh <baseline.md> [%]`: falha se um benchmark regredir
+  mais do que o limiar.
+- test_embedding: kwargs em nativos via `vm->kwargs()` (incl. `sorted(key=,
+  reverse=)`), e `ClassBuilder::method(..., ZEN_NATIVE_GC_SAFE)` com receptor
+  tipado sob 200k chamadas com lixo pelo meio, dtor no fim.
+- Bugs apanhados pelos modos novos: (1) o carregador de `.zbc` chamava
+  `resolve_native_globals()` (re-importa módulos, cujas classes internam
+  selectores) ANTES de `read_selectors`, logo qualquer script que usasse um
+  método cujo selector caísse num slot já ocupado (`xml.parse`, `d.update`)
+  carregava com "selector mismatch"; ordem trocada no loader, formato igual.
+  (2) `None + 1` (e qualquer não-número) via `ADDI`/`SUBI` dava float em vez
+  de erro; agora erro como no `OP_ADD`. (3) `record` e `enum` não eram
+  serializados no `.zbc` (as globais ficavam nil): bytecode 2.8 escreve
+  `BC_STRUCT_DEF` (nome + campos) e `BC_ENUM_MAP` (mapa de módulo só com
+  escalares; um módulo importado, que tem nativos, continua a ser
+  re-importado pelo loader). `--bytecode` 79/79.
+
+### Ronda 8 (2026-09-07, noite: zen_bind.hpp + caça a bugs)
+
+- `libzen/include/zen/zen_bind.hpp`: bindings gerados a partir da assinatura
+  C++ (header-only, C++17, sem STL). `bind::def_fn<&f>(vm, "nome")` e
+  `bind::def_class<T>(vm, "Cls").ctor<A...>()|.ctor<&factory>().dtor()
+  .method<&T::m>("m", flags).end()`. Converte bool/inteiros/float/double/
+  `const char *`/`Value`/`T *`/`T &`, injecta um `VM *` inicial, tira a
+  aridade da assinatura e produz o erro com o nome e o índice do argumento
+  (`twice: argument 1 must be an int`). Uma função livre cujo 1.º parâmetro
+  é `T *`/`T &` regista-se como método (o receptor entra nesse slot).
+  A API crua (`def_native`, `ClassBuilder`) fica igual e é o que o header usa
+  por baixo: varargs, kwargs e retornos múltiplos continuam à mão.
+  Cobertura: teste 18 do test_embedding (98 checks); `tex_zen.cpp` e
+  `glue_zen.cpp` portados como prova (números iguais: glue native 6,70
+  ms/frame contra 3,38 do C++; texmark 55 400 sprites a 60 fps).
+- Caça a bugs (ASan/UBSan + libFuzzer + fuzzer de mutação): `fuzz_zen`
+  804 k execuções e `fuzz_embedding` 167 k sem uma única falha; a suite
+  passa 79/79 nos quatro modos. O fuzzer de mutação encontrou um caso real
+  de UB: `memcpy(dst, nullptr, 0)` ao crescer os campos de uma instância sem
+  campos nenhuns (dois sítios no `vm_dispatch.cpp`) e a mesma forma em
+  `array_copy`. Corrigido com guarda `n > 0 && src`.
+- O critério do fuzzer de mutação estava errado: contava `[zen runtime
+  error]` (erro de script, que é o comportamento certo) como crash, o que
+  enterrava o achado real em 70 falsos positivos. Agora só sinais e relatórios
+  do sanitizer contam.
+
 ### Plano para a próxima sessão (por ordem)
 
 1. Validar: `cd build_release && ninja`, suite normal + `--stress-gc`, bench

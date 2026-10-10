@@ -30,19 +30,19 @@ extern "C" void zen_host_write(const char *text, size_t length)
     if (g_writer)
         g_writer(text, length, 0, g_writer_user);
     else
-        std::fwrite(text, 1, length, stdout);
+        fwrite(text, 1, length, stdout);
 }
 
 extern "C" void zen_host_writes(const char *text)
 {
-    zen_host_write(text, std::strlen(text));
+    zen_host_write(text, strlen(text));
 }
 
 extern "C" void zen_host_writeln(void)
 {
     zen_host_write("\n", 1);
     if (!g_writer)
-        std::fflush(stdout);
+        fflush(stdout);
 }
 
 extern "C" void zen_host_writeerr(const char *text, size_t length)
@@ -50,7 +50,7 @@ extern "C" void zen_host_writeerr(const char *text, size_t length)
     if (g_writer)
         g_writer(text, length, 1, g_writer_user);
     else
-        std::fwrite(text, 1, length, stderr);
+        fwrite(text, 1, length, stderr);
 }
 
 #endif /* ZEN_HOST_OUTPUT */

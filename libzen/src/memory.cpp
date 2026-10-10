@@ -743,7 +743,8 @@ namespace zen
     {
         int32_t n = arr_count(src);
         array_reserve(gc, dst, n);
-        memcpy(dst->data, src->data, (size_t)n * sizeof(Value));
+        if (n > 0 && src->data) /* memcpy(dst, nullptr, 0) is UB */
+            memcpy(dst->data, src->data, (size_t)n * sizeof(Value));
         dst->end = dst->data + n;
     }
 
@@ -1255,16 +1256,16 @@ namespace zen
         uint8_t *p = buf->data + (size_t)index * buffer_elem_size[buf->btype];
         auto wrap_unsigned = [](double v, double mod) -> uint64_t
         {
-            if (!std::isfinite(v))
+            if (!zen_isfinite(v))
                 return 0;
-            double wrapped = std::fmod(std::trunc(v), mod);
+            double wrapped = fmod(trunc(v), mod);
             if (wrapped < 0)
                 wrapped += mod;
             return (uint64_t)wrapped;
         };
         auto wrap_signed = [&](double v, int bits) -> int64_t
         {
-            double mod = std::ldexp(1.0, bits);
+            double mod = ldexp(1.0, bits);
             uint64_t wrapped = wrap_unsigned(v, mod);
             uint64_t sign_bit = (uint64_t)1 << (bits - 1);
             if (wrapped >= sign_bit)

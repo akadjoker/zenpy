@@ -22,7 +22,7 @@ import json
 GROUP_RULES = [
     (r'^README$',               'Overview',  0),
     (r'^zenpy_base$',           'Language',  1),
-    (r'^zenpy_(math|io|os|path|json|time|struct|numpy)$', 'Language', 1),
+    (r'^zenpy_(math|io|os|path|json|xml|time|struct|numpy)$', 'Language', 1),
     (r'^engine_api$',           'Engine',    2),
     (r'^zenpy_(canvas|font|image|audio|gif)$', 'Engine', 2),
     (r'^zenpy_gl\d*$',          'Graphics',  3),

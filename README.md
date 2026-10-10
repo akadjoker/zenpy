@@ -656,7 +656,7 @@ expression, `a, *b = ...`, `**kwargs` parameters, keyword-only `*`, lambda
 defaults, `f(**d)`, `[*a]`, f-string `!r`, raw strings, `for/while ... else`.
 See bugs.md "Ronda 5" for the full list.
 
-### Bytecode format (`.zenbc`, version 2.7)
+### Bytecode format (`.zenbc`, version 2.8)
 
 ```
 Header:  ZENBC(5) | major(u16) | minor(u16) | flags(u32)
@@ -678,6 +678,9 @@ Functions: recursive tree of function bodies
 
 ### `net`
 `resolve`, `tcp_connect`, `tcp_listen`, `tcp_accept`, `udp_create`, `send`, `recv`, `sendto`, `recvfrom`, `set_blocking`, `set_nodelay`, `poll`, `close`
+
+### `xml`
+`parse`, `stringify` — documents as dicts/lists (`tag`, `attrs`, `text`, `children`), on the vendored `ct::Xml` parser; see docs/zenpy_xml.md
 
 ### `http`
 `get`, `post`, `download`, `ping`, `get_local_ip`

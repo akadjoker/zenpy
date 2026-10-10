@@ -19,6 +19,7 @@
 #include "module.h"
 #include "memory.h"
 #include "bytecode.h"
+#include "zen_bind.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -1590,6 +1591,266 @@ static void test_index_beyond_32_bits()
 /* =========================================================
 ** MAIN
 ** ========================================================= */
+
+/* =========================================================
+** TEST 16: keyword arguments reach a native through vm->kwargs()
+** (compiler packs name=value into a trailing map, flag 0x40 in nargs).
+** ========================================================= */
+static int native_config(VM *vm, Value *args, int nargs)
+{
+    /* config(base, scale=2, name="x") -> base * scale, and records the name */
+    int64_t base = nargs > 0 && is_int(args[0]) ? args[0].as.integer : 0;
+    int64_t scale = 1;
+    ObjMap *kw = vm->kwargs();
+    if (kw)
+    {
+        bool found = false;
+        Value v = map_get(kw, val_obj((Obj *)vm->make_string("scale")), &found);
+        if (found && is_int(v))
+            scale = v.as.integer;
+        v = map_get(kw, val_obj((Obj *)vm->make_string("name")), &found);
+        if (found && is_string(v))
+            vm->set_global("seen_name", v);
+    }
+    args[0] = val_int(base * scale);
+    return 1;
+}
+
+static void test_native_keyword_arguments()
+{
+    printf("\n[Test 19] keyword arguments to natives (vm->kwargs)\n");
+    VM vm;
+    vm.open_lib_globals(&zen_lib_base);
+    vm.def_native("config", native_config, -1);
+    vm.def_global("seen_name", val_nil());
+
+    TEST("Positional only: kwargs() is null");
+    run_source(vm, "r1 = config(21)\n");
+    Value r1 = vm.get_global("r1");
+    CHECK(is_int(r1) && r1.as.integer == 21, "expected 21");
+
+    TEST("name=value pairs arrive in the map");
+    run_source(vm, "r2 = config(21, scale=2, name=\"tex\")\n");
+    Value r2 = vm.get_global("r2");
+    Value nm = vm.get_global("seen_name");
+    CHECK(is_int(r2) && r2.as.integer == 42 && is_string(nm) && strcmp(as_string(nm)->chars, "tex") == 0,
+          "expected 42 and seen_name == 'tex'");
+
+    TEST("kwargs() is cleared after the call");
+    CHECK(vm.kwargs() == nullptr, "kwargs_ must be null outside a native call");
+
+    TEST("Builtin sorted(key=, reverse=) through the same channel");
+    run_source(vm, "r3 = sorted([3, 1, 2], reverse=True)\nr4 = sorted([\"bb\", \"a\", \"ccc\"], key=len)\n");
+    Value r3 = vm.get_global("r3"), r4 = vm.get_global("r4");
+    CHECK(is_array(r3) && as_array(r3)->data[0].as.integer == 3 &&
+          is_array(r4) && strcmp(as_string(as_array(r4)->data[0])->chars, "a") == 0,
+          "expected [3,2,1] and ['a','bb','ccc']");
+}
+
+/* =========================================================
+** TEST 17: ClassBuilder::method flags — a GC_SAFE method runs with the
+** collector live, is called straight from the vtable slot (INVOKE_VT on a
+** typed receiver), and native_data survives heavy allocation in the script.
+** ========================================================= */
+static int g_counter_alive = 0;
+struct CounterData { int64_t n; };
+static void *counter_ctor(VM *, int, Value *) { CounterData *c = (CounterData *)malloc(sizeof(CounterData)); c->n = 0; g_counter_alive++; return c; }
+static void counter_dtor(VM *, void *d) { free(d); g_counter_alive--; }
+static int counter_tick(VM *, Value *args, int) { CounterData *c = zen_instance_data<CounterData>(args[-1]); c->n++; args[0] = val_int(c->n); return 1; }
+static int counter_value(VM *, Value *args, int) { args[0] = val_int(zen_instance_data<CounterData>(args[-1])->n); return 1; }
+
+static void test_method_flags_and_gc()
+{
+    printf("\n[Test 20] ClassBuilder method flags (GC_SAFE) under allocation pressure\n");
+    g_counter_alive = 0;
+    {
+        VM vm;
+        vm.open_lib_globals(&zen_lib_base);
+        vm.def_class("Counter")
+            .ctor(counter_ctor)
+            .dtor(counter_dtor)
+            .method("tick", counter_tick, 0, ZEN_NATIVE_GC_SAFE)
+            .method("value", counter_value, 0, ZEN_NATIVE_GC_SAFE)
+            .end();
+
+        TEST("GC_SAFE methods on a typed receiver, 200k calls with garbage in between");
+        run_source(vm, R"(
+c: Counter = Counter()
+junk = []
+i = 0
+while i < 200000:
+    c.tick()
+    junk.append([i, str(i)])
+    if len(junk) > 1000:
+        junk = []
+    i += 1
+v = c.value()
+)");
+        Value v = vm.get_global("v");
+        CHECK(is_int(v) && v.as.integer == 200000, "expected value() == 200000");
+
+        TEST("Untyped receiver goes through INVOKE and reaches the same native");
+        run_source(vm, "d = Counter()\nd.tick()\nd.tick()\nw = d.value()\n");
+        Value w = vm.get_global("w");
+        CHECK(is_int(w) && w.as.integer == 2, "expected 2");
+
+        TEST("Two instances alive");
+        CHECK(g_counter_alive == 2, "expected 2 counters alive");
+    }
+    TEST("Destructors ran when the VM died");
+    CHECK(g_counter_alive == 0, "expected 0 counters alive");
+}
+
+/* =========================================================
+** TEST 18: zen_bind.hpp — thunks generated from C++ signatures: every
+** argument/result conversion, VM* injection, arity and type errors with
+** the argument index, native classes with ctor<A...>/ctor<&factory>/dtor.
+** ========================================================= */
+static double b_avg(double a, double b) { return (a + b) / 2; }
+static int64_t b_twice(int64_t x) { return x * 2; }
+static int b_small(int x, unsigned y) { return x + (int)y; }
+static float b_half(float x) { return x / 2; }
+static bool b_both(bool a, bool b) { return a && b; }
+static const char *b_greet(const char *n) { static char buf[64]; snprintf(buf, sizeof buf, "hi %s", n); return buf; }
+static Value b_len(VM *vm, Value v) { (void)vm; return val_int(is_string(v) ? (int64_t)as_string(v)->length : -1); }
+static void b_noop(int64_t) {}
+static int g_bind_alive = 0;
+struct BindCounter
+{
+    int64_t n;
+    explicit BindCounter(int64_t start) : n(start) { g_bind_alive++; }
+    ~BindCounter() { g_bind_alive--; }
+    void tick(int64_t k) { n += k; }
+    int64_t value() const { return n; }
+    const char *label(VM *, const char *p) { static char b[64]; snprintf(b, sizeof b, "%s%lld", p, (long long)n); return b; }
+};
+struct BindGauge { double level; };
+static BindGauge *gauge_make(VM *vm, double level)
+{
+    if (level < 0) { vm->runtime_error("Gauge: level must be >= 0"); return nullptr; }
+    BindGauge *g = new BindGauge; g->level = level; return g;
+}
+static double gauge_level(BindGauge &g) { return g.level; }
+static int64_t b_sum(BindCounter *a, BindCounter &b) { return a->n + b.n; }
+struct BindPlain { int64_t a = 7; int64_t get() const { return a; } };
+static int64_t b_many(int64_t a, int64_t b, int64_t c, double d, bool e, const char *f)
+{ return a + b + c + (int64_t)d + (e ? 1 : 0) + (int64_t)f[0]; }
+static void b_touch(VM *vm) { vm->set_global("touched", val_int(1)); }
+
+static void test_zen_bind()
+{
+    printf("\n[Test 21] zen_bind.hpp typed bindings\n");
+    g_bind_alive = 0;
+    {
+        VM vm;
+        vm.open_lib_globals(&zen_lib_base);
+        bind::def_fn<&b_avg>(vm, "avg");
+        bind::def_fn<&b_twice>(vm, "twice");
+        bind::def_fn<&b_small>(vm, "small");
+        bind::def_fn<&b_half>(vm, "half");
+        bind::def_fn<&b_both>(vm, "both");
+        bind::def_fn<&b_greet>(vm, "greet");
+        bind::def_fn<&b_len>(vm, "vlen");
+        bind::def_fn<&b_noop>(vm, "noop");
+        bind::def_fn<&b_sum>(vm, "csum");
+        bind::def_class<BindCounter>(vm, "Counter")
+            .ctor<int64_t>()
+            .dtor()
+            .method<&BindCounter::tick>("tick", ZEN_NATIVE_GC_SAFE)
+            .method<&BindCounter::value>("value", ZEN_NATIVE_GC_SAFE)
+            .method<&BindCounter::label>("label")
+            .end();
+        bind::def_class<BindGauge>(vm, "Gauge")
+            .ctor<&gauge_make>()
+            .dtor()
+            .method<&gauge_level>("level")
+            .end();
+
+        TEST("Scalar conversions: double, int64, int/unsigned, float, bool, const char*, Value, void");
+        run_source(vm, R"(
+r_avg = avg(1, 2)
+r_twice = twice(21)
+r_small = small(3, 4)
+r_half = half(5)
+r_both = both(True, 0)
+r_greet = greet("zen")
+r_len = vlen("abcd")
+r_len2 = vlen(7)
+r_noop = noop(1)
+)");
+        Value r;
+        r = vm.get_global("r_avg");   CHECK(is_float(r) && r.as.number == 1.5, "avg(1,2) == 1.5 (ints accepted as double)");
+        r = vm.get_global("r_twice"); CHECK(is_int(r) && r.as.integer == 42, "twice(21) == 42");
+        r = vm.get_global("r_small"); CHECK(is_int(r) && r.as.integer == 7, "small(3,4) == 7");
+        r = vm.get_global("r_half");  CHECK(is_float(r) && r.as.number == 2.5, "half(5) == 2.5");
+        r = vm.get_global("r_both");  CHECK(is_bool(r) && r.as.boolean == false, "both(True, 0) == False (truthiness)");
+        r = vm.get_global("r_greet"); CHECK(is_string(r) && strcmp(as_string(r)->chars, "hi zen") == 0, "greet('zen') == 'hi zen'");
+        r = vm.get_global("r_len");   CHECK(is_int(r) && r.as.integer == 4, "VM* injected, Value passthrough");
+        r = vm.get_global("r_len2");  CHECK(is_int(r) && r.as.integer == -1, "Value accepts anything");
+        r = vm.get_global("r_noop");  CHECK(is_nil(r), "void result is nil");
+
+        TEST("Native class: ctor<int64_t>, methods, VM* + const char* method, T*/T& parameters");
+        run_source(vm, R"(
+c = Counter(5)
+c.tick(3)
+d: Counter = Counter(10)
+d.tick(1)
+r_val = c.value()
+r_lab = c.label("n=")
+r_sum = csum(c, d)
+)");
+        r = vm.get_global("r_val"); CHECK(is_int(r) && r.as.integer == 8, "value() == 8");
+        r = vm.get_global("r_lab"); CHECK(is_string(r) && strcmp(as_string(r)->chars, "n=8") == 0, "label('n=') == 'n=8'");
+        r = vm.get_global("r_sum"); CHECK(is_int(r) && r.as.integer == 19, "csum(c, d) == 19");
+        CHECK(g_bind_alive == 2, "two counters alive");
+
+        TEST("Factory ctor with VM*, free function taking T& as a method");
+        run_source(vm, "g = Gauge(0.75)\nr_lvl = g.level()\n");
+        r = vm.get_global("r_lvl"); CHECK(is_float(r) && r.as.number == 0.75, "level() == 0.75");
+
+        TEST("Type error names the function and the argument index");
+        run_source(vm, "e1 = 0\ne1 = twice(\"x\")\n");
+        CHECK(vm.had_error(), "twice('x') must fail");
+        run_source(vm, "e2 = avg(1, None)\n");
+        CHECK(vm.had_error(), "avg(1, None) must fail on argument 2");
+        run_source(vm, "e3 = csum(c, 3)\n");
+        CHECK(vm.had_error(), "csum(c, 3) must fail: argument 2 not a native object");
+
+        TEST("Arity error and factory returning nullptr after runtime_error");
+        run_source(vm, "e4 = small(1)\n");
+        CHECK(vm.had_error(), "small(1) must fail: expected 2 arguments");
+        run_source(vm, "e5 = Gauge(-1)\n");
+        CHECK(vm.had_error(), "Gauge(-1) must fail via the factory");
+
+        TEST("Zero-argument ctor, six-argument function, VM-only function");
+        bind::def_class<BindPlain>(vm, "Plain").ctor<>().dtor().method<&BindPlain::get>("get").end();
+        bind::def_fn<&b_many>(vm, "many");
+        bind::def_fn<&b_touch>(vm, "touch");
+        vm.def_global("touched", val_int(0));
+        run_source(vm, "p = Plain()\nr_p = p.get()\nr_many = many(1, 2, 3, 4.9, True, \"Z\")\ntouch()\n");
+        r = vm.get_global("r_p");    CHECK(is_int(r) && r.as.integer == 7, "Plain().get() == 7");
+        r = vm.get_global("r_many"); CHECK(is_int(r) && r.as.integer == 101, "many(...) == 101");
+        r = vm.get_global("touched");CHECK(is_int(r) && r.as.integer == 1, "VM-only function ran");
+
+        TEST("GC_SAFE typed method under allocation pressure");
+        run_source(vm, R"(
+k: Counter = Counter(0)
+junk = []
+i = 0
+while i < 100000:
+    k.tick(1)
+    junk.append([i, str(i)])
+    if len(junk) > 1000:
+        junk = []
+    i += 1
+r_k = k.value()
+)");
+        r = vm.get_global("r_k"); CHECK(is_int(r) && r.as.integer == 100000, "value() == 100000");
+    }
+    TEST("dtor() ran for every instance when the VM died");
+    CHECK(g_bind_alive == 0, "expected 0 counters alive");
+}
+
 int main()
 {
     printf("=== Zen Embedding Tests (C++ <-> Script) ===\n");
@@ -1613,6 +1874,9 @@ int main()
     test_failing_native_ctor();
     test_bytecode_roundtrip_fresh_vm();
     test_index_beyond_32_bits();
+    test_native_keyword_arguments();
+    test_method_flags_and_gc();
+    test_zen_bind();
 
     printf("\n========================================\n");
     printf("Results: %d passed, %d failed\n", g_tests_passed, g_tests_failed);

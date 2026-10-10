@@ -42,7 +42,7 @@ endforeach()
 
 # --- libzen (static library) ---
 add_library(zen_static STATIC ${CORE_SRCS})
-target_include_directories(zen_static PUBLIC include include/zen PRIVATE src ${ZEN_VENDOR_INCLUDES})
+target_include_directories(zen_static PUBLIC include include/zen PRIVATE src third_party ${ZEN_VENDOR_INCLUDES})
 target_link_libraries(zen_static PUBLIC ${ZEN_VENDOR_LIBS} ${CMAKE_DL_LIBS})
 if(WIN32)
     target_link_libraries(zen_static PUBLIC ws2_32)

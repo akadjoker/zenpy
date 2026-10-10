@@ -63,6 +63,25 @@ namespace zen
         return ret;
     }
 
+    /* Method by name in a class or an ancestor (`methods` holds only a
+       class's own definitions; `name` is interned, so the map probe is a
+       pointer compare). Used to turn `obj.method` read as a value into a
+       bound method. */
+    static inline bool find_method_in_chain(ObjClass *k, ObjString *name, Value *out)
+    {
+        for (; k != nullptr; k = k->parent)
+        {
+            bool found;
+            Value m = map_get(k->methods, val_obj((Obj *)name), &found);
+            if (found)
+            {
+                *out = m;
+                return true;
+            }
+        }
+        return false;
+    }
+
     /* Clear unused registers in a new call frame so GC never sees stale Values.
        Call AFTER setting stack_top = base + num_regs. */
     static inline void clear_new_regs(Value *base, int first_used, int num_regs)
@@ -252,6 +271,21 @@ namespace zen
         return out;
     }
 
+    /* "<bound method Class.name>" -- what print()/str() show for obj.method. */
+    static int bound_method_label(Value v, char *buf, size_t cap)
+    {
+        ObjBoundMethod *bm = as_bound_method(v);
+        ObjString *mn = is_closure(bm->method) ? as_closure(bm->method)->func->name
+                      : is_native(bm->method) ? as_native(bm->method)->name : nullptr;
+        const char *cn = is_instance(bm->receiver) ? as_instance(bm->receiver)->klass->name->chars : nullptr;
+        /* Script methods are already named "Class.name" (the defining
+        ** class, as in Python); natives carry the bare name. */
+        if (mn && strchr(mn->chars, '.'))
+            cn = nullptr;
+        return snprintf(buf, cap, "<bound method %s%s%s>", cn ? cn : "", cn ? "." : "",
+                        mn ? mn->chars : "?");
+    }
+
     static void print_value_py(Value v, bool repr)
     {
         if (is_nil(v))
@@ -346,6 +380,12 @@ namespace zen
             ObjInstance *inst = as_instance(v);
             char buf[128];
             snprintf(buf, sizeof(buf), "<%s instance>", inst->klass->name->chars);
+            zen_writes(buf);
+        }
+        else if (is_bound_method(v))
+        {
+            char buf[256];
+            bound_method_label(v, buf, sizeof buf);
             zen_writes(buf);
         }
         else
@@ -474,6 +514,9 @@ namespace zen
             case OBJ_CLOSURE:
                 printf("<function>");
                 break;
+            case OBJ_BOUND_METHOD:
+                printf("<bound method>");
+                break;
             case OBJ_NATIVE:
                 printf("<native %s>", ((ObjNative *)obj)->name->chars);
                 break;
@@ -558,6 +601,8 @@ namespace zen
                 return "native_struct";
             case OBJ_RANGE:
                 return "range";
+            case OBJ_BOUND_METHOD:
+                return "function";
             }
             return "obj(unknown)";
         }
@@ -629,6 +674,14 @@ namespace zen
             len = snprintf(buf, sizeof(buf), "%g", v.as.number);
         else if (is_vec(v))
             len = format_vec_py(v, buf, sizeof(buf));
+        else if (is_bound_method(v))
+        {
+            char big[256];
+            len = bound_method_label(v, big, sizeof big);
+            if (len >= (int)sizeof big)
+                len = (int)sizeof big - 1;
+            return val_obj((Obj *)new_string(gc, big, len));
+        }
         else
             len = snprintf(buf, sizeof(buf), "<object>");
 
@@ -2466,6 +2519,36 @@ namespace zen
                 if (__builtin_expect(is_string(av), 0))
                     av.as.obj->flags |= OBJ_FLAG_SHARED;
             }
+            /* Bound method (`f = obj.m; f(x)`): lay the call out exactly as
+            ** OP_INVOKE does -- receiver in the callee's slot, arguments
+            ** after it, frame base at the receiver, result back in R[a].
+            ** The closure path below is shared: cbase is where it puts the
+            ** frame base (R[a+1] for a plain call, R[a] for a bound method)
+            ** and so is the number of leading self slots in front of the
+            ** declared parameters (a method's arity does not count self,
+            ** its parameters start at base[1]). */
+            Value *cbase = &R[a + 1];
+            int so = 0;
+            if (__builtin_expect(is_bound_method(callee), 0))
+            {
+                ObjBoundMethod *bm = as_bound_method(callee);
+                R[a] = bm->receiver;
+                callee = bm->method;
+                cbase = &R[a];
+                so = 1;
+                if (is_native(callee))
+                {
+                    /* ClassBuilder convention: args[-1] = self. */
+                    ObjNative *nat = as_native(callee);
+                    int nret = call_native(this, nat, &R[a + 1], nargs);
+                    if (had_error_)
+                        return;
+                    copy_native_results(&R[a], &R[a + 1], nret, nresults);
+                    DISPATCH();
+                }
+                /* kwmap != nullptr never gets here: the check above already
+                ** rejected it, a bound method is not a native. */
+            }
             if (is_closure(callee))
             {
                 /* Script closure — hot path */
@@ -2480,19 +2563,19 @@ namespace zen
                 {
                     if (fiber->frame_count >= kMaxFrames)
                         RT_ERROR("stack overflow");
-                    CHECK_STACK_SPACE(fiber, &R[a + 1], fn->num_regs);
+                    CHECK_STACK_SPACE(fiber, cbase, fn->num_regs);
                     CallFrame *new_frame = &fiber->frames[fiber->frame_count++];
                     new_frame->closure = cl;
                     new_frame->constants = cl->func->constants;
                     new_frame->upvalues = cl->upvalues;
                     new_frame->func = fn;
                     new_frame->ip = fn->code;
-                    new_frame->base = &R[a + 1];
+                    new_frame->base = cbase;
                     new_frame->ret_reg = a;
                     new_frame->ret_count = nresults;
                     fiber->stack_top = new_frame->base + fn->num_regs;
-                    clear_new_regs(new_frame->base, nargs, fn->num_regs);
-                    ENTER_FRAME(new_frame, fn, cl, &R[a + 1]);
+                    clear_new_regs(new_frame->base, nargs + so, fn->num_regs);
+                    ENTER_FRAME(new_frame, fn, cl, cbase);
                     DISPATCH();
                 }
 
@@ -2513,8 +2596,8 @@ namespace zen
                     ObjFiber *gen = new_fiber(cl, gen_stack);
                     /* Copy arguments into the fiber's first frame base */
                     CallFrame *gf = &gen->frames[0];
-                    for (int ai = 0; ai < nargs; ai++)
-                        gf->base[ai] = R[a + 1 + ai];
+                    for (int ai = 0; ai < nargs + so; ai++)
+                        gf->base[ai] = cbase[ai];
                     gen->state = FIBER_SUSPENDED;
                     R[a] = val_obj((Obj *)gen);
                     DISPATCH();
@@ -2524,14 +2607,14 @@ namespace zen
                 {
                     RT_ERROR("stack overflow");
                 }
-                CHECK_STACK_SPACE(fiber, &R[a + 1], fn->num_regs);
+                CHECK_STACK_SPACE(fiber, cbase, fn->num_regs);
                 CallFrame *new_frame = &fiber->frames[fiber->frame_count++];
                 new_frame->closure = cl;
                 new_frame->constants = cl->func->constants;
                 new_frame->upvalues = cl->upvalues;
                 new_frame->func = fn;
                 new_frame->ip = fn->code;
-                new_frame->base = &R[a + 1];
+                new_frame->base = cbase;
                 new_frame->ret_reg = a;
                 new_frame->ret_count = nresults;
 
@@ -2545,8 +2628,8 @@ namespace zen
                     gc_pause(&gc_);
                     ObjArray *arr = new_array(&gc_);
                     if (extra > 0)
-                        array_push_n(&gc_, arr, new_frame->base + min_args, extra);
-                    new_frame->base[min_args] = val_obj((Obj *)arr);
+                        array_push_n(&gc_, arr, new_frame->base + so + min_args, extra);
+                    new_frame->base[so + min_args] = val_obj((Obj *)arr);
                     gc_resume(&gc_);
                 }
                 else
@@ -2560,15 +2643,15 @@ namespace zen
                     /* Extend stack first so writes are within bounds */
                     fiber->stack_top = new_frame->base + fn->num_regs;
                     for (int di = nargs; di < fn->arity; di++)
-                        new_frame->base[di] = fn->defaults[di - required];
+                        new_frame->base[so + di] = fn->defaults[di - required];
                 }
 
                 fiber->stack_top = new_frame->base + fn->num_regs;
                 {
-                    int used = fn->arity < 0 ? ((-fn->arity - 1) + 1) : fn->arity;
+                    int used = so + (fn->arity < 0 ? ((-fn->arity - 1) + 1) : fn->arity);
                     clear_new_regs(new_frame->base, used, fn->num_regs);
                 }
-                ENTER_FRAME(new_frame, fn, cl, &R[a + 1]);
+                ENTER_FRAME(new_frame, fn, cl, cbase);
                 DISPATCH();
             }
             if (is_native(callee))
@@ -3701,7 +3784,17 @@ namespace zen
                         goto getfield_done;
                     }
                 }
-                /* Field not found */
+                /* Not a field: a method read as a value becomes a bound
+                ** method {receiver, method} (`f = obj.m; f(x)`). */
+                {
+                    Value method;
+                    if (find_method_in_chain(klass, name, &method) &&
+                        (is_closure(method) || is_native(method)))
+                    {
+                        R[ZEN_A(i)] = val_obj((Obj *)new_bound_method(&gc_, receiver, method));
+                        goto getfield_done;
+                    }
+                }
                 RT_ERROR("instance of '%s' has no field '%s'", klass->name->chars, name->chars);
             }
             if (is_vec(receiver))
@@ -5218,11 +5311,13 @@ namespace zen
             {
                 ObjInstance *inst = as_instance(receiver);
                 ObjClass *klass = inst->klass;
-                bool found;
-                Value method = map_get(klass->methods, val_obj((Obj *)name), &found);
-                if (found)
+                Value method;
+                if (find_method_in_chain(klass, name, &method))
                 {
-                    R[ZEN_A(i)] = method;
+                    /* Same value OP_GETFIELD produces for a method name. */
+                    R[ZEN_A(i)] = (is_closure(method) || is_native(method))
+                                      ? val_obj((Obj *)new_bound_method(&gc_, receiver, method))
+                                      : method;
                     NEXT();
                 }
             }

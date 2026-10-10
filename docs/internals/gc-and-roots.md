@@ -88,7 +88,30 @@ Como o GC já corre em qualquer entrada de função ou volta de ciclo, **um
 contentor do host, uma variável estática) desaparece no primeiro
 ponto de recolha que o script alcance enquanto o host o guarda: por exemplo
 entre dois `vm.call_global(...)`, ou quando o host guarda um callback e o
-script corre antes de ele o usar. Formas de o enraizar:
+script corre antes de ele o usar. A forma de primeira escolha é a
+**referência do host**:
+
+```cpp
+int h = vm.ref(callback);          // raiz do GC gerida pelo C++
+// ... qualquer quantidade de script, qualquer número de recolhas ...
+Value cb = vm.deref(h);            // o mesmo objecto, ainda vivo
+vm.call_fn(cb, args, n);           // aceita closures, nativos e métodos ligados
+vm.unref(h);                       // liberta a raiz
+
+zen::Ref cb(vm, v);                // o mesmo, em RAII (move-only, sem STL)
+vm.call_fn(cb.get(), args, n);     // solta-se no destrutor / cb.reset()
+```
+
+`ref()` devolve um índice numa tabela com lista de livres (os slots libertados
+são reutilizados; `ref_count()` conta os vivos, para testes e detecção de
+fugas). Todos os slots vivos são marcados em `gc_mark_roots()`. Um `unref()`
+de um handle já libertado (ou nunca emitido) é ignorado, não corrompe a lista
+de livres, e `deref()` desse handle devolve `nil`. Uma `zen::Ref` tem de morrer
+antes da `VM`; a mover-se (`Ref b(std::move(a))`) transfere o único handle e a
+origem fica vazia. Um método ligado (`obj.metodo` lido como valor) guardado
+assim mantém também a instância viva.
+
+Alternativas, para quando uma referência por valor não serve:
 
 - `vm.def_global(nome, v)` / `vm.set_global(...)`: fica vivo enquanto a
   global o referir. O mais simples para singletons e callbacks.
@@ -100,7 +123,8 @@ script corre antes de ele o usar. Formas de o enraizar:
   está pausado.
 - O hook `vm.get_gc().extra_mark` / `extra_mark_ud`: o GC chama-o em cada
   ciclo, e o host marca aí tudo o que guarda com `gc_mark_value(gc, v)` /
-  `gc_mark_obj(gc, o)`. É a forma de enraizar um contentor C++ inteiro.
+  `gc_mark_obj(gc, o)`. É a forma de enraizar um contentor C++ inteiro que
+  já existe (um `vector<Value>` do motor) sem o converter para refs.
 - Instâncias de classes `persistent(true)` não entram na lista do GC, mas
   também não são raízes: não contes com elas para manter vivos `Value`s do
   script.

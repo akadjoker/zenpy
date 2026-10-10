@@ -1430,6 +1430,14 @@ namespace zen
         return r;
     }
 
+    ObjBoundMethod *new_bound_method(GC *gc, Value receiver, Value method)
+    {
+        ObjBoundMethod *bm = (ObjBoundMethod *)alloc_obj(gc, sizeof(ObjBoundMethod), OBJ_BOUND_METHOD);
+        bm->receiver = receiver;
+        bm->method = method;
+        return bm;
+    }
+
     /* Destroy a persistent instance — C++ owns lifetime, calls this explicitly */
     void destroy_instance(GC *gc, ObjInstance *inst)
     {
@@ -1692,6 +1700,14 @@ namespace zen
         case OBJ_RANGE:
             /* ObjRange has no GC references (plain integers) */
             break;
+
+        case OBJ_BOUND_METHOD:
+        {
+            ObjBoundMethod *bm = (ObjBoundMethod *)obj;
+            gc_mark_value(gc, bm->receiver);
+            gc_mark_value(gc, bm->method);
+            break;
+        }
         }
     }
 
@@ -1751,6 +1767,8 @@ namespace zen
         }
         case OBJ_RANGE:
             return sizeof(ObjRange);
+        case OBJ_BOUND_METHOD:
+            return sizeof(ObjBoundMethod);
         }
         return 0;
     }
@@ -1886,6 +1904,9 @@ namespace zen
         }
         case OBJ_RANGE:
             /* No extra allocations to free */
+            break;
+        case OBJ_BOUND_METHOD:
+            /* receiver/method are plain Values — nothing owned */
             break;
         case OBJ_CLOSURE:
         {

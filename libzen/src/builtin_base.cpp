@@ -471,6 +471,7 @@ namespace zen
         Value v = args[0];
         bool r = is_obj(v) && (v.as.obj->type == OBJ_FUNC ||
                                v.as.obj->type == OBJ_CLOSURE ||
+                               v.as.obj->type == OBJ_BOUND_METHOD ||
                                v.as.obj->type == OBJ_NATIVE);
         args[0] = val_bool(r);
         return 1;
@@ -525,6 +526,7 @@ namespace zen
             case OBJ_FUNC:
             case OBJ_CLOSURE:
             case OBJ_NATIVE:
+            case OBJ_BOUND_METHOD:
                 name = "function";
                 break;
             case OBJ_CLASS:
@@ -683,7 +685,7 @@ namespace zen
             case OBJ_INSTANCE:
                 name = as_instance(v)->klass->name->chars;
                 break;
-            case OBJ_FUNC: case OBJ_CLOSURE: case OBJ_NATIVE:
+            case OBJ_FUNC: case OBJ_CLOSURE: case OBJ_NATIVE: case OBJ_BOUND_METHOD:
                 name = "function"; break;
             case OBJ_BUFFER: name = "buffer"; break;
             default: name = "object"; break;
@@ -1457,6 +1459,18 @@ namespace zen
             out += '<'; out += inst->klass->name->chars; out += " object>";
         }
         else if (is_class(v)) { out += "<class '"; out += as_class(v)->name->chars; out += "'>"; }
+        else if (is_bound_method(v))
+        {
+            ObjBoundMethod *bm = as_bound_method(v);
+            ObjString *mn = is_closure(bm->method) ? as_closure(bm->method)->func->name
+                          : is_native(bm->method) ? as_native(bm->method)->name : nullptr;
+            out += "<bound method ";
+            /* script methods are already named "Class.name"; natives are bare */
+            if (is_instance(bm->receiver) && !(mn && strchr(mn->chars, '.')))
+            { out += as_instance(bm->receiver)->klass->name->chars; out += '.'; }
+            out += mn ? mn->chars : "?";
+            out += '>';
+        }
         else out += "<object>";
     }
 
@@ -1781,7 +1795,7 @@ namespace zen
     static int nat_callable(VM *, Value *args, int nargs)
     {
         Value v = nargs >= 1 ? args[0] : val_nil();
-        args[0] = val_bool(is_closure(v) || is_native(v) || is_class(v));
+        args[0] = val_bool(is_closure(v) || is_native(v) || is_class(v) || is_bound_method(v));
         return 1;
     }
 
@@ -1968,7 +1982,7 @@ namespace zen
     /* signal.connect(fn) */
     static int signal_connect(VM *vm, Value *args, int nargs)
     {
-        if (nargs < 1 || (!is_closure(args[0]) && !is_native(args[0])))
+        if (nargs < 1 || (!is_closure(args[0]) && !is_native(args[0]) && !is_bound_method(args[0])))
         { vm->runtime_error("Signal.connect: expected callable"); return -1; }
         ObjArray *listeners = signal_get_listeners(args[-1]);
         array_push(&vm->get_gc(), listeners, args[0]);
@@ -1984,7 +1998,17 @@ namespace zen
         int count = arr_count(listeners);
         for (int i = 0; i < count; i++)
         {
-            if (listeners->data[i].as.obj == target.as.obj)
+            /* `sig.disconnect(self.on_x)` builds a fresh bound method, so
+            ** two bound methods match when receiver and method do. */
+            bool same = listeners->data[i].as.obj == target.as.obj;
+            if (!same && is_bound_method(target) && is_bound_method(listeners->data[i]))
+            {
+                ObjBoundMethod *x = as_bound_method(listeners->data[i]);
+                ObjBoundMethod *y = as_bound_method(target);
+                same = x->method.as.obj == y->method.as.obj &&
+                       values_equal(x->receiver, y->receiver);
+            }
+            if (same)
             {
                 for (int j = i; j < count - 1; j++)
                     listeners->data[j] = listeners->data[j + 1];

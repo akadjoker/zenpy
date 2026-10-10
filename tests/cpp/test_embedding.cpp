@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 using namespace zen;
@@ -2064,6 +2065,155 @@ static void test_vec_values()
     }
 }
 
+/* =========================================================
+** TEST 24: host references (vm.ref / zen::Ref) and bound methods as values
+**
+** A native stores a callback it was handed. Nothing in the script keeps it
+** alive any more, so only the host reference does -- the script then
+** generates enough garbage to force several collections, after which C++
+** calls it through call_fn.
+** ========================================================= */
+static int g_cb_handle = -1;
+static Ref g_cb_ref;
+
+static int native_on_click(VM *vm, Value *args, int nargs)
+{
+    (void)nargs;
+    g_cb_handle = vm->ref(args[0]);
+    return 0;
+}
+
+static int native_on_click_ref(VM *vm, Value *args, int nargs)
+{
+    (void)nargs;
+    g_cb_ref = Ref(*vm, args[0]);
+    return 0;
+}
+
+static const char *kRefGarbageLoop = R"(
+junk = None
+for i in range(60000):
+    junk = [i, str(i), {"k": i}]
+collect()
+)";
+
+static void test_host_refs_and_bound_methods()
+{
+    printf("\n[Test 24] host references (vm.ref / zen::Ref) and bound methods\n");
+
+    VM vm;
+    vm.open_lib_globals(&zen_lib_base);
+    vm.def_native("on_click", native_on_click, 1);
+    vm.def_native("on_click_ref", native_on_click_ref, 1);
+
+    const int base_refs = vm.ref_count();
+
+    /* A bound method of a script instance: neither the instance nor the
+    ** bound method is reachable from any script variable once the
+    ** statement ends. */
+    run_source(vm, R"(
+class Button:
+    def __init__(self, k):
+        self.k = k
+    def fire(self, x, y=0):
+        return x * self.k + y
+
+on_click(Button(3).fire)
+)");
+    int h = g_cb_handle;
+
+    TEST("vm.ref() returns a handle and bumps ref_count()");
+    CHECK(h >= 0 && vm.ref_count() == base_refs + 1, "expected one live reference");
+
+    run_source(vm, kRefGarbageLoop);
+    vm.collect();
+
+    TEST("referenced bound method survives collections and is callable from C++");
+    Value args[1] = { val_int(14) };
+    Value r = vm.call_fn(vm.deref(h), args, 1);
+    CHECK(!vm.had_error() && is_int(r) && r.as.integer == 42, "expected fire(14) == 42");
+
+    TEST("bound method call from C++ applies the default argument");
+    Value args2[2] = { val_int(2), val_int(100) };
+    r = vm.call_fn(vm.deref(h), args2, 2);
+    CHECK(!vm.had_error() && is_int(r) && r.as.integer == 106, "expected fire(2, 100) == 106");
+
+    TEST("bound method called with too many arguments reports an error");
+    Value args3[3] = { val_int(1), val_int(2), val_int(3) };
+    r = vm.call_fn(vm.deref(h), args3, 3);
+    CHECK(vm.had_error() && is_nil(r), "expected an arity error");
+
+    TEST("unref() returns ref_count() to its previous value");
+    vm.unref(h);
+    CHECK(vm.ref_count() == base_refs, "expected the reference to be released");
+
+    TEST("deref() of a released handle is nil");
+    CHECK(is_nil(vm.deref(h)) && is_nil(vm.deref(-1)) && is_nil(vm.deref(100000)),
+          "expected nil for released / invalid handles");
+
+    /* A plain closure (with an upvalue) held only by zen::Ref. */
+    run_source(vm, R"(
+def make_adder(k):
+    def add(x):
+        return x + k
+    return add
+
+on_click_ref(make_adder(1000))
+)");
+    TEST("zen::Ref holds a closure across collections");
+    run_source(vm, kRefGarbageLoop);
+    Value a1[1] = { val_int(5) };
+    r = vm.call_fn(g_cb_ref.get(), a1, 1);
+    CHECK(g_cb_ref && !vm.had_error() && is_int(r) && r.as.integer == 1005, "expected add(5) == 1005");
+
+    TEST("moving a Ref keeps the value alive and releases once");
+    {
+        const int before = vm.ref_count();
+        Ref moved(std::move(g_cb_ref));
+        Ref again;
+        again = std::move(moved);
+        run_source(vm, kRefGarbageLoop);
+        Value a2[1] = { val_int(1) };
+        Value rr = vm.call_fn(again.get(), a2, 1);
+        bool ok = !g_cb_ref && !moved && again && vm.ref_count() == before &&
+                  is_int(rr) && rr.as.integer == 1001;
+        again.reset();
+        ok = ok && vm.ref_count() == before - 1 && !again;
+        CHECK(ok, "expected one live reference through both moves, released once");
+    }
+
+    TEST("double unref does not corrupt the free list");
+    {
+        const int before = vm.ref_count();
+        int h1 = vm.ref(val_int(1));
+        int h2 = vm.ref(val_int(2));
+        vm.unref(h1);
+        vm.unref(h1);               /* second release: ignored */
+        int n1 = vm.ref(val_int(10));
+        int n2 = vm.ref(val_int(20));
+        bool ok = n1 != n2 && n1 != h2 && n2 != h2;
+        ok = ok && vm.deref(n1).as.integer == 10 && vm.deref(n2).as.integer == 20 &&
+             vm.deref(h2).as.integer == 2 && vm.ref_count() == before + 3;
+        vm.unref(n1);
+        vm.unref(n2);
+        vm.unref(h2);
+        ok = ok && vm.ref_count() == before;
+        CHECK(ok, "expected distinct handles and a consistent count");
+    }
+
+    TEST("bound method of a native-class method is callable from C++");
+    run_source(vm, R"(
+sig = Signal()
+nat_count = sig.count
+)");
+    Value nb = vm.get_global("nat_count");
+    r = vm.call_fn(nb, nullptr, 0);
+    CHECK(!vm.had_error() && is_bound_method(nb) && is_int(r) && r.as.integer == 0,
+          "expected a bound native method returning 0");
+
+    g_cb_ref.reset();
+}
+
 int main()
 {
     printf("=== Zen Embedding Tests (C++ <-> Script) ===\n");
@@ -2091,6 +2241,7 @@ int main()
     test_method_flags_and_gc();
     test_zen_bind();
     test_vec_values();
+    test_host_refs_and_bound_methods();
 
     printf("\n========================================\n");
     printf("Results: %d passed, %d failed\n", g_tests_passed, g_tests_failed);

@@ -277,6 +277,29 @@ namespace zen
         void collect();
         void gc_mark_roots(); /* mark all VM roots for GC */
 
+        /* --- Host references: GC roots owned by C++ ---
+        ** A Value kept only in C++ memory (a stored callback, a script
+        ** component instance, a cached handle) is invisible to the
+        ** collector, which runs at any script call or loop back edge: it
+        ** would be freed under the host. ref() keeps v alive until unref().
+        **
+        **   int h = vm.ref(callback);   // handle, valid until unref(h)
+        **   ... any amount of script execution / collections ...
+        **   Value cb = vm.deref(h);     // the same object, still alive
+        **   vm.call_fn(cb, args, n);
+        **   vm.unref(h);
+        **
+        ** Handles are indices into a table with a free list, so they are
+        ** cheap, reusable and stable (never invalidated by other refs).
+        ** unref() of an already-released (or never-issued) handle is
+        ** ignored -- a double release cannot corrupt the free list; deref()
+        ** of such a handle returns nil. Prefer the zen::Ref RAII wrapper
+        ** (below) so the release cannot be forgotten. */
+        int ref(Value v);
+        Value deref(int h) const;
+        void unref(int h);
+        int ref_count() const; /* live references (for tests / leak checks) */
+
         /* --- Error reporting (for native functions) --- */
         void runtime_error(const char *fmt, ...);
 
@@ -301,12 +324,19 @@ namespace zen
         ObjUpvalue *capture_upvalue(ObjFiber *fiber, Value *local);
         void close_upvalues(ObjFiber *fiber, Value *last);
         bool call_value(ObjFiber *fiber, Value callee, int nargs, int nresults);
-        bool call_closure(ObjFiber *fiber, ObjClosure *closure, int nargs, int nresults);
+        /* self_slots = 1: the receiver already sits on the stack just below
+        ** the nargs arguments (a bound-method call); arity counts the
+        ** arguments only, as for OP_INVOKE. */
+        bool call_closure(ObjFiber *fiber, ObjClosure *closure, int nargs, int nresults,
+                          int self_slots = 0);
         /* C++ entry points do not put their arguments on a GC-marked VM
         ** stack. Keep the public native-call convention in one place. */
         Value call_native_from_cpp(ObjNative *native, Value receiver,
-                                   Value *args, int nargs, bool has_receiver);
-        Value call_closure_from_cpp(ObjClosure *closure, Value *args, int nargs);
+                                   Value *args, int nargs, bool has_receiver,
+                                   bool check_arity = true);
+        /* `self` != nullptr: a bound-method call, *self becomes parameter 0. */
+        Value call_closure_from_cpp(ObjClosure *closure, Value *args, int nargs,
+                                    const Value *self = nullptr);
         void run_nested(ObjClosure *closure);
         char *try_read_cb(const char *path, long *out_size); /* read file via callbacks */
 
@@ -314,6 +344,11 @@ namespace zen
 
         /* --- Estado --- */
         GC gc_;
+
+        /* Host reference table (ref/deref/unref). Opaque here so this public
+        ** header does not pull in the ct containers; defined in vm.cpp. */
+        struct HostRefs;
+        HostRefs *host_refs_;
 
         /* Globals — dynamic. Grows on demand via def_global up to
         ** kMaxGlobalsHard (65536, dictated by OP_GETGLOBAL Bx encoding).
@@ -493,6 +528,55 @@ namespace zen
         /* The interned ObjString behind a selector slot, hash already
         ** computed — module dispatch needs the key, not just the chars. */
         ObjString *selector_obj(int idx) const { return (idx >= 0 && idx < num_selectors_) ? selectors_[idx] : nullptr; }
+    };
+
+    /* =========================================================
+    ** Ref -- RAII owner of one VM::ref() handle.
+    **
+    ** Hosts hold Values across frames (button callbacks, signal listeners,
+    ** script component instances). The collector runs at any call or loop
+    ** back edge, so a Value only a C++ member refers to is not safe; this
+    ** keeps it rooted for exactly as long as the Ref lives. Move-only:
+    ** moving transfers the single handle, the moved-from Ref is empty, and
+    ** the handle is released once. Must not outlive the VM.
+    **
+    **   zen::Ref cb(vm, args[0]);          // in a native: on_click(fn)
+    **   ...
+    **   vm.call_fn(cb.get(), a, 1);        // later, any number of frames on
+    ** ========================================================= */
+    struct Ref
+    {
+        VM *vm = nullptr;
+        int h = -1;
+
+        Ref() = default;
+        Ref(VM &v, Value value) : vm(&v), h(v.ref(value)) {}
+        ~Ref() { reset(); }
+        Ref(Ref &&o) noexcept : vm(o.vm), h(o.h) { o.vm = nullptr; o.h = -1; }
+        Ref &operator=(Ref &&o) noexcept
+        {
+            if (this != &o)
+            {
+                reset();
+                vm = o.vm;
+                h = o.h;
+                o.vm = nullptr;
+                o.h = -1;
+            }
+            return *this;
+        }
+        Ref(const Ref &) = delete;
+        Ref &operator=(const Ref &) = delete;
+
+        Value get() const { return vm && h >= 0 ? vm->deref(h) : val_nil(); }
+        void reset()
+        {
+            if (vm && h >= 0)
+                vm->unref(h);
+            vm = nullptr;
+            h = -1;
+        }
+        explicit operator bool() const { return vm != nullptr && h >= 0; }
     };
 
     /* builtin_base.cpp: printf-style "fmt" % rhs (rhs: one value or an array of them) */

@@ -44,6 +44,7 @@ namespace zen
         OBJ_RANGE,
         OBJ_NATIVE_STRUCT_DEF,
         OBJ_NATIVE_STRUCT,
+        OBJ_BOUND_METHOD,
     };
 
     enum GCColor : uint8_t
@@ -250,6 +251,27 @@ namespace zen
 
     inline bool is_closure(Value v) { return is_obj_type(v, OBJ_CLOSURE); }
     inline ObjClosure *as_closure(Value v) { return (ObjClosure *)v.as.obj; }
+
+    /* =========================================================
+    ** ObjBoundMethod — a method plus the instance it was read from
+    ** (`f = obj.method; f(x)`), Python-style.
+    **
+    ** `method` is the class's closure (or a ClassBuilder native) exactly as
+    ** stored in the class; `receiver` becomes parameter 0 (self) when the
+    ** bound method is called. Both are traced by the collector. Created by
+    ** OP_GETFIELD when the name is not a field but is a method of the
+    ** receiver's class (or an ancestor's).
+    ** ========================================================= */
+
+    struct ObjBoundMethod
+    {
+        Obj obj;
+        Value receiver;
+        Value method;
+    };
+
+    inline bool is_bound_method(Value v) { return is_obj_type(v, OBJ_BOUND_METHOD); }
+    inline ObjBoundMethod *as_bound_method(Value v) { return (ObjBoundMethod *)v.as.obj; }
 
     /* =========================================================
     ** ObjFiber — Coroutine/Fiber (stack próprio, yield/resume).

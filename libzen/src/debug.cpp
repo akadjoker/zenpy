@@ -247,6 +247,9 @@ namespace zen
             case OBJ_NATIVE_STRUCT:
                 printf("<native_struct>");
                 break;
+            case OBJ_BOUND_METHOD:
+                printf("<bound method>");
+                break;
             }
             break;
         }

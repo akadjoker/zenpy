@@ -305,6 +305,11 @@ namespace
     {
         if (value.type != VAL_OBJ || !value.as.obj)
             return false;
+        /* A bound method holds a live instance (and its method closure):
+        ** runtime state, not code, so like natives it is never part of a
+        ** bytecode dump. */
+        if (value.as.obj->type == OBJ_BOUND_METHOD)
+            return false;
         if (value.as.obj->type == OBJ_CLASS)
             return can_write_global_class((ObjClass *)value.as.obj);
         if (value.as.obj->type == OBJ_STRUCT_DEF)

@@ -1677,8 +1677,27 @@ namespace zen
         }
         bool method_is_generic = method_sig || is_native_generic;
 
+        /* `self.name` where name is a method of this class (or an ancestor)
+        ** and is only read -- called, or taken as a value (`cb = self.on_x`,
+        ** a bound method) -- is not a field access. The field fast path
+        ** below would register `name` as a class field (a nil slot that
+        ** then shadows the method) and read it. Assignment still takes the
+        ** field path. */
+        bool self_method_use = false;
+        if (is_current_class_instance(obj) &&
+            find_method_in_chain(current_class_.start, current_class_.length, field) != nullptr)
+        {
+            const bool assign_ahead =
+                can_assign && (check(TOK_EQ) || check(TOK_PLUS_EQ) || check(TOK_MINUS_EQ) ||
+                               check(TOK_STAR_EQ) || check(TOK_SLASH_EQ) || check(TOK_PERCENT_EQ) ||
+                               check(TOK_DSLASH_EQ) || check(TOK_DSTAR_EQ) || check(TOK_AMP_EQ) ||
+                               check(TOK_PIPE_EQ) || check(TOK_CARET_EQ) || check(TOK_LSHIFT_EQ) ||
+                               check(TOK_RSHIFT_EQ));
+            self_method_use = !assign_ahead;
+        }
+
         /* --- Fast path: self.field inside a method → OP_GETFIELD_IDX / OP_SETFIELD_IDX --- */
-        if (is_current_class_instance(obj))
+        if (is_current_class_instance(obj) && !self_method_use)
         {
             ObjString *fname = token_string(field);
             int fidx = add_class_field(fname);

@@ -374,14 +374,79 @@ int main() {
 ### ClassBuilder — expose C++ classes to scripts
 
 ```cpp
-zen::ClassBuilder(vm, "Vec2")
+// Native methods: `self` is args[-1], the arguments are args[0..], the result
+// goes in args[0], and the return value is how many results you wrote.
+static int vec2_init(zen::VM *, zen::Value *args, int) {
+    zen::ObjInstance *self = zen::as_instance(args[-1]);
+    self->fields[0] = args[0];                        // x (declaration order)
+    self->fields[1] = args[1];                        // y
+    return 0;                                         // no result
+}
+static int vec2_length(zen::VM *, zen::Value *args, int) {
+    zen::ObjInstance *self = zen::as_instance(args[-1]);
+    double x = zen::to_number(self->fields[0]), y = zen::to_number(self->fields[1]);
+    args[0] = zen::val_float(std::sqrt(x * x + y * y));
+    return 1;                                         // one result, in args[0]
+}
+
+vm.def_class("Vec2")
     .field("x").field("y")
-    .method("__init__", 2, vec2_init)
-    .method("length", 0, vec2_length)
-    .build();
+    .method("__init__", vec2_init, 2)
+    .method("length", vec2_length, 0)
+    .end();
+// script:  v = Vec2(3, 4); print(v.length())        # 5.0
 ```
 
+A native method sees the receiver one slot *before* its arguments (`args[-1]`);
+`arity` is the number of script arguments, and fields are indexed in the order
+you declared them.
+
 Script classes can inherit from C++ classes — the VM handles the vtable dispatch.
+
+### bind.h — one-line bindings
+
+Writing one `static int f(VM*, Value*, int)` per method gets old fast.
+`<zen/bind.h>` (header-only, no runtime cost beyond the ClassBuilder calls it
+makes) generates those wrappers from member-function pointers at compile time:
+
+```cpp
+#include <zen/bind.h>
+
+struct Body {
+    float x, y; int hits = 0;
+    Body(float x, float y);
+    void move(float dx, float dy);
+    float speed() const;
+    int tag(zen::VM *vm, int k);          // leading VM* is injected, not a script arg
+};
+
+zen::bind_class<Body>(vm, "Body")
+    .constructor<float, float>()          // Body(3, 4) in script -> new Body(3, 4)
+    .method<&Body::move>("move")          // arity deduced from the signature
+    .method<&Body::speed>("speed")
+    .method<&Body::tag>("tag")            // arity 1
+    .property<&Body::hits>("hits")        // hits() and set_hits(v)
+    .end();
+zen::bind_function<&dist>(vm, "dist");    // free functions too
+// script:  b = Body(3, 4); b.move(1, 1); print(b.speed()); b.set_hits(7)
+```
+
+- **Self and ownership.** `self` is the instance's `native_data`. A class with
+  `constructor<...>()` owns its instances: `new T(...)` on construction,
+  `delete` when the GC frees them, and script subclasses inherit it. A class
+  without one is a view over host memory: expose objects with
+  `zen::wrap<T>(vm, ptr)` (`nullptr` becomes `None`), also returned
+  automatically from any bound method that returns `T*` or `T&`. The GC never
+  deletes a wrapped pointer, even for classes that do own their script-made
+  instances.
+- **Conversions.** `bool`, every integer width (out-of-range is an error, not a
+  truncation), `float`/`double` (ints promote), enums, `const char*` (valid only
+  during the call, copy it to keep it), `zen::Value`, and `T*`/`T&`/`const T&`
+  for bound classes. Pointer-to-bound-class results become wrapped instances.
+- **Errors.** A wrong-typed argument raises a runtime error naming the
+  parameter and the expected type (`parameter 0: expected float, got string`)
+  and the call returns without touching the C++ function. Nothing is ever cast
+  blindly.
 
 ### Trimming modules
 

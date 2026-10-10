@@ -184,6 +184,27 @@ if have_gcnative; then
     fi
 fi
 
+# --- C++ binding layer (zen/bind.h) ---
+BINDTEST="${BINDTEST:-$ROOT/bin/test_bind}"
+if [[ -n "$ZEN_RUNNER" ]]; then have_bindtest() { [[ -f "$BINDTEST" ]]; }
+else have_bindtest() { [[ -x "$BINDTEST" ]]; }; fi
+if have_bindtest; then
+    printf "  %-40s" "test_bind (C++)"
+    if [[ -n "$ZEN_RUNNER" ]]; then output=$("$ZEN_RUNNER" "$BINDTEST" 2>&1) && ret=0 || ret=$?
+    else output=$("$BINDTEST" 2>&1) && ret=0 || ret=$?; fi
+    if [[ $ret -eq 0 ]]; then
+        echo -e "${GREEN}OK${NC}"
+        passed=$((passed + 1))
+    else
+        echo -e "${RED}FAIL${NC} (exit $ret)"
+        failed=$((failed + 1))
+        failures+=("test_bind")
+        if [[ "$VERBOSE" == "1" ]]; then
+            echo "$output" | tail -20 | sed 's/^/    /'
+        fi
+    fi
+fi
+
 # --- Host output hook test (only built with -DZEN_HOST_OUTPUT=ON) ---
 HOSTOUT="${HOSTOUT:-$ROOT/bin/test_host_output}"
 if [[ -n "$ZEN_RUNNER" ]]; then have_hostout() { [[ -f "$HOSTOUT" ]]; }

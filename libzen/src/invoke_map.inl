@@ -202,28 +202,22 @@ default:
     }
     if (found && is_closure(callable))
     {
-        /* Module-level closure — call without self */
-        ObjClosure *cl = as_closure(callable);
-        ObjFunc *fn = cl->func;
-        if (fn->arity >= 0 && arg_count != fn->arity)
-            RT_ERROR("%s() expects %d args but got %d", mname, fn->arity, arg_count);
-        if (fiber->frame_count >= kMaxFrames)
-            RT_ERROR("stack overflow");
-        /* Shift args down: args[0..nargs-1] become base[0..nargs-1] */
-        for (int ai = 0; ai < arg_count; ai++)
-            R[base + ai] = args[ai];
+        /* Module-level closure — call without self. Hand off to the shared
+        ** closure-call body (op_call_shared, same one OP_CALL/OP_CALLGLOBAL
+        ** use) so constants, upvalues, defaults, *args, generators and the
+        ** GC safe point all behave as for any other call. The receiver slot
+        ** R[base] becomes the callee and the arguments already sit in
+        ** R[base+1..]; spread/keyword bits were stripped above, so
+        ** arg_count is the plain count. ip is moved past the second word of
+        ** this instruction, as OP_CALL expects. */
+        if (kwmap != nullptr)
+            RT_ERROR("keyword arguments need a function the compiler can see (or a native function)");
+        R[base] = callable;
+        call_a = base;
+        call_nargs = arg_count;
+        call_nresults = nresults;
         ++ip;
-        SAVE_IP();
-        CallFrame *new_frame = &fiber->frames[fiber->frame_count++];
-        new_frame->closure = cl;
-        new_frame->func = fn;
-        new_frame->ip = fn->code;
-        new_frame->base = &R[base];
-        new_frame->ret_reg = base;
-        new_frame->ret_count = 1;
-        fiber->stack_top = new_frame->base + fn->num_regs;
-        LOAD_STATE();
-        DISPATCH();
+        goto op_call_shared;
     }
 }
 }

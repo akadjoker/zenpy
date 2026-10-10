@@ -503,9 +503,6 @@ namespace zen
         case VAL_FLOAT:
             name = "float";
             break;
-        case VAL_SMALL_STRING:
-            name = "string";
-            break;
         case VAL_OBJ:
         {
             switch (v.as.obj->type)
@@ -667,7 +664,6 @@ namespace zen
         case VAL_BOOL:  name = "bool"; break;
         case VAL_INT:   name = "int"; break;
         case VAL_FLOAT: name = "float"; break;
-        case VAL_SMALL_STRING: name = "str"; break;
         case VAL_OBJ:
             switch (v.as.obj->type)
             {
@@ -1241,8 +1237,10 @@ namespace zen
         Value arg = args[0];
 
         if (is_int(arg)) {
-            int32_t count = arg.as.integer;
-            if (count < 0) { vm->runtime_error("buffer size must be non-negative"); return -1; }
+            int64_t count64 = arg.as.integer; /* not narrowed first: 2**32 must not wrap to 0 */
+            if (count64 < 0) { vm->runtime_error("buffer size must be non-negative"); return -1; }
+            if (count64 > INT32_MAX / 8) { vm->runtime_error("buffer size too large"); return -1; }
+            int32_t count = (int32_t)count64;
             ObjBuffer *buf = new_buffer(gc, btype, count);
             args[0] = val_obj((Obj *)buf);
             return 1;
@@ -1678,8 +1676,13 @@ namespace zen
         {
             int64_t x = to_integer(a), y = to_integer(b);
             if (y == 0) { vm->runtime_error("divmod(): division by zero"); return -1; }
-            int64_t q = x / y, r = x % y;
-            if (r != 0 && ((r < 0) != (y < 0))) { q--; r += y; }
+            int64_t q, r;
+            if (y == -1) { q = (int64_t)(0 - (uint64_t)x); r = 0; } /* INT64_MIN / -1 traps (UB); wraps to INT64_MIN like // */
+            else
+            {
+                q = x / y; r = x % y;
+                if (r != 0 && ((r < 0) != (y < 0))) { q--; r += y; }
+            }
             pair.push_back(val_int(q)); pair.push_back(val_int(r));
         }
         else

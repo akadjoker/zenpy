@@ -406,6 +406,7 @@ namespace zen
         ** in machine registers, so every opcode paid reload traffic. */
         bool call_make_struct(Value *R, int a, int nargs, Value callee);
         void call_make_native_struct(Value *R, int a, int nargs, Value callee);
+        ObjFunc *compile_eval_source(const char *source);
 
         /* Dense method ids, per receiver type.
         **

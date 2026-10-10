@@ -190,7 +190,7 @@ namespace zen
 
         ObjFiber *fiber = (ObjFiber *)zen_alloc(&gc_, sizeof(ObjFiber));
         fiber->obj.type = OBJ_FIBER;
-        fiber->obj.color = GC_BLACK;
+        fiber->obj.color = gc_.black_val;
         fiber->obj.hash = 0;
 
         /* Initialize ALL fields BEFORE linking to GC list */
@@ -237,6 +237,13 @@ namespace zen
             frame->ret_reg = 0;
             frame->ret_count = 0;
             fiber->stack_top = fiber->stack + closure->func->num_regs;
+            /* The stack comes from the arena uninitialised, and the GC marks
+            ** everything below stack_top: a register nobody wrote yet would
+            ** be scanned as a stale Value. Callers copy the arguments in
+            ** after this returns. (Frames pushed later clear their own
+            ** registers on entry.) */
+            for (Value *r = fiber->stack; r < fiber->stack_top; r++)
+                *r = val_nil();
         }
 
         return fiber;
@@ -255,7 +262,7 @@ namespace zen
         ObjClosure *cl = (ObjClosure *)zen_alloc(&gc_, sizeof(ObjClosure));
         gc_.pause_depth--;
         cl->obj.type = OBJ_CLOSURE;
-        cl->obj.color = GC_BLACK;
+        cl->obj.color = gc_.black_val;
         cl->obj.hash = 0;
         cl->obj.gc_next = gc_.objects;
         gc_.objects = (Obj *)cl;
@@ -1336,6 +1343,13 @@ namespace zen
                 gc_mark_obj(gc, (Obj *)global_names_[i]);
         }
 
+        /* 1b. Method selector names: interned strings that only selectors_
+        ** refers to (the builtin method names, for one). Unmarked they would
+        ** be swept and find_selector() would read freed memory. */
+        for (int i = 0; i < num_selectors_; i++)
+            if (selectors_[i])
+                gc_mark_obj(gc, (Obj *)selectors_[i]);
+
         /* 2. Mark all fibers (main + current + any others reachable from them) */
         if (main_fiber_)
             gc_mark_obj(gc, (Obj *)main_fiber_);
@@ -1367,7 +1381,7 @@ namespace zen
         /* Cria novo upvalue */
         ObjUpvalue *created = (ObjUpvalue *)zen_alloc_now(&gc_, sizeof(ObjUpvalue));
         created->obj.type = OBJ_UPVALUE;
-        created->obj.color = GC_BLACK;
+        created->obj.color = gc_.black_val;
         created->obj.hash = 0;
         created->obj.gc_next = gc_.objects;
         gc_.objects = (Obj *)created;
@@ -1809,7 +1823,7 @@ namespace zen
     {
         def_ = (ObjStructDef *)zen_alloc(&vm_->gc_, sizeof(ObjStructDef));
         def_->obj.type = OBJ_STRUCT_DEF;
-        def_->obj.color = GC_WHITE;
+        def_->obj.color = vm_->gc_.white_val;
         def_->obj.interned = 0;
         def_->obj.flags = 0;
         def_->obj.hash = 0;
@@ -1856,7 +1870,7 @@ namespace zen
         gc_pause(&vm->gc_);
         def_ = (NativeStructDef *)zen_alloc(&vm->gc_, sizeof(NativeStructDef));
         def_->obj.type = OBJ_NATIVE_STRUCT_DEF;
-        def_->obj.color = GC_BLACK;
+        def_->obj.color = vm->gc_.black_val;
         def_->obj.hash = 0;
         def_->obj.interned = 0;
         def_->obj.flags = 0;
@@ -1898,7 +1912,7 @@ namespace zen
     {
         ObjNativeStruct *ns = (ObjNativeStruct *)zen_alloc_now(&gc_, sizeof(ObjNativeStruct));
         ns->obj.type = OBJ_NATIVE_STRUCT;
-        ns->obj.color = GC_WHITE;
+        ns->obj.color = gc_.white_val;
         ns->obj.hash = 0;
         ns->obj.interned = 0;
         ns->obj.flags = 0;
@@ -1927,6 +1941,11 @@ namespace zen
         if (ctor_src && ctor_src->native_ctor)
         {
             inst->native_data = ctor_src->native_ctor(this, 0, nullptr);
+            if (had_error_)
+            {
+                gc_resume(&gc_);
+                return val_nil();
+            }
         }
         gc_resume(&gc_);
         return val_obj((Obj *)inst);
@@ -1945,6 +1964,11 @@ namespace zen
         if (ctor_src && ctor_src->native_ctor)
         {
             inst->native_data = ctor_src->native_ctor(this, nargs, args);
+            if (had_error_)
+            {
+                gc_resume(&gc_);
+                return val_nil();
+            }
         }
 
         /* Call init if exists */
@@ -2492,7 +2516,7 @@ namespace zen
         ObjClosure *mod_cl = (ObjClosure *)zen_alloc(&gc_, sizeof(ObjClosure));
         gc_.pause_depth--;
         mod_cl->obj.type = OBJ_CLOSURE;
-        mod_cl->obj.color = GC_BLACK;
+        mod_cl->obj.color = gc_.black_val;
         mod_cl->obj.hash = 0;
         mod_cl->obj.gc_next = gc_.objects;
         gc_.objects = (Obj *)mod_cl;

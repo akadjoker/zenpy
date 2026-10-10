@@ -172,12 +172,6 @@ namespace zen
         case VAL_FLOAT:
             printf("%g", val.as.number);
             break;
-        case VAL_SMALL_STRING:
-            printf("\"");
-            for (int i = 0; i < val.as.sso.len; i++)
-                printf("%c", val.as.sso.chars[i]);
-            printf("\"");
-            break;
         case VAL_OBJ:
         {
             Obj *obj = val.as.obj;

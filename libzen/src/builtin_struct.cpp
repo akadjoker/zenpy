@@ -251,9 +251,9 @@ namespace zen
         case 'h': { int16_t v; memcpy(&v, tmp, 2); return val_int(v); }
         case 'H': { uint16_t v; memcpy(&v, tmp, 2); return val_int(v); }
         case 'i': { int32_t v; memcpy(&v, tmp, 4); return val_int(v); }
-        case 'I': { uint32_t v; memcpy(&v, tmp, 4); return val_int((int32_t)v); }
-        case 'q': { int64_t v; memcpy(&v, tmp, 8); return val_int((int32_t)v); }
-        case 'Q': { uint64_t v; memcpy(&v, tmp, 8); return val_int((int32_t)v); }
+        case 'I': { uint32_t v; memcpy(&v, tmp, 4); return val_int((int64_t)v); }
+        case 'q': { int64_t v; memcpy(&v, tmp, 8); return val_int(v); }
+        case 'Q': { uint64_t v; memcpy(&v, tmp, 8); return val_int((int64_t)v); }
         case 'f': { float v;  memcpy(&v, tmp, 4); return val_float((double)v); }
         case 'd': { double v; memcpy(&v, tmp, 8); return val_float(v); }
         default: return val_nil();

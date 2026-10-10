@@ -66,7 +66,7 @@ case ARR_REMOVE:
     {
         RT_ERROR("remove() expects 1 integer argument");
     }
-    int32_t idx = args[0].as.integer;
+    int64_t idx = args[0].as.integer;
     int32_t count = arr_count(arr);
     if (idx < 0 || idx >= count)
     {
@@ -85,7 +85,7 @@ case ARR_INSERT:
     {
         RT_ERROR("insert() expects (int, value)");
     }
-    int32_t idx = args[0].as.integer;
+    int64_t idx = args[0].as.integer;
     int32_t count = arr_count(arr);
     if (idx < 0 || idx > count)
     {
@@ -104,9 +104,9 @@ case ARR_SLICE:
     int32_t count = arr_count(arr);
     int32_t start = 0, end_idx = count;
     if (arg_count >= 1 && is_int(args[0]))
-        start = args[0].as.integer;
+        start = clamp_slice_i32(args[0].as.integer);
     if (arg_count >= 2 && is_int(args[1]))
-        end_idx = args[1].as.integer;
+        end_idx = clamp_slice_i32(args[1].as.integer);
     if (start < 0)
         start += count;
     if (end_idx < 0)

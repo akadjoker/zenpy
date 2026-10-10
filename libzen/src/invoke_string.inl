@@ -69,7 +69,7 @@ case STR_FIND:
     else
     {
         const char *found = find_sep(str->chars + start_at, str->length - start_at, needle->chars, needle->length);
-        R[base] = found ? val_int((int32_t)(found - str->chars)) : val_int(-1);
+        R[base] = found ? val_int((int64_t)(found - str->chars)) : val_int(-1);
     }
     break;
 }
@@ -274,7 +274,7 @@ case STR_CHAR_AT:
     {
         RT_ERROR("char_at() expects an integer");
     }
-    int32_t idx = args[0].as.integer;
+    int64_t idx = args[0].as.integer;
     if (idx < 0 || idx >= str->length)
     {
         R[base] = val_nil();
@@ -292,7 +292,7 @@ case STR_BYTE_AT:
     {
         RT_ERROR("byte_at() expects an integer");
     }
-    int32_t idx = args[0].as.integer;
+    int64_t idx = args[0].as.integer;
     if (idx < 0 || idx >= str->length)
     {
         R[base] = val_int(0);

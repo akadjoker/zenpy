@@ -47,7 +47,7 @@ case BUF_TOLIST:
     for (int32_t idx = 0; idx < buf->count; idx++) {
         double v = buffer_get(buf, idx);
         if (buf->btype < BUF_FLOAT32)
-            array_push(&gc_, as_array(R[base]), val_int((int32_t)v));
+            array_push(&gc_, as_array(R[base]), val_int((int64_t)v));
         else
             array_push(&gc_, as_array(R[base]), val_float(v));
     }
@@ -65,11 +65,11 @@ case BUF_SLICE:
 {
     if (arg_count < 1 || arg_count > 2) { RT_ERROR("slice() expects 1-2 arguments"); }
     if (!is_int(args[0])) { RT_ERROR("slice() start must be integer"); }
-    int32_t start = args[0].as.integer;
+    int32_t start = clamp_slice_i32(args[0].as.integer);
     int32_t end = buf->count;
     if (arg_count == 2) {
         if (!is_int(args[1])) { RT_ERROR("slice() end must be integer"); }
-        end = args[1].as.integer;
+        end = clamp_slice_i32(args[1].as.integer);
     }
     if (start < 0) start += buf->count;
     if (end < 0) end += buf->count;

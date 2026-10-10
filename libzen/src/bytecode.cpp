@@ -370,10 +370,6 @@ namespace
             return w.write_u8(BC_INT64) && w.write_i64(value.as.integer);
         case VAL_FLOAT:
             return w.write_u8(BC_FLOAT64) && w.write_f64(value.as.number);
-        case VAL_SMALL_STRING:
-            /* Write small string as BC_STRING with length + data */
-            return w.write_u8(BC_STRING) && w.write_u32((uint32_t)value.as.sso.len) &&
-                   (value.as.sso.len == 0 || w.write_raw(value.as.sso.chars, (size_t)value.as.sso.len));
         case VAL_OBJ:
             if (!value.as.obj)
             {
@@ -651,7 +647,7 @@ namespace
                 const char *existing = vm->selector_name((int)i);
                 if (!existing || strcmp(existing, name->chars) != 0)
                 {
-                    set_error(err, err_len, "selector mismatch at slot %u", (unsigned)i);
+                    set_error(err, err_len, "selector mismatch at slot %u (bytecode has '%s', this VM has '%s'): the VM that loads a bytecode file must start from the same registered libraries and bindings as the one that dumped it", (unsigned)i, name->chars, existing ? existing : "?");
                     return false;
                 }
                 continue;
@@ -817,7 +813,7 @@ namespace
             GC *gc = &vm->get_gc();
             ObjClosure *cl = (ObjClosure *)zen_alloc(gc, sizeof(ObjClosure));
             cl->obj.type = OBJ_CLOSURE;
-            cl->obj.color = GC_BLACK;
+            cl->obj.color = gc->black_val;
             cl->obj.interned = 0;
             cl->obj.flags = 0;
             cl->obj.hash = 0;
@@ -1319,16 +1315,23 @@ ObjFunc *load_bytecode_buffer(VM *vm, const uint8_t *data, size_t size, char *er
         return nullptr;
     }
 
-    /* Resolve native functions/constants that weren't serialized.
-       Imports (math, os, etc.) register natives as globals at compile time,
-       but native objects can't be serialized into bytecode. */
-    vm->resolve_native_globals();
-
+    /* The selector table goes in BEFORE any lib code runs. Selector slots are
+       baked into OP_INVOKE* operands and class vtables, so the file's numbering
+       must win; resolve_native_globals() below runs every registered lib's
+       init_fn, and those intern their own method names (File.seek, ...) —
+       find-or-add, so a name the dump already knew keeps the file's slot and
+       any other is appended after it. Done the other way round, the lib names
+       claim the slots first and the first user method (slot 87) mismatches. */
     if (!read_selectors(vm, r, err, err_len))
     {
         gc.vm = saved_vm;
         return nullptr;
     }
+
+    /* Resolve native functions/constants that weren't serialized.
+       Imports (math, os, etc.) register natives as globals at compile time,
+       but native objects can't be serialized into bytecode. */
+    vm->resolve_native_globals();
 
     ObjFunc *fn = read_func(vm, r, minor, err, err_len);
     gc.vm = saved_vm;

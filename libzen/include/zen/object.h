@@ -91,27 +91,23 @@ namespace zen
 
     inline bool is_string(const Value &v)
     {
-        return v.type == VAL_SMALL_STRING || is_obj_type(v, OBJ_STRING);
+        return is_obj_type(v, OBJ_STRING);
     }
 
     inline const char *safe_string_chars(const Value &v)
     {
-        if (v.type == VAL_SMALL_STRING)
-            return v.as.sso.chars;
         return is_obj_type(v, OBJ_STRING) ? ((ObjString *)v.as.obj)->chars : "";
     }
 
     inline int safe_string_len(const Value &v)
     {
-        if (v.type == VAL_SMALL_STRING)
-            return v.as.sso.len;
         return is_obj_type(v, OBJ_STRING) ? ((ObjString *)v.as.obj)->length : 0;
     }
 
     inline ObjString *as_string(Value v) { return (ObjString *)v.as.obj; }
     inline const char *as_cstring(Value v)
     {
-        /* Now redirects to safe accessor to support both VAL_SMALL_STRING and OBJ_STRING */
+        /* Redirects to the safe accessor (yields "" for a non-string) */
         return safe_string_chars(v);
     }
 
@@ -639,8 +635,6 @@ namespace zen
             return v.as.integer != 0;
         case VAL_FLOAT:
             return v.as.number != 0.0;
-        case VAL_SMALL_STRING:
-            return v.as.sso.len != 0;
         default:
             if (v.as.obj->type == OBJ_STRING)
                 return as_string(v)->length != 0;

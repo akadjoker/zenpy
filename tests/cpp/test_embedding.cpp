@@ -18,10 +18,12 @@
 #include "compiler.h"
 #include "module.h"
 #include "memory.h"
+#include "bytecode.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 using namespace zen;
 
@@ -1127,8 +1129,13 @@ class Sprite:
         self.path = path
 
 c: Container = Container()
-c.add_component(Transform(1, 2))
-c.add_component(Sprite("hero.png"))
+# Container keeps its components in plain C++ memory, which the collector
+# cannot see: keep them reachable from script globals too, or a collection
+# (now possible on any call or loop iteration) frees them under the native.
+keep_t = Transform(1, 2)
+keep_s = Sprite("hero.png")
+c.add_component(keep_t)
+c.add_component(keep_s)
 
 t = c.get_component<Transform>()
 s = c.get_component<Sprite>()
@@ -1163,7 +1170,8 @@ missing = c.get_component<Nothing>()
     TEST("add_component (plain native method) is unaffected by generics support");
     run_source(vm, R"(
 c2: Container = Container()
-c2.add_component(Transform(9, 9))
+keep_t2 = Transform(9, 9)
+c2.add_component(keep_t2)
 t2 = c2.get_component<Transform>()
 )");
     Value t2v = vm.get_global("t2");
@@ -1190,7 +1198,8 @@ oops = c3.always_fails<Transform>()
     run_source(vm, R"(
 def outer():
     c: Container = Container()
-    c.add_component(Transform(1, 2))
+    keep = Transform(1, 2)  # the container's C++ slots are not GC roots
+    c.add_component(keep)
     def inner():
         return c.get_component<Transform>()
     return inner()
@@ -1230,6 +1239,355 @@ Locked.value = replacement
 }
 
 /* =========================================================
+** TEST 15: Native classes get the typed fast paths
+** ========================================================= */
+static int ent_init(VM *vm, Value *args, int nargs)
+{
+    (void)vm; (void)nargs;
+    ObjInstance *self = as_instance(args[-1]);
+    self->fields[0] = val_int(0);
+    self->fields[1] = val_int(0);
+    return 0;
+}
+
+static int ent_move(VM *vm, Value *args, int nargs)
+{
+    (void)vm; (void)nargs;
+    ObjInstance *self = as_instance(args[-1]);
+    self->fields[0] = val_int(self->fields[0].as.integer + args[0].as.integer);
+    self->fields[1] = val_int(self->fields[1].as.integer + args[1].as.integer);
+    return 0;
+}
+
+static void test_native_class_inference()
+{
+    printf("\n[Test 15] Native class inference (IDXC / INVOKE_VT)\n");
+
+    VM vm;
+    vm.open_lib_globals(&zen_lib_base);
+    vm.def_class("Ent")
+        .field("x")
+        .field("y")
+        .method("__init__", ent_init, 0)
+        .method("move", ent_move, 2)
+        .end();
+
+    auto geti = [&](const char *name) -> long {
+        Value v = vm.get_global(vm.find_global(name));
+        return is_int(v) ? (long)v.as.integer : -1;
+    };
+
+    TEST("untyped local and module-level native instances");
+    run_source(vm, R"(
+def f():
+    e = Ent()
+    e.move(3, 4)
+    return e.x + e.y
+
+r1 = f()
+g = Ent()
+g.move(3, 4)
+r1g = g.x + g.y
+)");
+    CHECK(!vm.had_error() && geti("r1") == 7 && geti("r1g") == 7, "expected 7 and 7");
+
+    TEST("annotated local native instance");
+    run_source(vm, R"(
+def h():
+    e2: Ent = Ent()
+    e2.move(1, 2)
+    return e2.x * 10 + e2.y
+
+r2 = h()
+)");
+    CHECK(!vm.had_error() && geti("r2") == 12, "expected 12");
+
+    TEST("script subclass of a native class keeps inherited fields");
+    run_source(vm, R"(
+class Sub(Ent):
+    def extra(self):
+        return self.x + 100
+
+s = Sub()
+s.move(5, 0)
+r3 = s.extra() + s.y
+)");
+    CHECK(!vm.had_error() && geti("r3") == 105, "expected 105");
+
+    TEST("field write through a typed native receiver");
+    run_source(vm, R"(
+def w():
+    e = Ent()
+    e.x = 9
+    return e.x
+
+r5 = w()
+)");
+    CHECK(!vm.had_error() && geti("r5") == 9, "expected 9");
+
+    TEST("global rebound after compile still reads the right field");
+    run_source(vm, R"(
+class Other:
+    def __init__(self):
+        self.y = 1
+        self.x = 2
+
+def f4():
+    e = Ent()
+    return e.x
+
+Ent = Other
+r4 = f4()
+)");
+    CHECK(!vm.had_error() && geti("r4") == 2, "expected 2 (by-name fallback)");
+}
+
+/* =========================================================
+** TEST 16: a native constructor that fails stops the construction
+** ========================================================= */
+static int g_bad_ctor_calls = 0;
+static bool g_bad_ctor_paused = false;
+
+static void *bad_ctor(VM *vm, int, Value *)
+{
+    g_bad_ctor_calls++;
+    g_bad_ctor_paused = vm->get_gc().pause_depth > 0;
+    vm->runtime_error("ctor failed");
+    return nullptr;
+}
+
+static void test_failing_native_ctor()
+{
+    printf("\n[Test 16] failing native ctor is checked (script and C++)\n");
+
+    {
+        VM vm;
+        vm.open_lib_globals(&zen_lib_base);
+        vm.def_class("Bad").ctor(bad_ctor).end();
+
+        TEST("script Bad(1): error reported, execution stops");
+        g_bad_ctor_calls = 0;
+        run_source(vm, "x = Bad(1)\nafter = 1\n");
+        CHECK(vm.had_error() && g_bad_ctor_calls == 1 && is_nil(vm.get_global("after")) &&
+                  is_nil(vm.get_global("x")),
+              "VM continued after a failed native ctor");
+        TEST("native ctor ran with the GC paused");
+        CHECK(g_bad_ctor_paused, "GC was not paused around native_ctor");
+    }
+
+    {
+        VM vm;
+        vm.open_lib_globals(&zen_lib_base);
+        vm.def_class("Bad").ctor(bad_ctor).end();
+        run_source(vm, "class Sub(Bad):\n    def __init__(self, a):\n"
+                       "        self.a = a\n"
+                       "s = Sub(1)\nafter = 1\n");
+        TEST("script subclass of Bad: error, no instance");
+        CHECK(vm.had_error() && is_nil(vm.get_global("after")) && is_nil(vm.get_global("s")),
+              "subclass construction continued after a failed native ctor");
+    }
+
+    {
+        VM vm;
+        vm.open_lib_globals(&zen_lib_base);
+        ObjClass *bad = vm.def_class("Bad").ctor(bad_ctor).end();
+        Value arg = val_int(1);
+
+        TEST("make_instance(klass, args, n) reports the error, returns nil");
+        g_bad_ctor_calls = 0;
+        Value r = vm.make_instance(bad, &arg, 1);
+        CHECK(vm.had_error() && is_nil(r) && g_bad_ctor_calls == 1,
+              "make_instance ignored a failed native ctor");
+    }
+
+    {
+        VM vm;
+        vm.open_lib_globals(&zen_lib_base);
+        ObjClass *bad = vm.def_class("Bad").ctor(bad_ctor).end();
+
+        TEST("make_instance(klass) reports the error, returns nil");
+        Value r = vm.make_instance(bad);
+        CHECK(vm.had_error() && is_nil(r), "make_instance(klass) ignored a failed native ctor");
+        TEST("GC is resumed after the failure");
+        CHECK(vm.get_gc().pause_depth == 0, "gc_pause leaked on the error path");
+    }
+}
+
+/* =========================================================
+** TEST 17: bytecode round trip into a fresh VM
+**
+** Selector slots are baked into OP_INVOKE* operands and class vtables. The
+** loader used to run every registered lib's init_fn (which interns native
+** method names such as File.seek) BEFORE reading the file's selector table,
+** so the first user method name landed on a slot the lib had already taken
+** and the load failed with "selector mismatch at slot 87". Any script that
+** called a method on a user class, and every script with an import, hit it.
+** ========================================================= */
+static void register_roundtrip_libs(VM &vm)
+{
+    vm.open_lib_globals(&zen_lib_base);
+    vm.register_lib(&zen_lib_math);
+    vm.register_lib(&zen_lib_time);
+    vm.register_lib(&zen_lib_io);
+    vm.register_lib(&zen_lib_json);
+}
+
+static void test_bytecode_roundtrip_fresh_vm()
+{
+    printf("\n[Test 17] bytecode round trip into a fresh VM (imports, builtin + user methods)\n");
+
+    const char *path = "test_embedding_roundtrip.zbc";
+    const char *source =
+        "import math\n"
+        "r = math.sqrt(16.0)\n"
+        "xs = [3, 1, 2]\n"
+        "xs.sort()\n"
+        "t = xs[0]\n"
+        "parts = \"a,b\".split(\",\")\n"
+        "n = len(parts)\n"
+        "class Counter:\n"
+        "    def __init__(self):\n"
+        "        self.v = 1\n"
+        "    def bump(self, d):\n"
+        "        self.v += d\n"
+        "        return self.v\n"
+        "c = Counter()\n"
+        "u = c.bump(2)\n";
+
+    char err[256] = {0};
+    bool dumped = false;
+    {
+        VM vm;
+        register_roundtrip_libs(vm);
+        Compiler compiler;
+        ObjFunc *fn = compiler.compile(&vm.get_gc(), &vm, source, "<dump>");
+        dumped = fn && dump_bytecode_file(&vm, fn, path, false, err, sizeof(err));
+    }
+    TEST("compile + dump");
+    CHECK(dumped, err[0] ? err : "dump failed");
+    if (!dumped)
+        return;
+
+    std::vector<uint8_t> bytes;
+    if (FILE *f = fopen(path, "rb"))
+    {
+        uint8_t buf[4096];
+        size_t got;
+        while ((got = fread(buf, 1, sizeof(buf), f)) > 0)
+            bytes.insert(bytes.end(), buf, buf + got);
+        fclose(f);
+    }
+    remove(path);
+
+    VM vm;
+    register_roundtrip_libs(vm);
+    err[0] = '\0';
+    ObjFunc *fn = load_bytecode_buffer(&vm, bytes.data(), bytes.size(), err, sizeof(err));
+    TEST("load into a fresh VM");
+    CHECK(fn != nullptr, err[0] ? err : "load failed");
+    if (!fn)
+        return;
+
+    vm.run(fn);
+    TEST("loaded script ran without error");
+    CHECK(!vm.had_error(), "runtime error after load");
+
+    Value r = vm.get_global("r");
+    TEST("math.sqrt(16.0) == 4.0 (import resolved)");
+    CHECK(is_float(r) && r.as.number == 4.0, "expected 4.0");
+
+    Value t = vm.get_global("t");
+    TEST("xs.sort(); xs[0] == 1 (builtin method)");
+    CHECK(is_int(t) && t.as.integer == 1, "expected 1");
+
+    Value n = vm.get_global("n");
+    TEST("\"a,b\".split(\",\") has 2 parts");
+    CHECK(is_int(n) && n.as.integer == 2, "expected 2");
+
+    Value u = vm.get_global("u");
+    TEST("user class method c.bump(2) == 3");
+    CHECK(is_int(u) && u.as.integer == 3, "expected 3");
+}
+
+/* =========================================================
+** TEST 18: subscripts beyond 32 bits are out of range, not wrapped
+**
+** (int32_t)key.as.integer turned xs[4294967296] into xs[0] and
+** xs[-4294967297] into xs[-1]. The language has no try/except, so the
+** error cases are asserted here through vm.had_error().
+** ========================================================= */
+static bool script_errors(const char *source)
+{
+    VM vm;
+    vm.open_lib_globals(&zen_lib_base);
+    run_source(vm, source);
+    return vm.had_error();
+}
+
+static void test_index_beyond_32_bits()
+{
+    printf("\n[Test 18] indices beyond 32 bits raise instead of wrapping\n");
+
+    struct Case { const char *what; const char *src; bool expect_error; };
+    static const Case cases[] = {
+        /* Reads */
+        {"xs[4294967296] (reads xs[0] if wrapped)",    "xs = [1, 2, 3]\nv = xs[4294967296]\n", true},
+        {"xs[-4294967297] (reads xs[-1] if wrapped)",  "xs = [1, 2, 3]\nv = xs[-4294967297]\n", true},
+        {"xs[4294967297] (reads xs[1] if wrapped)",    "xs = [1, 2, 3]\nv = xs[4294967297]\n", true},
+        {"xs[9223372036854775807]",                    "xs = [1, 2, 3]\nv = xs[9223372036854775807]\n", true},
+        {"xs[-9223372036854775807]",                   "xs = [1, 2, 3]\nv = xs[-9223372036854775807]\n", true},
+        {"\"abc\"[4294967296]",                        "s = \"abc\"\nv = s[4294967296]\n", true},
+        {"\"abc\"[-4294967297]",                       "s = \"abc\"\nv = s[-4294967297]\n", true},
+        {"Uint32Array read [4294967296]",              "b = Uint32Array(4)\nv = b[4294967296]\n", true},
+        {"Uint32Array read [-4294967297]",             "b = Uint32Array(4)\nv = b[-4294967297]\n", true},
+        /* Writes and deletes */
+        {"xs[4294967296] = 1",                         "xs = [1, 2, 3]\nxs[4294967296] = 1\n", true},
+        {"xs[-4294967297] = 1",                        "xs = [1, 2, 3]\nxs[-4294967297] = 1\n", true},
+        {"Uint32Array write [4294967296]",             "b = Uint32Array(4)\nb[4294967296] = 1\n", true},
+        {"del xs[4294967296]",                         "xs = [1, 2, 3]\ndel xs[4294967296]\n", true},
+        {"del xs[-4294967297]",                        "xs = [1, 2, 3]\ndel xs[-4294967297]\n", true},
+        {"xs.pop(4294967296)",                         "xs = [1, 2, 3]\nxs.pop(4294967296)\n", true},
+        {"xs.remove(4294967296)",                      "xs = [1, 2, 3]\nxs.remove(4294967296)\n", true},
+        {"xs.insert(4294967296, 9)",                   "xs = [1, 2, 3]\nxs.insert(4294967296, 9)\n", true},
+        {"Uint8Array(4294967296) size",                "b = Uint8Array(4294967296)\n", true},
+        /* Valid uses and controls: still fine */
+        {"xs[2], xs[-3], s[-1] still work",            "xs = [1, 2, 3]\na = xs[2]\nb = xs[-3]\ns = \"abc\"\nc = s[-1]\n", false},
+        {"slice bounds beyond 32 bits clamp",          "xs = [1, 2, 3]\na = xs[:4294967296]\nb = xs[4294967296:]\nc = \"abc\"[:4294967296]\n", false},
+        {"slice step zero still errors",               "xs = [1, 2, 3]\na = xs[::0]\n", true},
+    };
+
+    for (const Case &c : cases)
+    {
+        TEST(c.what);
+        bool errored = script_errors(c.src);
+        CHECK(errored == c.expect_error,
+              c.expect_error ? "no error raised (index wrapped?)" : "unexpected error");
+    }
+
+    /* Wrapped value must not leak through: the failed read leaves v unset. */
+    {
+        VM vm;
+        vm.open_lib_globals(&zen_lib_base);
+        run_source(vm, "xs = [11, 22, 33]\nv = 0\nv = xs[4294967296]\n");
+        Value v = vm.get_global("v");
+        TEST("failed xs[2**32] does not yield xs[0]");
+        CHECK(vm.had_error() && !(is_int(v) && v.as.integer == 11), "wrapped read returned xs[0]");
+    }
+
+    /* char_at / byte_at report out-of-range as nil / 0, never as byte 0. */
+    {
+        VM vm;
+        vm.open_lib_globals(&zen_lib_base);
+        run_source(vm, "s = \"abc\"\nc = s.char_at(4294967296)\nb = s.byte_at(4294967296)\n");
+        Value c = vm.get_global("c");
+        Value b = vm.get_global("b");
+        TEST("char_at/byte_at(2**32) are out of range, not index 0");
+        CHECK(!vm.had_error() && is_nil(c) && is_int(b) && b.as.integer == 0,
+              "wrapped to index 0");
+    }
+}
+
+/* =========================================================
 ** MAIN
 ** ========================================================= */
 int main()
@@ -1251,6 +1609,10 @@ int main()
     test_resume_fiber_error_handling();
     test_generic_native_method();
     test_closed_script_class();
+    test_native_class_inference();
+    test_failing_native_ctor();
+    test_bytecode_roundtrip_fresh_vm();
+    test_index_beyond_32_bits();
 
     printf("\n========================================\n");
     printf("Results: %d passed, %d failed\n", g_tests_passed, g_tests_failed);

@@ -1905,6 +1905,24 @@ namespace zen
                     return j;
             return -1;
         }
+        /* Not a script class: it may be an engine class registered through
+        ** ClassBuilder, whose field_names are interned in the same GC table
+        ** as the compiler's tokens (pointer compare, like the registry). */
+        if (vm_)
+        {
+            char buf[256];
+            int n = cls_len < 255 ? cls_len : 255;
+            memcpy(buf, cls, n);
+            buf[n] = '\0';
+            int gidx = vm_->find_global(buf);
+            if (gidx >= 0 && is_class(vm_->get_global(gidx)))
+            {
+                ObjClass *klass = as_class(vm_->get_global(gidx));
+                for (int j = 0; j < klass->num_fields; j++)
+                    if (klass->field_names[j] == fname)
+                        return j;
+            }
+        }
         return -1;
     }
 
@@ -2212,7 +2230,23 @@ namespace zen
         }
         if (find_signature(nullptr, 0, name.start, name.length))
             return false;
-        return find_sig_class(name.start, name.length) != nullptr;
+        if (find_sig_class(name.start, name.length) != nullptr)
+            return true;
+        /* Engine classes come from ClassBuilder before the script compiles,
+        ** so they are visible in the VM globals. Treating them like script
+        ** classes lets e.x / e.m() use the IDXC / INVOKE_VT opcodes; those
+        ** are checked at runtime, so a rebound global still behaves. */
+        if (vm_)
+        {
+            char buf[256];
+            int n = name.length < 255 ? name.length : 255;
+            memcpy(buf, name.start, n);
+            buf[n] = '\0';
+            int gidx = vm_->find_global(buf);
+            if (gidx >= 0 && is_class(vm_->get_global(gidx)))
+                return true;
+        }
+        return false;
     }
 
     void Compiler::infer_assigned_class_local(int reg)

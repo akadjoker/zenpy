@@ -25,6 +25,11 @@ namespace zen
             vm->runtime_error(#name "() expected 1 argument, got %d", nargs); \
             return 0;                                                         \
         }                                                                     \
+        if (is_vec(args[0]))                                                  \
+        {                                                                     \
+            vm->runtime_error(#name "() expects a number, got a vector");     \
+            return 0;                                                         \
+        }                                                                     \
         args[0] = val_float(fn(to_number(args[0])));                          \
         return 1;                                                             \
     }
@@ -35,6 +40,11 @@ namespace zen
         if (nargs != 2)                                                        \
         {                                                                      \
             vm->runtime_error(#name "() expected 2 arguments, got %d", nargs); \
+            return 0;                                                          \
+        }                                                                      \
+        if (is_vec(args[0]) || is_vec(args[1]))                                \
+        {                                                                      \
+            vm->runtime_error(#name "() expects numbers, got a vector");       \
             return 0;                                                          \
         }                                                                      \
         args[0] = val_float(fn(to_number(args[0]),                             \

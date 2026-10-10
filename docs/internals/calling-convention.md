@@ -51,8 +51,9 @@ estático **uma dica e nunca uma promessa**: uma anotação errada custa
 velocidade, nunca muda o comportamento.
 
 `INVOKE` por nome testa o receptor por tipo: instância primeiro (o caso
-comum em jogos), depois array/string/map/set/buffer (as tabelas em
-`invoke_*.inl`, que despacham pelo nome do método).
+comum em jogos), depois array/string/map/set/buffer e Vec2/Vec3 (as tabelas
+em `invoke_*.inl`, que despacham pelo nome do método; os ids densos por tipo
+vêm de `init_builtin_method_tables`, `vec_method(sel_slot)` para vectores).
 
 ## Onde o compilador poupa MOVEs
 

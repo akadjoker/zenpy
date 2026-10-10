@@ -607,7 +607,7 @@ result_pos = str(b.x) + "," + str(b.y)
 ** TEST 9: NativeStructBuilder — zero-copy C++ struct binding
 ** ========================================================= */
 
-struct Vec2f {
+struct HostVec2f {
     float x, y;
 };
 
@@ -618,7 +618,7 @@ struct Color4 {
 static void vec2f_ctor(VM *vm, void *buffer, int argc, Value *args)
 {
     (void)vm;
-    Vec2f *v = (Vec2f *)buffer;
+    HostVec2f *v = (HostVec2f *)buffer;
     v->x = (argc > 0) ? (float)(args[0].type == VAL_FLOAT ? args[0].as.number : (double)args[0].as.integer) : 0.0f;
     v->y = (argc > 1) ? (float)(args[1].type == VAL_FLOAT ? args[1].as.number : (double)args[1].as.integer) : 0.0f;
 }
@@ -640,10 +640,10 @@ static void test_native_struct_builder()
     VM vm;
     vm.open_lib_globals(&zen_lib_base);
 
-    /* Register Vec2f — maps directly to C++ struct with float x, y */
-    vm.register_native_struct("Vec2", sizeof(Vec2f), vec2f_ctor)
-        .f32("x", offsetof(Vec2f, x))
-        .f32("y", offsetof(Vec2f, y))
+    /* Register HostVec2f — maps directly to C++ struct with float x, y */
+    vm.register_native_struct("Vec2", sizeof(HostVec2f), vec2f_ctor)
+        .f32("x", offsetof(HostVec2f, x))
+        .f32("y", offsetof(HostVec2f, y))
         .end();
 
     /* Register Color4 — maps to C++ struct with uint8 r,g,b,a */
@@ -1851,6 +1851,219 @@ r_k = k.value()
     CHECK(g_bind_alive == 0, "expected 0 counters alive");
 }
 
+/* =========================================================
+** TEST 22: Vec2 / Vec3 value types
+**
+** The language has no try/except, so every runtime error is asserted here
+** through vm.had_error(). Also: natives taking and returning vectors,
+** vectors through vm.call_global, and the BC_VEC2 / BC_VEC3 bytecode tags.
+** ========================================================= */
+static int native_vec3_scale(VM *vm, Value *args, int nargs)
+{
+    if (nargs != 2 || !is_vec3(args[0]) || !(is_float(args[1]) || is_int(args[1])))
+    {
+        vm->runtime_error("vec3_scale(Vec3, number) expected");
+        return -1;
+    }
+    Vec3f v = as_vec3(args[0]);
+    float k = (float)to_number(args[1]);
+    args[0] = val_vec3(Vec3f{v.x * k, v.y * k, v.z * k});
+    return 1;
+}
+
+static int native_vec_kind(VM *vm, Value *args, int nargs)
+{
+    (void)vm; (void)nargs;
+    args[0] = val_int(is_vec3(args[0]) ? 3 : is_vec2(args[0]) ? 2 : 0);
+    return 1;
+}
+
+static void test_vec_values()
+{
+    printf("\n[Test 22] Vec2 / Vec3 value types\n");
+
+    static_assert(sizeof(Value) == 16, "Value must stay 16 bytes");
+
+    struct Case { const char *what; const char *src; bool expect_error; };
+    static const Case cases[] = {
+        {"Vec2 + Vec3",              "x = Vec2(1, 2) + Vec3(1, 2, 3)\n", true},
+        {"Vec3 - Vec2",              "x = Vec3(1, 2, 3) - Vec2(1, 2)\n", true},
+        {"Vec2 * Vec3",              "x = Vec2(1, 2) * Vec3(1, 2, 3)\n", true},
+        {"Vec2 < Vec2",              "x = Vec2(1, 2) < Vec2(3, 4)\n", true},
+        {"Vec2 <= Vec2",             "x = Vec2(1, 2) <= Vec2(3, 4)\n", true},
+        {"Vec2 > Vec2",              "x = Vec2(1, 2) > Vec2(3, 4)\n", true},
+        {"Vec2 >= Vec2",             "x = Vec2(1, 2) >= Vec2(3, 4)\n", true},
+        {"Vec2 < 3",                 "x = Vec2(1, 2) < 3\n", true},
+        {"3 < Vec2",                 "x = 3 < Vec2(1, 2)\n", true},
+        {"if a < b (fused jump)",    "a = Vec2(1, 2)\nb = Vec2(3, 4)\nif a < b:\n    x = 1\n", true},
+        {"while a <= b (fused jump)","a = Vec2(1, 2)\nb = Vec2(3, 4)\nwhile a <= b:\n    x = 1\n", true},
+        {"if v < 3 (immediate jump)","v = Vec3(1, 2, 3)\nif v < 3:\n    x = 1\n", true},
+        {"Vec2 + 1",                 "x = Vec2(1, 2) + 1\n", true},
+        {"Vec2 - 1",                 "x = Vec2(1, 2) - 1\n", true},
+        {"1 + Vec2",                 "x = 1 + Vec2(1, 2)\n", true},
+        {"Vec2 / Vec2",              "x = Vec2(1, 2) / Vec2(1, 1)\n", true},
+        {"Vec2 / 0",                 "x = Vec2(1, 2) / 0\n", true},
+        {"2 / Vec2",                 "x = 2 / Vec2(1, 2)\n", true},
+        {"Vec2 // 2",                "x = Vec2(1, 2) // 2\n", true},
+        {"Vec2 % 2",                 "x = Vec2(1, 2) % 2\n", true},
+        {"Vec2 ** 2",                "x = Vec2(1, 2) ** 2\n", true},
+        {"int(Vec2)",                "x = int(Vec2(1, 2))\n", true},
+        {"float(Vec3)",              "x = float(Vec3(1, 2, 3))\n", true},
+        {"abs(Vec2)",                "x = abs(Vec2(1, 2))\n", true},
+        {"round(Vec2)",              "x = round(Vec2(1, 2))\n", true},
+        {"Vec2.z",                   "x = Vec2(1, 2).z\n", true},
+        {"Vec2.w",                   "x = Vec3(1, 2, 3).w\n", true},
+        {"Vec2.foo",                 "x = Vec2(1, 2).foo\n", true},
+        {"Vec2.z = 1",               "def f():\n    v = Vec2(1, 2)\n    v.z = 1\nf()\n", true},
+        {"Vec2.x = 'a'",             "def f():\n    v = Vec2(1, 2)\n    v.x = 'a'\nf()\n", true},
+        {"Vec2(\"a\", 1)",           "x = Vec2(\"a\", 1)\n", true},
+        {"Vec2(1)",                  "x = Vec2(1)\n", true},
+        {"Vec3(1, 2)",               "x = Vec3(1, 2)\n", true},
+        {"Vec3(1, 2, 3, 4)",         "x = Vec3(1, 2, 3, 4)\n", true},
+        {"Vec2(None, 1)",            "x = Vec2(None, 1)\n", true},
+        {"unknown method",           "x = Vec2(1, 2).nope()\n", true},
+        {"dot with wrong kind",      "x = Vec2(1, 2).dot(Vec3(1, 2, 3))\n", true},
+        {"dot with a number",        "x = Vec2(1, 2).dot(3)\n", true},
+        {"Vec2.cross(Vec3)",         "x = Vec2(1, 2).cross(Vec3(1, 2, 3))\n", true},
+        {"lerp with a vector t",     "x = Vec2(1, 2).lerp(Vec2(3, 4), Vec2(1, 1))\n", true},
+        {"with_z on Vec2",           "x = Vec2(1, 2).with_z(3)\n", true},
+        {"length with an argument",  "x = Vec2(1, 2).length(1)\n", true},
+        {"len(Vec2)",                "x = len(Vec2(1, 2))\n", true},
+        {"Vec2[0]",                  "x = Vec2(1, 2)[0]\n", true},
+        {"for c in Vec2",            "for c in Vec2(1, 2):\n    pass\n", true},
+        {"sorted of vectors",        "x = sorted([Vec2(1, 2), Vec2(0, 1)])\n", true},
+        {"max of vectors",           "x = max(Vec2(1, 2), Vec2(0, 1))\n", true},
+        /* Controls: all of these are fine */
+        {"construction, arithmetic, fields, methods",
+         "a = Vec3(1, 2, 3)\nb = a + a * 2 - a\nc = a.x + a.y + a.z\nd = a.cross(b).length()\n"
+         "e = Vec2() == Vec2(0, 0)\nf = a != Vec3(0, 0, 0)\nif a:\n    g = 1\n", false},
+        {"== and != never error",    "x = Vec2(1, 2) == Vec3(1, 2, 0)\ny = Vec2(1, 2) != 5\nz = Vec2(1, 2) == None\n", false},
+        {"local field write",        "def f():\n    v = Vec3(1, 2, 3)\n    v.x = 5\n    v.y += 1\n    return v\nx = f()\n", false},
+    };
+    for (const Case &c : cases)
+    {
+        TEST(c.what);
+        bool errored = script_errors(c.src);
+        CHECK(errored == c.expect_error,
+              c.expect_error ? "no error raised" : "unexpected error");
+    }
+
+    VM vm;
+    vm.open_lib_globals(&zen_lib_base);
+    vm.def_native("vec3_scale", native_vec3_scale, 2);
+    vm.def_native("vec_kind", native_vec_kind, 1);
+    Value r;
+
+    TEST("native receives a Vec3 (is_vec3 / as_vec3) and returns val_vec3");
+    run_source(vm, "r_scaled = vec3_scale(Vec3(1, 2, 3), 2)\nr_k3 = vec_kind(Vec3())\nr_k2 = vec_kind(Vec2())\nr_k0 = vec_kind(3)\n");
+    CHECK(!vm.had_error(), "script errored");
+    r = vm.get_global("r_scaled");
+    CHECK(is_vec3(r) && r.vx == 2.0f && vec_y(r) == 4.0f && vec_z(r) == 6.0f, "vec3_scale(Vec3(1,2,3), 2) == Vec3(2,4,6)");
+    Vec3f sv = as_vec3(r);
+    CHECK(sv.x == 2.0f && sv.y == 4.0f && sv.z == 6.0f, "as_vec3 reads the components back");
+    r = vm.get_global("r_k3"); CHECK(is_int(r) && r.as.integer == 3, "is_vec3 sees a Vec3");
+    r = vm.get_global("r_k2"); CHECK(is_int(r) && r.as.integer == 2, "is_vec2 sees a Vec2");
+    r = vm.get_global("r_k0"); CHECK(is_int(r) && r.as.integer == 0, "neither for an int");
+
+    TEST("math.sqrt(Vec2) is an error, math.sqrt(4) is not");
+    {
+        VM mvm;
+        register_roundtrip_libs(mvm);
+        run_source(mvm, "import math\nx = math.sqrt(4)\n");
+        CHECK(!mvm.had_error(), "math.sqrt(4) must work");
+        VM mvm2;
+        register_roundtrip_libs(mvm2);
+        run_source(mvm2, "import math\nx = math.sqrt(Vec2(1, 2))\n");
+        CHECK(mvm2.had_error(), "math.sqrt(Vec2) must fail");
+    }
+
+    TEST("a native given a Vec2 where it wants a Vec3 reports an error");
+    run_source(vm, "bad = vec3_scale(Vec2(1, 2), 2)\n");
+    CHECK(vm.had_error(), "vec3_scale(Vec2, 2) must fail");
+
+    TEST("Vec3 values survive vm.call_global argument passing and return");
+    {
+        VM vm2;
+        vm2.open_lib_globals(&zen_lib_base);
+        run_source(vm2, "def length_of(v):\n    return v.length()\n"
+                        "def echo(v):\n    return v\n"
+                        "def add(a, b):\n    return a + b\n"
+                        "def offset(p, d):\n    p.x = p.x + d\n    return p\n");
+        Value a3[1] = {val_vec3(2.0f, 3.0f, 6.0f)};
+        Value out = vm2.call_global("length_of", a3, 1);
+        CHECK(is_float(out) && out.as.number == 7.0, "length_of(Vec3(2,3,6)) == 7.0");
+        Value a4[1] = {val_vec3(Vec3f{1.5f, -2.0f, 0.25f})};
+        out = vm2.call_global("echo", a4, 1);
+        CHECK(is_vec3(out) && out.vx == 1.5f && vec_y(out) == -2.0f && vec_z(out) == 0.25f, "echo returns the same Vec3");
+        Value a5[2] = {val_vec2(1.0f, 2.0f), val_vec2(10.0f, 20.0f)};
+        out = vm2.call_global("add", a5, 2);
+        CHECK(is_vec2(out) && out.vx == 11.0f && vec_y(out) == 22.0f, "add(Vec2, Vec2) == Vec2(11, 22)");
+        Value a6[2] = {val_vec3(1.0f, 1.0f, 1.0f), val_int(4)};
+        out = vm2.call_global("offset", a6, 2);
+        CHECK(is_vec3(out) && out.vx == 5.0f, "field write on a parameter register");
+        CHECK(a6[0].vx == 1.0f, "the caller's Value is a copy, untouched");
+        CHECK(!vm2.had_error(), "no error after the calls");
+    }
+
+    TEST("Value layout: vx in the former padding, payload at offset 8");
+    CHECK(offsetof(Value, vx) == 4 && offsetof(Value, as) == 8 && sizeof(Value) == 16, "layout");
+    Value z2 = val_vec2(7.0f, 8.0f);
+    CHECK(vec_z(z2) == 0.0f, "val_vec2 zeroes the unused z");
+
+    TEST("BC_VEC2 / BC_VEC3 constants round-trip through the bytecode writer and reader");
+    {
+        const char *path = "test_embedding_vec.zbc";
+        char err[256] = {0};
+        bool dumped = false;
+        {
+            VM dvm;
+            register_roundtrip_libs(dvm);
+            Compiler compiler;
+            ObjFunc *fn = compiler.compile(&dvm.get_gc(), &dvm, "x = 1\n", "<dump>");
+            if (fn)
+            {
+                /* Append two vector constants to the main function. */
+                int32_t n = fn->const_count;
+                Value *grown = (Value *)zen_alloc(&dvm.get_gc(), sizeof(Value) * (size_t)(n + 2));
+                for (int32_t k = 0; k < n; k++)
+                    grown[k] = fn->constants[k];
+                grown[n] = val_vec2(0.1f, -2.5f);
+                grown[n + 1] = val_vec3(1.0f, 2.0f, 3.5f);
+                fn->constants = grown;
+                fn->const_count = n + 2;
+                fn->const_capacity = n + 2;
+                dumped = dump_bytecode_file(&dvm, fn, path, false, err, sizeof(err));
+            }
+        }
+        CHECK(dumped, err[0] ? err : "dump failed");
+        if (dumped)
+        {
+            std::vector<uint8_t> bytes;
+            if (FILE *f = fopen(path, "rb"))
+            {
+                uint8_t buf[4096];
+                size_t got;
+                while ((got = fread(buf, 1, sizeof(buf), f)) > 0)
+                    bytes.insert(bytes.end(), buf, buf + got);
+                fclose(f);
+            }
+            VM lvm;
+            register_roundtrip_libs(lvm);
+            err[0] = '\0';
+            ObjFunc *fn = load_bytecode_buffer(&lvm, bytes.data(), bytes.size(), err, sizeof(err));
+            CHECK(fn != nullptr, err[0] ? err : "load failed");
+            if (fn)
+            {
+                Value c2 = fn->constants[fn->const_count - 2];
+                Value c3 = fn->constants[fn->const_count - 1];
+                CHECK(is_vec2(c2) && c2.vx == 0.1f && vec_y(c2) == -2.5f, "Vec2 constant round-trips bit for bit");
+                CHECK(is_vec3(c3) && c3.vx == 1.0f && vec_y(c3) == 2.0f && vec_z(c3) == 3.5f, "Vec3 constant round-trips bit for bit");
+            }
+        }
+        remove(path);
+    }
+}
+
 int main()
 {
     printf("=== Zen Embedding Tests (C++ <-> Script) ===\n");
@@ -1877,6 +2090,7 @@ int main()
     test_native_keyword_arguments();
     test_method_flags_and_gc();
     test_zen_bind();
+    test_vec_values();
 
     printf("\n========================================\n");
     printf("Results: %d passed, %d failed\n", g_tests_passed, g_tests_failed);

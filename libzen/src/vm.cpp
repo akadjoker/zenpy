@@ -149,6 +149,7 @@ namespace zen
         free(map_method_); map_method_ = nullptr;
         free(set_method_); set_method_ = nullptr;
         free(buf_method_); buf_method_ = nullptr;
+        free(vec_method_); vec_method_ = nullptr;
         num_builtin_selectors_ = 0;
 
         /* Free all objects via GC sweep */
@@ -834,6 +835,20 @@ namespace zen
         SEL(buf_copy, "copy");
         SEL(buf_slice, "slice");
         SEL(buf_type_name, "type_name");
+
+        SEL(vec_length, "length");
+        SEL(vec_length_sq, "length_sq");
+        SEL(vec_normalized, "normalized");
+        SEL(vec_dot, "dot");
+        SEL(vec_cross, "cross");
+        SEL(vec_distance, "distance");
+        SEL(vec_distance_sq, "distance_sq");
+        SEL(vec_lerp, "lerp");
+        SEL(vec_abs, "abs");
+        SEL(vec_with_x, "with_x");
+        SEL(vec_with_y, "with_y");
+        SEL(vec_with_z, "with_z");
+        SEL(vec_to_list, "to_list");
 #undef SEL
 
         init_builtin_method_tables();
@@ -857,7 +872,8 @@ namespace zen
         map_method_ = (uint8_t *)calloc(n, 1);
         set_method_ = (uint8_t *)calloc(n, 1);
         buf_method_ = (uint8_t *)calloc(n, 1);
-        if (!str_method_ || !arr_method_ || !map_method_ || !set_method_ || !buf_method_)
+        vec_method_ = (uint8_t *)calloc(n, 1);
+        if (!str_method_ || !arr_method_ || !map_method_ || !set_method_ || !buf_method_ || !vec_method_)
         {
             /* Leave the bound at zero so every *_method() lookup returns
             ** *_NONE instead of indexing a table that was never allocated —
@@ -871,6 +887,7 @@ namespace zen
             free(map_method_); map_method_ = nullptr;
             free(set_method_); set_method_ = nullptr;
             free(buf_method_); buf_method_ = nullptr;
+            free(vec_method_); vec_method_ = nullptr;
             runtime_error("out of memory building builtin method tables");
             return;
         }
@@ -889,6 +906,7 @@ namespace zen
         static_assert(MAP_COPY == 14, "map method enum changed: update init_builtin_method_tables()");
         static_assert(SET_COPY == 17, "set method enum changed: update init_builtin_method_tables()");
         static_assert(BUF_TYPE_NAME == 7, "buffer method enum changed: update init_builtin_method_tables()");
+        static_assert(VEC_TO_LIST == 13, "vec method enum changed: update init_builtin_method_tables()");
 
 #define MAP_METHOD(table, field, id) table[bsel_.field] = (uint8_t)(id)
         MAP_METHOD(str_method_, str_len, STR_LEN);
@@ -995,6 +1013,20 @@ namespace zen
         MAP_METHOD(buf_method_, buf_copy, BUF_COPY);
         MAP_METHOD(buf_method_, buf_slice, BUF_SLICE);
         MAP_METHOD(buf_method_, buf_type_name, BUF_TYPE_NAME);
+
+        MAP_METHOD(vec_method_, vec_length, VEC_LENGTH);
+        MAP_METHOD(vec_method_, vec_length_sq, VEC_LENGTH_SQ);
+        MAP_METHOD(vec_method_, vec_normalized, VEC_NORMALIZED);
+        MAP_METHOD(vec_method_, vec_dot, VEC_DOT);
+        MAP_METHOD(vec_method_, vec_cross, VEC_CROSS);
+        MAP_METHOD(vec_method_, vec_distance, VEC_DISTANCE);
+        MAP_METHOD(vec_method_, vec_distance_sq, VEC_DISTANCE_SQ);
+        MAP_METHOD(vec_method_, vec_lerp, VEC_LERP);
+        MAP_METHOD(vec_method_, vec_abs, VEC_ABS);
+        MAP_METHOD(vec_method_, vec_with_x, VEC_WITH_X);
+        MAP_METHOD(vec_method_, vec_with_y, VEC_WITH_Y);
+        MAP_METHOD(vec_method_, vec_with_z, VEC_WITH_Z);
+        MAP_METHOD(vec_method_, vec_to_list, VEC_TO_LIST);
 #undef MAP_METHOD
     }
 

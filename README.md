@@ -265,6 +265,30 @@ See **[docs/README.md](docs/README.md)** for:
 - 📁 File & database handling
 - 🎨 Graphics & animation
 
+### Vectors
+
+`Vec2(x, y)` and `Vec3(x, y, z)` are value types: the floats live inside the
+16-byte `Value`, so a vector never allocates and the GC never sees it.
+
+```python
+p = Vec3(1, 2, 3)                      # Vec3() is the zero vector; ints become floats
+p = p + Vec3(0, 1, 0) * 0.5            # vec +- vec, vec * scalar, scalar * vec, vec / scalar, vec * vec (per component), -vec
+p == Vec3(1, 2.5, 3)                   # == and != compare components; < <= > >= are errors
+print(p.x, p.y, p.z)                   # fields; Vec2 has no .z
+p.x = 9                                # rewrites a local; p.y += 1 works too
+p.length(), p.length_sq(), p.normalized(), p.dot(q), p.cross(q), p.distance(q),
+p.distance_sq(q), p.lerp(q, t), p.abs(), p.with_x(f) / with_y / with_z, p.to_list()
+```
+
+Components are `float32`; scalars come back as Python floats. `Vec2.cross` is the
+2D scalar cross product, `Vec3.cross` the vector product, `normalized()` of a zero
+vector is zero. A vector is falsy only when all components are 0, can be a dict key
+or set member, prints as `Vec3(1.0, 2.0, 3.0)` and serialises with `json.stringify`
+as `[x, y, z]`. Value semantics: `w = v` copies, so a field write (`v.x = 1`) only
+reaches a local variable -- `self.pos.x = 1` or `g.x = 1` on a global write to a
+temporary copy and are lost until the compiler grows write-back; write
+`self.pos = self.pos.with_x(1)` instead. `len(v)`, `v[0]` and `for c in v` are not supported yet.
+
 ## Performance
 
 Zen is **fast and lightweight**:
@@ -661,7 +685,7 @@ expression, `a, *b = ...`, `**kwargs` parameters, keyword-only `*`, lambda
 defaults, `f(**d)`, `[*a]`, f-string `!r`, raw strings, `for/while ... else`.
 See bugs.md "Ronda 5" for the full list.
 
-### Bytecode format (`.zenbc`, version 2.8)
+### Bytecode format (`.zenbc`, version 2.9)
 
 ```
 Header:  ZENBC(5) | major(u16) | minor(u16) | flags(u32)
@@ -673,7 +697,7 @@ Functions: recursive tree of function bodies
 ## Builtin Modules
 
 ### Base (always available)
-`str`, `int`, `float`, `char`, `ord`, `type`, `isinstance`, `len`, `range`, `print`, `input`, `assert`, `error`, `format`, `enumerate`, `zip`, `map`, `filter`, `collect`, `mem_used`, `mem_info`, `clock`
+`str`, `int`, `float`, `Vec2`, `Vec3`, `char`, `ord`, `type`, `isinstance`, `len`, `range`, `print`, `input`, `assert`, `error`, `format`, `enumerate`, `zip`, `map`, `filter`, `collect`, `mem_used`, `mem_info`, `clock`
 
 ### `math`
 `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sqrt`, `cbrt`, `exp`, `log`, `log2`, `log10`, `ceil`, `floor`, `round`, `pow`, `abs`, `min`, `max`, `clamp`, `random`, `hypot`, `isnan`, `isinf` — plus constants `pi`, `e`, `tau`, `inf`, `nan`

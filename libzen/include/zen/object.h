@@ -635,6 +635,11 @@ namespace zen
             return v.as.integer != 0;
         case VAL_FLOAT:
             return v.as.number != 0.0;
+        case VAL_PTR:
+            return true;
+        case VAL_VEC2:
+        case VAL_VEC3:
+            return is_truthy(v);
         default:
             if (v.as.obj->type == OBJ_STRING)
                 return as_string(v)->length != 0;

@@ -124,6 +124,10 @@ namespace zen
             default:
                 return "object";
             }
+        case VAL_VEC2:
+            return "Vec2";
+        case VAL_VEC3:
+            return "Vec3";
         default:
             return "unknown";
         }
@@ -172,7 +176,57 @@ namespace zen
         if (is_instance(v)) return as_instance(v)->klass->name->chars;
         if (is_closure(v) || is_native(v)) return "function";
         if (is_class(v)) return "type";
+        if (is_vec2(v)) return "Vec2";
+        if (is_vec3(v)) return "Vec3";
         return "object";
+    }
+
+    /* Vec2/Vec3 arithmetic, shared by every opcode that can see a vector
+    ** operand. Returns 0 and fills *out, 1 for an unsupported operand pair
+    ** (the caller raises the error), 2 for division by zero.
+    **   vec +- vec (same kind)    vec * vec (component-wise, same kind)
+    **   vec * scalar, scalar * vec    vec / scalar
+    ** Only reached from the slow branch of the arithmetic opcodes. */
+    enum VecOp { VOP_ADD, VOP_SUB, VOP_MUL, VOP_DIV };
+    static int vec_arith(VecOp op, Value a, Value b, Value *out)
+    {
+        const bool av = is_vec(a), bv = is_vec(b);
+        if (av && bv)
+        {
+            if (a.type != b.type || op == VOP_DIV)
+                return 1;
+            float x, y, z;
+            switch (op)
+            {
+            case VOP_ADD: x = a.vx + b.vx; y = a.as.v.y + b.as.v.y; z = a.as.v.z + b.as.v.z; break;
+            case VOP_SUB: x = a.vx - b.vx; y = a.as.v.y - b.as.v.y; z = a.as.v.z - b.as.v.z; break;
+            default:      x = a.vx * b.vx; y = a.as.v.y * b.as.v.y; z = a.as.v.z * b.as.v.z; break;
+            }
+            *out = a.type == VAL_VEC3 ? val_vec3(x, y, z) : val_vec2(x, y);
+            return 0;
+        }
+        if (op == VOP_ADD || op == VOP_SUB)
+            return 1;
+        if (av && (b.type == VAL_INT || b.type == VAL_FLOAT || b.type == VAL_BOOL))
+        {
+            double d = to_number(b);
+            if (op == VOP_DIV && d == 0.0)
+                return 2;
+            float s = (float)d;
+            float x, y, z;
+            if (op == VOP_MUL) { x = a.vx * s; y = a.as.v.y * s; z = a.as.v.z * s; }
+            else               { x = a.vx / s; y = a.as.v.y / s; z = a.as.v.z / s; }
+            *out = a.type == VAL_VEC3 ? val_vec3(x, y, z) : val_vec2(x, y);
+            return 0;
+        }
+        if (bv && op == VOP_MUL && (a.type == VAL_INT || a.type == VAL_FLOAT || a.type == VAL_BOOL))
+        {
+            float s = (float)to_number(a);
+            float x = s * b.vx, y = s * b.as.v.y, z = s * b.as.v.z;
+            *out = b.type == VAL_VEC3 ? val_vec3(x, y, z) : val_vec2(x, y);
+            return 0;
+        }
+        return 1;
     }
 
 
@@ -218,6 +272,12 @@ namespace zen
         {
             char buf[40];
             int len = format_float_py(v.as.number, buf, sizeof buf);
+            zen_write(buf, (size_t)len);
+        }
+        else if (is_vec(v))
+        {
+            char buf[160];
+            int len = format_vec_py(v, buf, sizeof buf);
             zen_write(buf, (size_t)len);
         }
         else if (is_string(v))
@@ -318,6 +378,12 @@ namespace zen
         else if (is_float(v))
         {
             printf("%g", v.as.number);
+        }
+        else if (is_vec(v))
+        {
+            char vbuf[160];
+            format_vec_py(v, vbuf, sizeof vbuf);
+            printf("%s", vbuf);
         }
         else if (is_string(v))
         {
@@ -448,6 +514,10 @@ namespace zen
             return "float";
         case VAL_PTR:
             return "ptr";
+        case VAL_VEC2:
+            return "Vec2";
+        case VAL_VEC3:
+            return "Vec3";
         case VAL_OBJ:
             if (!v.as.obj)
                 return "obj(null)";
@@ -557,6 +627,8 @@ namespace zen
             len = int_to_cstr(v.as.integer, buf);
         else if (is_float(v))
             len = snprintf(buf, sizeof(buf), "%g", v.as.number);
+        else if (is_vec(v))
+            len = format_vec_py(v, buf, sizeof(buf));
         else
             len = snprintf(buf, sizeof(buf), "<object>");
 
@@ -799,6 +871,29 @@ namespace zen
             RT_ERROR("unsupported operand type(s) for " #op ": %s and %s",    \
                      zen_type_name_of(vb), zen_type_name_of(vc));             \
     } while (0)
+
+/* A vector operand reached the slow branch of an arithmetic opcode:
+** R[A] = vb <op> vc, or the error. */
+#define VEC_BINOP(VOP, OPSTR)                                                 \
+    do                                                                        \
+    {                                                                         \
+        Value vr_;                                                            \
+        int vst_ = vec_arith(VOP, vb, vc, &vr_);                              \
+        if (__builtin_expect(vst_ == 0, 1))                                   \
+            R[ZEN_A(i)] = vr_;                                                \
+        else if (vst_ == 2)                                                   \
+            RT_ERROR("division by zero");                                     \
+        else                                                                  \
+            RT_ERROR("unsupported operand type(s) for " OPSTR ": %s and %s",  \
+                     zen_type_name_of(vb), zen_type_name_of(vc));             \
+    } while (0)
+
+/* Ordering is not defined for vectors; the comparison opcodes' last
+** branch coerces with to_number, so refuse a vector before it gets there. */
+#define VEC_CMP_GUARD(OPSTR)                                                  \
+    if (__builtin_expect(is_vec(vb) || is_vec(vc), 0))                        \
+    RT_ERROR("unsupported operand type(s) for %s: %s and %s", OPSTR,          \
+             zen_type_name_of(vb), zen_type_name_of(vc))
 
         /* =================================================================
         **  DISPATCH SETUP
@@ -1075,7 +1170,7 @@ namespace zen
         {
             uint32_t i = *ip;
             Value vb = R[ZEN_B(i)], vc = R[ZEN_C(i)];
-            if (__builtin_expect(!is_obj(vb) && !is_obj(vc), 1))
+            if (__builtin_expect(is_numeric_type(vb) && is_numeric_type(vc), 1))
             {
                 NUM_BINOP(+);
             }
@@ -1256,6 +1351,11 @@ namespace zen
                     sa = vb.as.boolean ? "true" : "false";
                     la = vb.as.boolean ? 4 : 5;
                 }
+                else if (is_vec(vb))
+                {
+                    la = format_vec_py(vb, buf, sizeof(buf));
+                    sa = buf;
+                }
                 else
                 {
                     sa = "nil";
@@ -1282,6 +1382,11 @@ namespace zen
                     sb = vc.as.boolean ? "true" : "false";
                     lb = vc.as.boolean ? 4 : 5;
                 }
+                else if (is_vec(vc))
+                {
+                    lb = format_vec_py(vc, buf2, sizeof(buf2));
+                    sb = buf2;
+                }
                 else
                 {
                     sb = "nil";
@@ -1295,6 +1400,10 @@ namespace zen
                 result->obj.hash = hash_string(result->chars, la + lb);
                 R[ZEN_A(i)] = val_obj((Obj *)result);
             }
+            else if (is_vec(vb) || is_vec(vc))
+            {
+                VEC_BINOP(VOP_ADD, "+");
+            }
             else
             {
                 NUM_BINOP(+);
@@ -1305,7 +1414,7 @@ namespace zen
         {
             uint32_t i = *ip;
             Value vb = R[ZEN_B(i)], vc = R[ZEN_C(i)];
-            if (__builtin_expect(!is_obj(vb) && !is_obj(vc), 1))
+            if (__builtin_expect(is_numeric_type(vb) && is_numeric_type(vc), 1))
             {
                 NUM_BINOP(-);
             }
@@ -1332,6 +1441,10 @@ namespace zen
                     NUM_BINOP(-);
                 }
             }
+            else if (is_vec(vb) || is_vec(vc))
+            {
+                VEC_BINOP(VOP_SUB, "-");
+            }
             else
             {
                 NUM_BINOP(-);
@@ -1342,7 +1455,7 @@ namespace zen
         {
             uint32_t i = *ip;
             Value vb = R[ZEN_B(i)], vc = R[ZEN_C(i)];
-            if (__builtin_expect(!is_obj(vb) && !is_obj(vc), 1))
+            if (__builtin_expect(is_numeric_type(vb) && is_numeric_type(vc), 1))
             {
                 NUM_BINOP(*);
             }
@@ -1422,6 +1535,10 @@ namespace zen
                     NUM_BINOP(*);
                 }
             }
+            else if (is_vec(vb) || is_vec(vc))
+            {
+                VEC_BINOP(VOP_MUL, "*");
+            }
             else
             {
                 NUM_BINOP(*);
@@ -1432,7 +1549,7 @@ namespace zen
         {
             uint32_t i = *ip;
             Value vb = R[ZEN_B(i)], vc = R[ZEN_C(i)];
-            if (__builtin_expect(!is_obj(vb) && !is_obj(vc), 1))
+            if (__builtin_expect(is_numeric_type(vb) && is_numeric_type(vc), 1))
             {
                 double divisor = to_number(vc);
                 if (divisor == 0.0)
@@ -1463,6 +1580,10 @@ namespace zen
                     R[ZEN_A(i)] = val_float(to_number(vb) / divisor);
                 }
             }
+            else if (is_vec(vb) || is_vec(vc))
+            {
+                VEC_BINOP(VOP_DIV, "/");
+            }
             else
             {
                 double divisor = to_number(vc);
@@ -1478,7 +1599,7 @@ namespace zen
         {
             uint32_t i = *ip;
             Value vb = R[ZEN_B(i)], vc = R[ZEN_C(i)];
-            if (__builtin_expect(!is_obj(vb) && !is_obj(vc), 1))
+            if (__builtin_expect(is_numeric_type(vb) && is_numeric_type(vc), 1))
             {
                 if (vb.type == VAL_INT && vc.type == VAL_INT)
                 {
@@ -1510,6 +1631,9 @@ namespace zen
             }
             else
             {
+                if (is_vec(vb) || is_vec(vc))
+                    RT_ERROR("unsupported operand type(s) for //: %s and %s",
+                             zen_type_name_of(vb), zen_type_name_of(vc));
                 double a = to_number(vb), b = to_number(vc);
                 if (b == 0.0)
                 {
@@ -1523,7 +1647,7 @@ namespace zen
         {
             uint32_t i = *ip;
             Value vb = R[ZEN_B(i)], vc = R[ZEN_C(i)];
-            if (__builtin_expect(!is_obj(vb) && !is_obj(vc), 1))
+            if (__builtin_expect(is_numeric_type(vb) && is_numeric_type(vc), 1))
             {
                 if (vb.type == VAL_INT && vc.type == VAL_INT)
                 {
@@ -1621,6 +1745,9 @@ namespace zen
                     NEXT();
                 }
             }
+            if (__builtin_expect(is_vec(vb) || is_vec(vc), 0))
+                RT_ERROR("unsupported operand type(s) for **: %s and %s",
+                         zen_type_name_of(vb), zen_type_name_of(vc));
             R[ZEN_A(i)] = val_float(pow(to_number(vb), to_number(vc)));
             NEXT();
         }
@@ -1628,12 +1755,17 @@ namespace zen
         {
             uint32_t i = *ip;
             Value v = R[ZEN_B(i)];
-            if (__builtin_expect(!is_obj(v), 1))
+            if (__builtin_expect(is_numeric_type(v), 1))
             {
                 if (v.type == VAL_INT)
                     R[ZEN_A(i)] = val_int((int64_t)(-(uint64_t)v.as.integer));
                 else
                     R[ZEN_A(i)] = val_float(-to_number(v));
+            }
+            else if (is_vec(v))
+            {
+                R[ZEN_A(i)] = v.type == VAL_VEC3 ? val_vec3(-v.vx, -v.as.v.y, -v.as.v.z)
+                                                 : val_vec2(-v.vx, -v.as.v.y);
             }
             else if (is_instance(v))
             {
@@ -1761,6 +1893,9 @@ namespace zen
                 NEXT();
             }
             LOAD_STATE();
+            if (is_vec(vb) || is_vec(vc))
+                RT_ERROR("unsupported operand type(s) for /: %s and %s",
+                         zen_type_name_of(vb), zen_type_name_of(vc));
             double divisor = to_number(vc);
             if (divisor == 0.0)
             {
@@ -1785,6 +1920,9 @@ namespace zen
                 NEXT();
             }
             LOAD_STATE();
+            if (is_vec(vb) || is_vec(vc))
+                RT_ERROR("unsupported operand type(s) for %%: %s and %s",
+                         zen_type_name_of(vb), zen_type_name_of(vc));
             if (vb.type == VAL_INT && vc.type == VAL_INT)
             {
                 int64_t divisor = vc.as.integer;
@@ -2101,6 +2239,7 @@ namespace zen
                 else
                 {
                     LOAD_STATE();
+                    VEC_CMP_GUARD("<");
                     R[ZEN_A(i)] = val_bool(to_number(vb) < to_number(vc));
                 }
             }
@@ -2111,7 +2250,10 @@ namespace zen
             else if (vb.type == VAL_INT && vc.type == VAL_INT)
                 R[ZEN_A(i)] = val_bool(vb.as.integer < vc.as.integer);
             else
+            {
+                VEC_CMP_GUARD("<");
                 R[ZEN_A(i)] = val_bool(to_number(vb) < to_number(vc));
+            }
             NEXT();
         }
         CASE(OP_LE)
@@ -2132,6 +2274,7 @@ namespace zen
                 else
                 {
                     LOAD_STATE();
+                    VEC_CMP_GUARD("<=");
                     R[ZEN_A(i)] = val_bool(to_number(vb) <= to_number(vc));
                 }
             }
@@ -2142,7 +2285,10 @@ namespace zen
             else if (vb.type == VAL_INT && vc.type == VAL_INT)
                 R[ZEN_A(i)] = val_bool(vb.as.integer <= vc.as.integer);
             else
+            {
+                VEC_CMP_GUARD("<=");
                 R[ZEN_A(i)] = val_bool(to_number(vb) <= to_number(vc));
+            }
             NEXT();
         }
         CASE(OP_NOT)
@@ -2229,6 +2375,11 @@ namespace zen
                 case VAL_OBJ:
                     /* Objects: true only if same pointer (reference equality) */
                     is_identical = (vb.as.obj == vc.as.obj);
+                    break;
+                case VAL_VEC2:
+                case VAL_VEC3:
+                    /* Value types: identical when every component matches */
+                    is_identical = values_equal(vb, vc);
                     break;
                 default:
                     is_identical = false;
@@ -3553,6 +3704,18 @@ namespace zen
                 /* Field not found */
                 RT_ERROR("instance of '%s' has no field '%s'", klass->name->chars, name->chars);
             }
+            if (is_vec(receiver))
+            {
+                /* Vec2/Vec3 components: one-letter names x, y and (Vec3) z */
+                if (name->length == 1)
+                {
+                    char c = name->chars[0];
+                    if (c == 'x') { R[ZEN_A(i)] = val_float((double)receiver.vx); goto getfield_done; }
+                    if (c == 'y') { R[ZEN_A(i)] = val_float((double)receiver.as.v.y); goto getfield_done; }
+                    if (c == 'z' && receiver.type == VAL_VEC3) { R[ZEN_A(i)] = val_float((double)receiver.as.v.z); goto getfield_done; }
+                }
+                RT_ERROR("%s has no field '%s'", zen_type_name_of(receiver), name->chars);
+            }
             if (is_map(receiver))
             {
                 /* Module / dict field access: R[A] = map[name] */
@@ -3729,6 +3892,28 @@ namespace zen
                     inst->num_fields = new_n;
                     goto setfield_done;
                 }
+            }
+            if (is_vec(receiver))
+            {
+                /* v.x = f rewrites the vector held in the receiver register
+                ** (a value type: there is no shared object to mutate). */
+                if (name->length == 1)
+                {
+                    char c = name->chars[0];
+                    if (c == 'x' || c == 'y' || (c == 'z' && receiver.type == VAL_VEC3))
+                    {
+                        if (!is_numeric_like(val))
+                            RT_ERROR("%s.%s must be a number, got %s", zen_type_name_of(receiver),
+                                     name->chars, zen_type_name_of(val));
+                        float f = (float)to_number(val);
+                        Value &dst = R[ZEN_A(i)];
+                        if (c == 'x') dst.vx = f;
+                        else if (c == 'y') dst.as.v.y = f;
+                        else dst.as.v.z = f;
+                        goto setfield_done;
+                    }
+                }
+                RT_ERROR("%s has no field '%s'", zen_type_name_of(receiver), name->chars);
             }
             RT_ERROR("cannot set field '%s' on this type", name->chars);
         setfield_done:
@@ -4475,6 +4660,10 @@ namespace zen
             else if (is_buffer(receiver))
             {
 #include "invoke_buffer.inl"
+            }
+            else if (is_vec(receiver))
+            {
+#include "invoke_vec.inl"
             }
             else
             {
@@ -5542,6 +5731,7 @@ namespace zen
                 else
                 {
                     LOAD_STATE();
+                    VEC_CMP_GUARD("<");
                     less = to_number(vb) < to_number(vc);
                 }
             }
@@ -5552,7 +5742,10 @@ namespace zen
             else if (vb.type == VAL_INT && vc.type == VAL_INT)
                 less = vb.as.integer < vc.as.integer;
             else
+            {
+                VEC_CMP_GUARD("<");
                 less = to_number(vb) < to_number(vc);
+            }
             if (!at_jump_offset)
                 ++ip; /* normal path: advance to the sBx word */
             if (!less)
@@ -5623,6 +5816,7 @@ namespace zen
                 else
                 {
                     LOAD_STATE();
+                    VEC_CMP_GUARD("<=");
                     le = to_number(vb) <= to_number(vc);
                 }
             }
@@ -5631,7 +5825,10 @@ namespace zen
             else if (vb.type == VAL_INT && vc.type == VAL_INT)
                 le = vb.as.integer <= vc.as.integer;
             else
+            {
+                VEC_CMP_GUARD("<=");
                 le = to_number(vb) <= to_number(vc);
+            }
             if (!at_jump_offset)
                 ++ip;
             if (!le)
@@ -5680,7 +5877,10 @@ namespace zen
                     }                                                                            \
                 }                                                                                \
                 else                                                                             \
+                {                                                                                \
+                    VEC_CMP_GUARD((LE) ? "<=" : "<");                                            \
                     hold = (LE) ? to_number(vb) <= to_number(vc) : to_number(vb) < to_number(vc); \
+                }                                                                                \
             }                                                                                    \
             if (!at_jump_offset)                                                                 \
                 ++ip;                                                                            \
@@ -5866,7 +6066,7 @@ namespace zen
             ++ip;
             uint32_t i2 = *ip;
             Value vb = R[ZEN_B(i2)], vc = R[ZEN_C(i2)];
-            if (__builtin_expect(!is_obj(vb) && !is_obj(vc), 1))
+            if (__builtin_expect(is_numeric_type(vb) && is_numeric_type(vc), 1))
             {
                 if (vb.type == VAL_INT && vc.type == VAL_INT)
                     R[ZEN_A(i2)] = val_int((int64_t)((uint64_t)vb.as.integer * (uint64_t)vc.as.integer));
@@ -5891,9 +6091,11 @@ namespace zen
             uint32_t i2 = *ip;
             Value vb = R[ZEN_B(i2)], vc = R[ZEN_C(i2)];
             if (vb.type == VAL_INT && vc.type == VAL_INT)
-                R[ZEN_A(i2)] = val_int(vb.as.integer - vc.as.integer);
-            else
+                R[ZEN_A(i2)] = val_int((int64_t)((uint64_t)vb.as.integer - (uint64_t)vc.as.integer));
+            else if (__builtin_expect(is_numeric_type(vb) && is_numeric_type(vc), 1))
                 R[ZEN_A(i2)] = val_float(to_number(vb) - to_number(vc));
+            else
+                DISPATCH(); /* vectors, strings, overloaded __sub__: the plain SUB word */
             NEXT();
         }
 
@@ -5912,7 +6114,7 @@ namespace zen
             Value x = inst->fields[ZEN_C(load_x)];
             Value v = inst->fields[ZEN_C(load_v)];
             Value dt = R[ZEN_C(mul)];
-            if (__builtin_expect(!is_obj(x) && !is_obj(v) && !is_obj(dt), 1))
+            if (__builtin_expect(is_numeric_type(x) && is_numeric_type(v) && is_numeric_type(dt), 1))
             {
                 Value product;
                 if (v.type == VAL_INT && dt.type == VAL_INT)

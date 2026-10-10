@@ -32,6 +32,8 @@ namespace
         BC_CLASS = 7,
         BC_STRUCT_DEF = 8, /* record Name { a, b }: name + field names (2.8) */
         BC_ENUM_MAP = 9,   /* enum Name { A, B = 3 }: module map of scalars (2.8) */
+        BC_VEC2 = 10,      /* Vec2 value: 2 x f32 little-endian (2.9) */
+        BC_VEC3 = 11,      /* Vec3 value: 3 x f32 little-endian (2.9) */
     };
 
     static void set_error(char *err, int err_len, const char *fmt, ...)
@@ -450,6 +452,21 @@ namespace
         case VAL_PTR:
             set_error(err, err_len, "cannot dump raw pointer constant");
             return false;
+        case VAL_VEC2:
+        {
+            uint32_t b[2];
+            memcpy(&b[0], &value.vx, 4);
+            memcpy(&b[1], &value.as.v.y, 4);
+            return w.write_u8(BC_VEC2) && w.write_u32(b[0]) && w.write_u32(b[1]);
+        }
+        case VAL_VEC3:
+        {
+            uint32_t b[3];
+            memcpy(&b[0], &value.vx, 4);
+            memcpy(&b[1], &value.as.v.y, 4);
+            memcpy(&b[2], &value.as.v.z, 4);
+            return w.write_u8(BC_VEC3) && w.write_u32(b[0]) && w.write_u32(b[1]) && w.write_u32(b[2]);
+        }
         }
 
         set_error(err, err_len, "unsupported constant value type %d", (int)value.type);
@@ -837,6 +854,26 @@ namespace
             if (!r.read_f64(&value))
                 return false;
             *out = val_float(value);
+            return true;
+        }
+        case BC_VEC2:
+        case BC_VEC3:
+        {
+            if (minor < 9)
+            {
+                set_error(err, err_len, "vector constant in bytecode older than 2.9");
+                return false;
+            }
+            const int dim = tag == BC_VEC3 ? 3 : 2;
+            float c[3] = {0.0f, 0.0f, 0.0f};
+            for (int k = 0; k < dim; k++)
+            {
+                uint32_t bits = 0;
+                if (!r.read_u32(&bits))
+                    return false;
+                memcpy(&c[k], &bits, 4);
+            }
+            *out = dim == 3 ? val_vec3(c[0], c[1], c[2]) : val_vec2(c[0], c[1]);
             return true;
         }
         case BC_STRING:

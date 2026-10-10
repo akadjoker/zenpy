@@ -397,6 +397,10 @@ namespace zen
 
             int buf_len, buf_fill, buf_byte_len, buf_tolist, buf_copy,
                 buf_slice, buf_type_name;
+
+            int vec_length, vec_length_sq, vec_normalized, vec_dot, vec_cross,
+                vec_distance, vec_distance_sq, vec_lerp, vec_abs, vec_with_x,
+                vec_with_y, vec_with_z, vec_to_list;
         };
         BuiltinSelectors bsel_;
         void init_builtin_selectors();
@@ -446,6 +450,9 @@ namespace zen
             SET_COPY };
         enum BufMethod : uint8_t { BUF_NONE = 0, BUF_LEN, BUF_FILL,
             BUF_BYTE_LEN, BUF_TOLIST, BUF_COPY, BUF_SLICE, BUF_TYPE_NAME };
+        enum VecMethod : uint8_t { VEC_NONE = 0, VEC_LENGTH, VEC_LENGTH_SQ,
+            VEC_NORMALIZED, VEC_DOT, VEC_CROSS, VEC_DISTANCE, VEC_DISTANCE_SQ,
+            VEC_LERP, VEC_ABS, VEC_WITH_X, VEC_WITH_Y, VEC_WITH_Z, VEC_TO_LIST };
 
         /* Sized to the builtin selectors, which are interned first and so
         ** occupy slots [0, num_builtin_selectors_). A sel_slot at or past
@@ -457,6 +464,7 @@ namespace zen
         uint8_t *map_method_ = nullptr;
         uint8_t *set_method_ = nullptr;
         uint8_t *buf_method_ = nullptr;
+        uint8_t *vec_method_ = nullptr;
         void init_builtin_method_tables();
 
         /* One array read, bounds-checked. Returns *_NONE for anything that is
@@ -471,6 +479,8 @@ namespace zen
         { return (unsigned)sel < (unsigned)num_builtin_selectors_ ? set_method_[sel] : 0; }
         inline uint8_t buf_method(int sel) const
         { return (unsigned)sel < (unsigned)num_builtin_selectors_ ? buf_method_[sel] : 0; }
+        inline uint8_t vec_method(int sel) const
+        { return (unsigned)sel < (unsigned)num_builtin_selectors_ ? vec_method_[sel] : 0; }
 
     public:
         bool had_error() const { return had_error_; }

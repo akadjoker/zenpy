@@ -287,6 +287,38 @@ namespace zen
             sb_puts(sb, buf, n);
             return true;
         }
+        case VAL_VEC2:
+        case VAL_VEC3:
+        {
+            /* A vector is written as the array of its components; parsing
+            ** never produces one. Shortest digits that read back as the
+            ** same float (0.1f -> 0.1, not 0.10000000149011612). */
+            const float c[3] = {val.vx, val.as.v.y, val.as.v.z};
+            const int dim = val.type == VAL_VEC3 ? 3 : 2;
+            for (int k = 0; k < dim; k++)
+                if (!zen_isfinite((double)c[k]))
+                {
+                    snprintf(ctx->error, sizeof(ctx->error), "cannot serialize NaN or Infinity");
+                    return false;
+                }
+            sb_putc(sb, '[');
+            for (int k = 0; k < dim; k++)
+            {
+                if (k)
+                    sb_puts(sb, ctx->pretty ? ", " : ",", ctx->pretty ? 2 : 1);
+                char buf[32];
+                int n = 0;
+                for (int prec = 1; prec <= 9; prec++)
+                {
+                    n = snprintf(buf, sizeof(buf), "%.*g", prec, (double)c[k]);
+                    if (strtof(buf, nullptr) == c[k])
+                        break;
+                }
+                sb_puts(sb, buf, n);
+            }
+            sb_putc(sb, ']');
+            return true;
+        }
         case VAL_OBJ:
         {
             Obj *obj = val.as.obj;

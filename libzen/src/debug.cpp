@@ -253,6 +253,14 @@ namespace zen
         case VAL_PTR:
             printf("<ptr %p>", val.as.pointer);
             break;
+        case VAL_VEC2:
+        case VAL_VEC3:
+        {
+            char vbuf[160];
+            format_vec_py(val, vbuf, sizeof vbuf);
+            printf("%s", vbuf);
+            break;
+        }
         }
     }
 

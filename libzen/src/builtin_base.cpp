@@ -503,6 +503,12 @@ namespace zen
         case VAL_FLOAT:
             name = "float";
             break;
+        case VAL_VEC2:
+            name = "Vec2";
+            break;
+        case VAL_VEC3:
+            name = "Vec3";
+            break;
         case VAL_OBJ:
         {
             switch (v.as.obj->type)
@@ -664,6 +670,8 @@ namespace zen
         case VAL_BOOL:  name = "bool"; break;
         case VAL_INT:   name = "int"; break;
         case VAL_FLOAT: name = "float"; break;
+        case VAL_VEC2:  name = "Vec2"; break;
+        case VAL_VEC3:  name = "Vec3"; break;
         case VAL_OBJ:
             switch (v.as.obj->type)
             {
@@ -714,6 +722,8 @@ namespace zen
             if (!strcmp(n, "dict")) return is_map(obj);
             if (!strcmp(n, "set")) return is_set(obj);
             if (!strcmp(n, "object")) return 1;
+            if (!strcmp(n, "Vec2")) return is_vec2(obj);
+            if (!strcmp(n, "Vec3")) return is_vec3(obj);
         }
         return -1;
     }
@@ -1385,6 +1395,7 @@ namespace zen
         else if (is_bool(v)) out += v.as.boolean ? "True" : "False";
         else if (is_int(v)) { snprintf(buf, sizeof buf, "%lld", (long long)v.as.integer); out += buf; }
         else if (is_float(v)) { format_float_py(v.as.number, buf, sizeof buf); out += buf; }
+        else if (is_vec(v)) { format_vec_py(v, buf, sizeof buf); out += buf; }
         else if (is_string(v))
         {
             ObjString *str = as_string(v);
@@ -1505,6 +1516,7 @@ namespace zen
     static int nat_round(VM *vm, Value *args, int nargs)
     {
         if (nargs < 1) { vm->runtime_error("round() takes at least one argument"); return -1; }
+        if (is_vec(args[0])) { vm->runtime_error("round(): bad operand type: %s", args[0].type == VAL_VEC3 ? "Vec3" : "Vec2"); return -1; }
         double x = to_number(args[0]);
         if (nargs >= 2 && !is_nil(args[1]))
         {
@@ -1696,6 +1708,7 @@ namespace zen
     static int nat_divmod(VM *vm, Value *args, int nargs)
     {
         if (nargs < 2) { vm->runtime_error("divmod() takes two arguments"); return -1; }
+        if (is_vec(args[0]) || is_vec(args[1])) { vm->runtime_error("divmod(): bad operand type"); return -1; }
         Value a = args[0], b = args[1];
         ct::Vector<Value> pair;
         if (ZEN_INTLIKE_V(a) && ZEN_INTLIKE_V(b))
@@ -1744,6 +1757,7 @@ namespace zen
     static int nat_pow(VM *vm, Value *args, int nargs)
     {
         if (nargs < 2) { vm->runtime_error("pow() takes two or three arguments"); return -1; }
+        if (is_vec(args[0]) || is_vec(args[1])) { vm->runtime_error("pow(): bad operand type"); return -1; }
         if (nargs >= 3 && ZEN_INTLIKE_V(args[0]) && ZEN_INTLIKE_V(args[1]) && ZEN_INTLIKE_V(args[2]))
         {
             int64_t b = to_integer(args[0]), e = to_integer(args[1]), m = to_integer(args[2]);
@@ -1774,6 +1788,13 @@ namespace zen
     /* values_compare() plus __lt__ on instances (sorted(), min(), max(), list.sort()). */
     int zen_compare_vm(VM *vm, Value a, Value b)
     {
+        if (is_vec(a) || is_vec(b))
+        {
+            vm->runtime_error("ordering is not defined for Vec2/Vec3 (cannot compare %s and %s)",
+                              is_vec(a) ? (a.type == VAL_VEC3 ? "Vec3" : "Vec2") : "a non-vector",
+                              is_vec(b) ? (b.type == VAL_VEC3 ? "Vec3" : "Vec2") : "a non-vector");
+            return 0;
+        }
         if (is_instance(a) || is_instance(b))
         {
             Value inst = is_instance(a) ? a : b;
@@ -1821,7 +1842,35 @@ namespace zen
         return found;
     }
 
+    /* Vec2(x, y) / Vec3(x, y, z): value-type vectors. No arguments is the
+    ** zero vector; otherwise exactly 2 (3) numbers, ints converted to float. */
+    static int vec_ctor(VM *vm, Value *args, int nargs, int dim)
+    {
+        const char *nm = dim == 3 ? "Vec3" : "Vec2";
+        if (nargs != 0 && nargs != dim)
+        {
+            vm->runtime_error("%s() takes 0 or %d arguments, got %d", nm, dim, nargs);
+            return -1;
+        }
+        float c[3] = {0.0f, 0.0f, 0.0f};
+        for (int k = 0; k < nargs; k++)
+        {
+            if (!(is_int(args[k]) || is_float(args[k])))
+            {
+                vm->runtime_error("%s(): argument %d must be a number", nm, k + 1);
+                return -1;
+            }
+            c[k] = (float)to_number(args[k]);
+        }
+        args[0] = dim == 3 ? val_vec3(c[0], c[1], c[2]) : val_vec2(c[0], c[1]);
+        return 1;
+    }
+    static int nat_Vec2(VM *vm, Value *args, int nargs) { return vec_ctor(vm, args, nargs, 2); }
+    static int nat_Vec3(VM *vm, Value *args, int nargs) { return vec_ctor(vm, args, nargs, 3); }
+
     static const NativeReg base_functions[] = {
+        {"Vec2", nat_Vec2, -1},
+        {"Vec3", nat_Vec3, -1},
         {"str", nat_str, 1},
         {"repr", nat_repr, 1},
         {"abs", nat_abs, 1},

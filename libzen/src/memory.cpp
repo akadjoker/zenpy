@@ -87,8 +87,10 @@ namespace zen
         gc->gray_capacity = 0;
         gc->bytes_allocated = 0;
         gc->collections = 0;
-        gc->next_gc = kGCInitThreshold;
-        gc->pause_saved_next_gc = kGCInitThreshold;
+        gc->min_threshold = kGCDefaultMinThreshold;
+        gc->grow_factor = kGCDefaultGrowFactor;
+        gc->next_gc = gc->min_threshold;
+        gc->pause_saved_next_gc = gc->min_threshold;
         gc->pause_depth = 0;
         gc->vm = nullptr;
         gc->extra_mark = nullptr;
@@ -2004,10 +2006,6 @@ namespace zen
         }
     }
 
-    /* GC constants */
-    static const size_t kGCMinThreshold = 1024 * 64;         /* 64 KB */
-    //static const size_t kGCMaxThreshold = 1024 * 1024 * 256; /* 256 MB */
-
     /* gc_sweep_all — free ALL objects unconditionally (used in VM destructor) */
     void gc_sweep_all(GC *gc)
     {
@@ -2088,11 +2086,9 @@ namespace zen
         gc->first_old = gc->objects; /* everything left is now "old" */
 
         /* Adjust next threshold */
-        gc->next_gc = (size_t)(gc->bytes_allocated * kGCGrowFactor);
-        if (gc->next_gc < kGCMinThreshold)
-            gc->next_gc = kGCMinThreshold;
-        // if (gc->next_gc > kGCMaxThreshold)
-        //     gc->next_gc = kGCMaxThreshold;
+        gc->next_gc = (size_t)((double)gc->bytes_allocated * (double)gc->grow_factor);
+        if (gc->next_gc < gc->min_threshold)
+            gc->next_gc = gc->min_threshold;
       while (gc->next_gc <= gc->bytes_allocated)
             gc->next_gc *= 2;
 #ifdef ZEN_DEBUG_GC

@@ -46,8 +46,13 @@ namespace zen
     ** external code that referenced it still compiles. New code should use
     ** kMaxGlobalsHard for the ceiling, kInitGlobalCapacity for sizing. */
     constexpr int MAX_GLOBALS = kInitGlobalCapacity;
-    constexpr size_t kGCInitThreshold = 1024 * 256; /* first GC at 256 KB */
-    constexpr float kGCGrowFactor = 2.0f;
+    /* GC tuning defaults (runtime-configurable: VM::set_gc_tuning, gc_tune()).
+    ** The first collection runs at the minimum threshold; after a cycle the
+    ** next one is scheduled at max(live_bytes * grow_factor, min_threshold).
+    ** kGCFloorThreshold is the lowest minimum the setter accepts. */
+    constexpr size_t kGCDefaultMinThreshold = 8 * 1024 * 1024; /* 8 MB */
+    constexpr float kGCDefaultGrowFactor = 2.0f;               /* Lua pause 200% */
+    constexpr size_t kGCFloorThreshold = 64 * 1024;            /* 64 KB */
 
     /* Forward declarations */
     class VM;

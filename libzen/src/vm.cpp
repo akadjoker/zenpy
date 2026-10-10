@@ -1412,6 +1412,35 @@ namespace zen
         gc_collect(this);
     }
 
+    void VM::set_gc_tuning(size_t min_threshold_bytes, float grow_factor)
+    {
+        if (min_threshold_bytes < kGCFloorThreshold)
+            min_threshold_bytes = kGCFloorThreshold;
+        /* also catches NaN */
+        if (!(grow_factor >= 1.0f))
+            grow_factor = 1.0f;
+        if (grow_factor > 1024.0f)
+            grow_factor = 1024.0f;
+
+        size_t old_min = gc_.min_threshold;
+        gc_.min_threshold = min_threshold_bytes;
+        gc_.grow_factor = grow_factor;
+
+        /* The pending threshold lives in next_gc, or in the saved slot while
+        ** the collector is paused (next_gc is then the "never" sentinel). */
+        size_t &pending = gc_.pause_depth > 0 ? gc_.pause_saved_next_gc : gc_.next_gc;
+        if (min_threshold_bytes > old_min && pending < min_threshold_bytes)
+            pending = min_threshold_bytes;
+    }
+
+    void VM::gc_tuning(size_t *min_out, float *factor_out) const
+    {
+        if (min_out)
+            *min_out = gc_.min_threshold;
+        if (factor_out)
+            *factor_out = gc_.grow_factor;
+    }
+
     int VM::ref(Value v)
     {
         HostRefs &r = *host_refs_;

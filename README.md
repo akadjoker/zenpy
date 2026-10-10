@@ -546,6 +546,10 @@ resets the top when the native returns, so there is no cleanup. The flag applies
 to script-made calls — C++-side `invoke()` keeps the pause, since its argument
 window is a C array the GC never sees.
 
+The collector's pacing is tunable at run time: `vm.set_gc_tuning(min_bytes, factor)`
+from C++ (defaults 8 MB / 2.0), `gc_tune(min_bytes, factor)` and `gc_stats()` from
+scripts; see `docs/internals/gc-and-roots.md`.
+
 ### Plugins
 
 Shared libraries exporting `zen_open_<name>()` are loaded automatically on `import`:

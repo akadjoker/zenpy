@@ -275,6 +275,18 @@ namespace zen
         ** (with a runtime error raised) if the fiber stack is full. */
         Value *root(Value v);
         void collect();
+
+        /* --- Collector tuning ---
+        ** min_threshold_bytes: the heap size below which no collection runs
+        ** (the first cycle fires there). grow_factor: after a cycle the next
+        ** one is scheduled at live_bytes * grow_factor (never below the
+        ** minimum). Out-of-range values are clamped, not rejected: the
+        ** minimum to >= 64 KB, the factor to >= 1.0. Raising the minimum
+        ** above the current heap size moves the pending threshold up at
+        ** once; while the GC is paused the saved threshold is updated. */
+        void set_gc_tuning(size_t min_threshold_bytes, float grow_factor);
+        void gc_tuning(size_t *min_out, float *factor_out) const;
+
         void gc_mark_roots(); /* mark all VM roots for GC */
 
         /* --- Host references: GC roots owned by C++ ---

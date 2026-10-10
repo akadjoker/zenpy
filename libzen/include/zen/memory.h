@@ -43,6 +43,8 @@ namespace zen
         size_t next_gc; /* threshold para próximo ciclo */
         size_t pause_saved_next_gc;
         int pause_depth;
+        size_t min_threshold; /* smallest heap that triggers a collection */
+        float grow_factor;    /* next_gc = live bytes * grow_factor (>= 1.0) */
 
         /* Tri-color epoch flip: the numeric values meaning "white" and
         ** "black" swap after every collection, so all survivors become

@@ -1094,6 +1094,55 @@ namespace zen
         return 3;
     }
 
+    /* =========================================================
+    ** gc_tune(min_bytes, factor) → nil
+    ** Out-of-range values are clamped (min >= 64 KB, factor >= 1.0).
+    ** ========================================================= */
+    static int nat_gc_tune(VM *vm, Value *args, int nargs)
+    {
+        (void)nargs;
+        if (!(is_int(args[0]) || is_float(args[0])) || !(is_int(args[1]) || is_float(args[1])))
+        {
+            vm->runtime_error("gc_tune(min_bytes, factor) expects two numbers");
+            return -1;
+        }
+        double mn = is_int(args[0]) ? (double)args[0].as.integer : args[0].as.number;
+        double f = is_int(args[1]) ? (double)args[1].as.integer : args[1].as.number;
+        size_t min_bytes = mn <= 0 ? 0 : (mn >= 1e15 ? (size_t)1e15 : (size_t)mn);
+        vm->set_gc_tuning(min_bytes, (float)f);
+        return 0;
+    }
+
+    /* =========================================================
+    ** gc_stats() → map { bytes, next_gc, objects, collections,
+    **                    min_threshold, grow_factor }
+    ** next_gc is the pending threshold (the saved one while paused, which is
+    ** always the case inside a native call).
+    ** ========================================================= */
+    static int nat_gc_stats(VM *vm, Value *args, int nargs)
+    {
+        (void)nargs;
+        GC *gc = &vm->get_gc();
+        int64_t obj_count = 0;
+        for (Obj *o = gc->objects; o != nullptr; o = o->gc_next)
+            obj_count++;
+
+        ObjMap *m = new_map(gc);
+        args[0] = val_obj((Obj *)m); /* rooted in the args window */
+        size_t pending = gc->pause_depth > 0 ? gc->pause_saved_next_gc : gc->next_gc;
+        struct { const char *k; Value v; } rows[] = {
+            {"bytes", val_int((int64_t)gc->bytes_allocated)},
+            {"next_gc", val_int((int64_t)pending)},
+            {"objects", val_int(obj_count)},
+            {"collections", val_int((int64_t)gc->collections)},
+            {"min_threshold", val_int((int64_t)gc->min_threshold)},
+            {"grow_factor", val_float((double)gc->grow_factor)},
+        };
+        for (auto &r : rows)
+            map_set(gc, m, val_obj((Obj *)vm->make_string(r.k)), r.v);
+        return 1;
+    }
+
     /* clock() → float seconds since process start (monotonic) */
     static int nat_clock(VM *vm, Value *args, int nargs)
     {
@@ -1936,6 +1985,8 @@ namespace zen
         {"gc_resume", nat_gc_resume, 0},
         {"mem_used", nat_mem_used, 0},
         {"mem_info", nat_mem_info, 0},
+        {"gc_tune", nat_gc_tune, 2},
+        {"gc_stats", nat_gc_stats, 0},
         {"clock",    nat_clock,    0},
         {"enumerate", nat_enumerate, 1},
         {"zip",      nat_zip,      -1},

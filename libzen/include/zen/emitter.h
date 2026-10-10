@@ -79,7 +79,21 @@ namespace zen
 
         /* --- Accessors --- */
         int current_offset() const { return func_->code_count; }
-        void shrink_to(int offset) { if (offset < func_->code_count) func_->code_count = offset; }
+        void shrink_to(int offset)
+        {
+            if (offset < func_->code_count)
+                func_->code_count = offset;
+            /* A label past the new end no longer exists; keep the join
+            ** conservative (it now sits at the end) rather than forget it. */
+            if (last_label_ > offset)
+                last_label_ = offset;
+        }
+        /* Highest offset any jump patched so far lands on (-1: none). If it
+        ** equals current_offset(), control can reach the next instruction
+        ** from somewhere other than the one just emitted -- the value that
+        ** instruction produced is not the only way into the following code
+        ** (ternary / and / or / ?. / ?? joins). */
+        int last_label() const { return last_label_; }
         int last_line() const { return last_line_; }
         Instruction instruction_at(int offset) const { return func_->code[offset]; }
         int line_at(int offset) const { return func_->lines[offset]; }
@@ -111,6 +125,7 @@ namespace zen
         void clear_escape_error() { escape_error_[0] = '\0'; }
 
     private:
+        void note_label(int target) { if (target > last_label_) last_label_ = target; }
         void grow_code();
         void grow_constants();
 
@@ -119,6 +134,7 @@ namespace zen
         int last_line_;
         int last_op_start_;
         int jump_count_;
+        int last_label_ = -1;
         char escape_error_[128] = {};
     };
 

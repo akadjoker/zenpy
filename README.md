@@ -284,10 +284,18 @@ Components are `float32`; scalars come back as Python floats. `Vec2.cross` is th
 2D scalar cross product, `Vec3.cross` the vector product, `normalized()` of a zero
 vector is zero. A vector is falsy only when all components are 0, can be a dict key
 or set member, prints as `Vec3(1.0, 2.0, 3.0)` and serialises with `json.stringify`
-as `[x, y, z]`. Value semantics: `w = v` copies, so a field write (`v.x = 1`) only
-reaches a local variable -- `self.pos.x = 1` or `g.x = 1` on a global write to a
-temporary copy and are lost until the compiler grows write-back; write
-`self.pos = self.pos.with_x(1)` instead. `len(v)`, `v[0]` and `for c in v` are not supported yet.
+as `[x, y, z]`. Value semantics: `w = v` copies. A field write goes through to
+whatever the vector was read from: a local (`v.x = 1`), a field (`self.pos.x += dx`,
+`a.b.pos.y = 2`), a global (`g.x = 1`), a list or dict element (`pts[i].x += 1`,
+`d["a"].y = 5`) or a captured variable -- the compiler stores the modified copy
+back after the write. What is *not* written back is a vector a call returns
+(`get_body().pos.x = 1` changes a temporary, as in any value-type language) and
+a receiver whose index register was already recycled. `len(v)`, `v[0]` and
+`for c in v` are not supported yet.
+
+A callable stored in a field is called like a method: `self.cb(x)` / `obj.cb(x)`
+call the lambda, function, native or bound method the field holds (no implicit
+`self`); a method of that name still wins, and a non-callable field is an error.
 
 ## Performance
 
@@ -461,8 +469,10 @@ vm.def_global("hero", bind::wrap<Body>(vm, &host_hero));   // host-owned, never 
 
 - **Conversions.** `bool`, every integer width (out-of-range is an error, not a
   truncation), enums, `float`/`double` (ints promote), `const char*` (valid only
-  during the call, copy it to keep it), `zen::Value`, and `T*`/`T&` for bound
-  classes. A leading `VM*` is injected and is not a script argument.
+  during the call, copy it to keep it), `zen::Value`, `Vec2f`/`Vec3f` (also
+  `const &`; script `Vec2`/`Vec3` values, a wrong type is `must be Vec3`), and
+  `T*`/`T&` for bound classes. A leading `VM*` is injected and is not a script
+  argument.
 - **Property and wrap.** `property<&T::x>` registers a getter `x()` and a setter
   `set_x(v)` (`getter`/`setter` do one each). `wrap<T>(vm, ptr)` makes a script
   instance over memory the host owns (`nullptr` becomes `None`); a bound

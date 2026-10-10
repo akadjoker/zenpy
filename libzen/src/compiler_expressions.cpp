@@ -1638,8 +1638,110 @@ namespace zen
     ** Dot access: obj.field or obj.method(args)
     ** ========================================================= */
 
+    /* Looks at the instruction that produced `obj` (always the last one
+    ** emitted when a postfix operator follows) and records where it was read
+    ** from. Nothing is emitted here. NONE for anything the inverse store
+    ** can't be proved safe for: locals (their own register is the home),
+    ** call results and every other expression (a value returned by a call is
+    ** a copy), a join point right at the end (`(a if c else b.p).x = 1` --
+    ** two ways to have produced `obj`), and a parent register the read
+    ** clobbered or the allocator already gave back. */
+    void Compiler::capture_receiver_origin(int obj, ReceiverOrigin &o) const
+    {
+        o.kind = ReceiverOrigin::NONE;
+        const Emitter &e = state_->emitter;
+        const int end = e.current_offset();
+        const int start = e.last_op_start();
+        if (start < 0 || start >= end || is_local_reg(obj) || e.last_label() >= end)
+            return;
+        auto parent_ok = [&](int r) { return r != obj && (is_local_reg(r) || r < state_->next_reg); };
+        Instruction ins = e.instruction_at(start);
+        if (start == end - 1)
+        {
+            if ((int)ZEN_A(ins) != obj)
+                return;
+            switch (ZEN_OP(ins))
+            {
+            case OP_GETFIELD:
+            case OP_GETFIELD_IDX:
+                if (!parent_ok(ZEN_B(ins)))
+                    return;
+                o.kind = ZEN_OP(ins) == OP_GETFIELD ? ReceiverOrigin::FIELD : ReceiverOrigin::FIELD_IDX;
+                o.parent = ZEN_B(ins);
+                o.c = ZEN_C(ins);
+                break;
+            case OP_GETINDEX:
+                /* The index register must still hold the index: a local, or
+                ** a temporary that is still allocated. */
+                if (!parent_ok(ZEN_B(ins)) || !parent_ok(ZEN_C(ins)))
+                    return;
+                o.kind = ReceiverOrigin::INDEX;
+                o.parent = ZEN_B(ins);
+                o.c = ZEN_C(ins);
+                break;
+            case OP_GETGLOBAL:
+                o.kind = ReceiverOrigin::GLOBAL;
+                o.bx = ZEN_BX(ins);
+                break;
+            case OP_GETUPVAL:
+                o.kind = ReceiverOrigin::UPVAL;
+                o.bx = ZEN_B(ins);
+                break;
+            default:
+                break;
+            }
+        }
+        else if (start == end - 2 && ZEN_OP(ins) == OP_GETFIELD_IDXC)
+        {
+            Instruction w2 = e.instruction_at(end - 1);
+            if ((int)ZEN_A(ins) != obj || ZEN_OP(w2) != OP_GETFIELD ||
+                ZEN_A(w2) != ZEN_A(ins) || ZEN_B(w2) != ZEN_B(ins) || !parent_ok(ZEN_B(ins)))
+                return;
+            o.kind = ReceiverOrigin::FIELD_IDXC;
+            o.parent = ZEN_B(ins);
+            o.c = ZEN_C(ins);
+            o.name_ki = ZEN_C(w2);
+        }
+    }
+
+    /* The inverse store of the read captured above: parent.field = obj,
+    ** G = obj, upvalue = obj, parent[idx] = obj. For a heap object this writes the very
+    ** reference back (a no-op); for a Vec it stores the modified copy. */
+    void Compiler::emit_receiver_writeback(const ReceiverOrigin &o, int obj, int line)
+    {
+        Emitter &e = state_->emitter;
+        switch (o.kind)
+        {
+        case ReceiverOrigin::FIELD:
+            e.emit_abc(OP_SETFIELD, o.parent, o.c, obj, line);
+            break;
+        case ReceiverOrigin::FIELD_IDX:
+            e.emit_abc(OP_SETFIELD_IDX, o.parent, o.c, obj, line);
+            break;
+        case ReceiverOrigin::FIELD_IDXC:
+            e.emit_abc(OP_SETFIELD_IDXC, o.parent, o.c, obj, line);
+            e.emit((uint32_t)ZEN_ENCODE(OP_SETFIELD, o.parent, o.name_ki, obj), line);
+            break;
+        case ReceiverOrigin::GLOBAL:
+            e.emit_abx(OP_SETGLOBAL, obj, o.bx, line);
+            break;
+        case ReceiverOrigin::UPVAL:
+            e.emit_abc(OP_SETUPVAL, obj, o.bx, 0, line);
+            break;
+        case ReceiverOrigin::INDEX:
+            e.emit_abc(OP_SETINDEX, o.parent, o.c, obj, line);
+            break;
+        case ReceiverOrigin::NONE:
+            break;
+        }
+    }
+
     int Compiler::dot_expr(int obj, int dest, bool can_assign)
     {
+        /* Before anything is emitted: where was `obj` read from? */
+        ReceiverOrigin origin;
+        if (can_assign)
+            capture_receiver_origin(obj, origin);
         consume(TOK_IDENTIFIER, "Expected field name after '.'.");
         Token field = previous_;
 
@@ -1851,6 +1953,7 @@ namespace zen
             }
             else
                 state_->emitter.emit_abc(OP_SETFIELD, obj, name_ki, val, previous_.line);
+            emit_receiver_writeback(origin, obj, previous_.line);
             free_reg(val);
             if (obj != reg)
                 free_reg(obj);
@@ -1913,6 +2016,7 @@ namespace zen
             }
             else
                 state_->emitter.emit_abc(OP_SETFIELD, obj, name_ki, tmp, op.line);
+            emit_receiver_writeback(origin, obj, op.line);
             free_reg(tmp);
             if (obj != reg)
                 free_reg(obj);

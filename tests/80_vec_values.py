@@ -195,6 +195,123 @@ assert body.pos == Vec2(3, 4)
 assert body.speed() == 5.0
 assert body.pos.x == 3.0                              # reading a field of a field works
 
+# --- nested field writes: the receiver is a copy, the compiler stores it back ------------
+class Mover:
+    def __init__(self):
+        self.pos = Vec3(1, 2, 3)
+        self.vel = Vec2(0, 0)
+        self.tag = 0
+    def nudge(self, dx):
+        self.pos.x += dx
+        self.pos.y -= 1
+        self.pos.z *= 2
+        self.vel.y = dx
+    def put(self, v):
+        self.pos.x = v
+m = Mover()
+m.nudge(4)
+assert m.pos == Vec3(5, 1, 6), m.pos
+assert m.vel == Vec2(0, 4), m.vel
+m.put(9)
+assert m.pos == Vec3(9, 1, 6)
+m.pos.x = 7                                           # same thing from outside the class
+m.pos.z += 1
+assert m.pos == Vec3(7, 1, 7)
+
+class Holder:
+    def __init__(self):
+        self.mover = Mover()
+    def bump(self):
+        self.mover.pos.x += 1                         # object link, then a vector link
+h = Holder()
+h.bump()
+h.bump()
+assert h.mover.pos == Vec3(3, 2, 3)
+h.mover.pos.y = 50
+assert h.mover.pos.y == 50.0
+
+def shove(b: Mover, dx):                              # annotated receiver: checked-index read
+    b.pos.x += dx
+    b.vel.x = dx
+shove(m, 1)
+assert m.pos.x == 8.0 and m.vel.x == 1.0
+
+g = Vec2(1, 2)                                        # module-level global
+g.x = 10
+assert g == Vec2(10, 2)
+g.y += 5
+assert g == Vec2(10, 7)
+def poke_global():
+    g.x = 3
+    g.y *= 2
+poke_global()
+assert g == Vec2(3, 14)
+
+pts = [Vec2(1, 2), Vec2(3, 4)]
+pts[1].y = 9
+assert pts[1] == Vec2(3, 9) and pts[0] == Vec2(1, 2)
+i = 0
+while i < 2:
+    pts[i].x += 1
+    i += 1
+assert pts[0] == Vec2(2, 2) and pts[1] == Vec2(4, 9)
+for k in range(2):
+    pts[k].y = pts[k].y * 2
+assert pts[0] == Vec2(2, 4) and pts[1] == Vec2(4, 18)
+def bump_all(arr):
+    j = 0
+    while j < len(arr):
+        arr[j].x -= 1
+        j += 1
+bump_all(pts)
+assert pts == [Vec2(1, 4), Vec2(3, 18)]
+pts[0 + 1].x = 0
+assert pts[1] == Vec2(0, 18)
+
+d = {"a": Vec2(0, 0)}
+d["a"].x = 5
+d["a"].y += 2
+assert d["a"] == Vec2(5, 2)
+grid = [[Vec3(0, 0, 0), Vec3(1, 1, 1)], [Vec3(2, 2, 2), Vec3(3, 3, 3)]]
+grid[1][0].z = 8
+assert grid[1][0] == Vec3(2, 2, 8) and grid[0][1] == Vec3(1, 1, 1)
+
+def make_counter():
+    c = Vec2(0, 0)                                    # captured local: the receiver is an upvalue
+    def inc():
+        c.x += 1
+        return c.x
+    return inc
+inc = make_counter()
+inc()
+assert inc() == 2.0
+
+# a plain heap-object chain is untouched by the write-back
+class Node:
+    def __init__(self):
+        self.item = 0
+        self.next = None
+a = Node()
+a.next = Node()
+a.next.item = 3
+a.next.item += 4
+assert a.next.item == 7 and a.item == 0
+pair = [Node(), Node()]
+pair[1].item = 5
+assert pair[1].item == 5 and pair[0].item == 0
+nd = {"n": Node()}
+nd["n"].item = 6
+assert nd["n"].item == 6
+
+# not written back: a value a call returns is a copy of whatever it read
+box = [Vec2(1, 1)]
+def first():
+    return box[0]
+first().x = 99
+assert box[0] == Vec2(1, 1)
+w = (box[0] if True else box[0]).x                    # reads are never affected
+assert w == 1.0
+
 # --- 1M iterations: no allocation, no GC growth ----------------------------------------
 def integrate(n):
     p = Vec3(0, 0, 0)

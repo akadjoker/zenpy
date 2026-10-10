@@ -79,11 +79,12 @@ bind::def_class<Texture>(vm, "Texture")
 Tipos aceites nos parâmetros: `bool` (truthiness do Python), qualquer inteiro
 (um int do script fora do intervalo do tipo C++ é erro, nunca truncamento),
 enums (como int), `float`/`double` (int é aceite), `const char *`, `Value`
-(passa tudo), e `T *` / `T &` para uma classe registada com `def_class<T>`
-(vem de `native_data`). Um primeiro parâmetro `VM *` recebe a VM e não conta
+(passa tudo), `Vec2f` / `Vec3f` (também `const &`: valores `Vec2` / `Vec3` do
+script, por valor, sem heap; tipo errado → `must be Vec3`), e `T *` / `T &`
+para uma classe registada com `def_class<T>` (vem de `native_data`). Um primeiro parâmetro `VM *` recebe a VM e não conta
 como argumento do script. Resultados: `void` (→ nil), os mesmos escalares,
-`const char *` (copiado para uma ObjString), `Value`, e `T *` / `T &` de uma
-classe registada (embrulhado, `nullptr` → `None`).
+`const char *` (copiado para uma ObjString), `Value`, `Vec2f` / `Vec3f`
+(→ `val_vec2` / `val_vec3`), e `T *` / `T &` de uma classe registada (embrulhado, `nullptr` → `None`).
 
 **Verificação de classe.** `ClassDef<T>::end()` guarda o `ObjClass *` em
 `ClassOf<T>::klass`. Um argumento `T *` / `T &` só passa se a instância for

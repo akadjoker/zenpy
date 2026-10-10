@@ -183,8 +183,8 @@ class Widget:
 
     def run(self):
         f = self.helper
-        g = self.cb                    # (calling self.cb(1) directly: INVOKE looks up methods only)
-        return f(2) + g(1)
+        g = self.cb
+        return f(2) + g(1) + self.cb(1) - 3      # self.cb(1) calls the field's bound method
 
     def grab(self):
         return self.step
@@ -222,5 +222,76 @@ junk = []
 for j in range(20000):
     junk = [j, str(j), {"k": j}]
 assert [kf() for kf in keep] == list(range(50))
+
+# --- a callable stored in a FIELD is called by obj.cb(...) (no implicit self) ----------
+from math import sqrt
+
+class Holder:
+    def __init__(self, cb):
+        self.cb = cb
+        self.k = 10
+
+    def run(self, x):
+        return self.cb(x) + self.k        # self.cb(x) inside the class
+
+    def twice(self, x):
+        return self.cb(self.cb(x))
+
+    def swap(self, other):
+        self.cb = other
+        return self.cb(1)
+
+hl = Holder(lambda v: v * 2)
+assert hl.cb(3) == 6                      # lambda in a field
+assert hl.run(4) == 18
+assert hl.twice(3) == 12
+
+def offset(a):                            # plain function in a field
+    return a + 100
+hf = Holder(offset)
+assert hf.cb(1) == 101
+assert hf.run(1) == 111
+
+base = 7
+def make_adder(n):
+    def add(v):                           # closure capturing a local
+        return v + n + base
+    return add
+hc = Holder(make_adder(1000))
+assert hc.cb(1) == 1008
+assert hc.swap(make_adder(5)) == 13       # reassigned field is called afresh
+assert hc.cb(0) == 12
+
+ctr = Counter(50)
+hb = Holder(ctr.add)                      # bound method of another object keeps its own receiver
+assert hb.cb(5) == 55
+assert hb.cb(5) == 60
+assert ctr.n == 60
+assert hb.run(0) == 70                    # 60 + k
+
+hs = Holder(sqrt)                         # native module function
+assert hs.cb(16) == 4.0
+assert hs.run(9) == 13.0
+hl2 = Holder(max)                         # builtin (len is an opcode, not a value)
+assert hl2.cb(1, 9, 4) == 9
+assert Holder(abs).cb(-3) == 3
+
+def kw_cb(a, b=5):
+    return a * b
+hk = Holder(kw_cb)
+assert hk.cb(2) == 10                     # defaults are filled by the ordinary call path
+assert hk.cb(2, 3) == 6
+def va(*xs):
+    return len(xs)
+hv = Holder(va)
+assert hv.cb(1, 2, 3) == 3
+assert hv.cb(*[1, 2]) == 2
+
+# --- GC pressure: callable fields called in a loop
+hg = Holder(lambda v: v + 1)
+acc2 = 0
+for q in range(20000):
+    acc2 = hg.cb(acc2)
+assert acc2 == 20000
 
 print("bound methods ok")

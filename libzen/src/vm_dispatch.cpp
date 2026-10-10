@@ -200,6 +200,25 @@ namespace zen
         return "object";
     }
 
+    /* `obj.name(...)` with no method `name`: is there a FIELD of that name?
+    ** 0 = no such field, 1 = it holds something callable (closure, native,
+    ** bound method; *out), -1 = it holds a non-callable value (*out). Kept
+    ** out of line: it is the rare path of OP_INVOKE and must not change how
+    ** the dispatch loop is compiled. */
+    static ZEN_NOINLINE int instance_field_callee(ObjInstance *inst, ObjString *name, Value *out)
+    {
+        ObjClass *klass = inst->klass;
+        for (int32_t fi = 0; fi < inst->num_fields && fi < klass->num_fields; fi++)
+        {
+            if (klass->field_names[fi] != name)
+                continue;
+            *out = inst->fields[fi];
+            return (is_closure(*out) || is_native(*out) || is_bound_method(*out)) ? 1 : -1;
+        }
+        return 0;
+    }
+
+
     /* Vec2/Vec3 arithmetic, shared by every opcode that can see a vector
     ** operand. Returns 0 and fills *out, 1 for an unsupported operand pair
     ** (the caller raises the error), 2 for division by zero.
@@ -4609,6 +4628,29 @@ namespace zen
 
                 if (is_nil(mval))
                 {
+                    /* No method of that name. `obj.cb(x)` where `cb` is a
+                    ** FIELD holding a callable calls the field's value, as
+                    ** in Python: no implicit self (a bound method brings
+                    ** its own receiver). Same pointer compare on the
+                    ** interned name GETFIELD uses. The call is handed to
+                    ** op_call_shared with the callee in the receiver slot
+                    ** and the arguments already after it. */
+                    Value fval;
+                    int fk = instance_field_callee(inst, method, &fval);
+                    if (fk < 0)
+                        RT_ERROR("'%s.%s' is not callable (it holds %s)", klass->name->chars, mname,
+                                 zen_type_name_of(fval));
+                    if (fk > 0)
+                    {
+                        R[base] = fval;
+                        call_a = base;
+                        /* the keyword map still sits in args[arg_count]; only
+                        ** a native callee accepts it, op_call_shared checks */
+                        call_nargs = kwmap ? ((arg_count + 1) | 0x40) : arg_count;
+                        call_nresults = nresults;
+                        ++ip;
+                        goto op_call_shared;
+                    }
                     RT_ERROR("'%s' has no method '%s'", klass->name->chars, mname);
                 }
 

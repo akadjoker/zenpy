@@ -249,6 +249,27 @@ if have_bindtest; then
     fi
 fi
 
+# --- Godot-style node engine mock (zen_bind.hpp) ---
+NODEENG="${NODEENG:-$ROOT/bin/test_node_engine}"
+if [[ -n "$ZEN_RUNNER" ]]; then have_nodeeng() { [[ -f "$NODEENG" ]]; }
+else have_nodeeng() { [[ -x "$NODEENG" ]]; }; fi
+if have_nodeeng; then
+    printf "  %-40s" "test_node_engine (C++)"
+    if [[ -n "$ZEN_RUNNER" ]]; then output=$("$ZEN_RUNNER" "$NODEENG" 2>&1) && ret=0 || ret=$?
+    else output=$("$NODEENG" 2>&1) && ret=0 || ret=$?; fi
+    if [[ $ret -eq 0 ]]; then
+        echo -e "${GREEN}OK${NC}"
+        passed=$((passed + 1))
+    else
+        echo -e "${RED}FAIL${NC} (exit $ret)"
+        failed=$((failed + 1))
+        failures+=("test_node_engine")
+        if [[ "$VERBOSE" == "1" ]]; then
+            echo "$output" | tail -20 | sed 's/^/    /'
+        fi
+    fi
+fi
+
 # --- Host output hook test (only built with -DZEN_HOST_OUTPUT=ON) ---
 HOSTOUT="${HOSTOUT:-$ROOT/bin/test_host_output}"
 if [[ -n "$ZEN_RUNNER" ]]; then have_hostout() { [[ -f "$HOSTOUT" ]]; }

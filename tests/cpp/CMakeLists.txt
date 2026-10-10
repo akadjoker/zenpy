@@ -36,8 +36,16 @@ foreach(cfg DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
 endforeach()
 target_link_libraries(test_bind zen_static)
 
+# --- Godot-style node engine mock bound with zen_bind.hpp ---
+add_executable(test_node_engine test_node_engine.cpp)
+set_target_properties(test_node_engine PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${ZEN_BIN_DIR})
+foreach(cfg DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+    set_target_properties(test_node_engine PROPERTIES RUNTIME_OUTPUT_DIRECTORY_${cfg} ${ZEN_BIN_DIR})
+endforeach()
+target_link_libraries(test_node_engine zen_static)
+
 if(EMSCRIPTEN)
-    foreach(t test_embedding test_script_info test_gc_native test_bind)
+    foreach(t test_embedding test_script_info test_gc_native test_bind test_node_engine)
         set_target_properties(${t} PROPERTIES SUFFIX ".js")
         target_link_options(${t} PRIVATE
             -sNODERAWFS=1

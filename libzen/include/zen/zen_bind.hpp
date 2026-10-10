@@ -14,7 +14,7 @@
 **       .dtor()                                            // delete (Texture *)
 **       .method<&Texture::draw>("draw", ZEN_NATIVE_GC_SAFE)
 **       .method<&Texture::width>("width")
-**       .property<&Texture::hits>("hits")                  // hits() and set_hits(v)
+**       .property<&Texture::hits>("hits")                  // tex.hits, tex.hits = v, hits(), set_hits(v)
 **       .end();
 **
 ** Parameter types understood: bool, any integer type (out-of-range script
@@ -28,9 +28,23 @@
 ** (wrapped, nullptr -> None). Everything else stays available through the raw
 ** NativeFn API.
 **
-** Ownership: a class given .dtor() OWNS its instances (the GC deletes them).
-** A host-owned object is exposed with wrap<C>(vm, ptr): the script instance
-** holds the pointer and the GC never deletes it.
+** Properties: .property<&T::member>("x") makes `obj.x`, `obj.x = v` and
+** `obj.x.y += 1` reach the C++ member (Vec2 / Vec3 members arrive as value
+** types; assigning a wrong type is an error) and also keeps the methods x() /
+** set_x(v). A const char * member is read-only. For engines that use accessor
+** methods: .property<&T::getPos, &T::setPos>("pos") (getter with no
+** parameters, setter with one; free functions taking T * first work too) and
+** .getter<&T::getFov>("fov") for a read-only property. getter<> / setter<> on
+** a data member register the method AND the matching half of the property
+** (call both for a read-write property, which is what property<> does).
+** Lookup order for `obj.x`: script field, then property, then method.
+**
+** Ownership: a class given .dtor() OWNS the instances the script creates (the
+** GC deletes them). A host-owned object is exposed with wrap<C>(vm, ptr): the
+** script instance is "borrowed" (VM::make_instance_borrowed), so neither the
+** GC nor destroy_instance() ever runs the class's dtor on it -- it works for
+** classes with and without .dtor(), and for engine classes whose objects the
+** engine frees itself.
 **
 ** The class registry (ClassOf<C>) is one slot per C++ type, not per VM: with
 ** several VMs alive, the most recently bound one wins. Bind a type once per VM
@@ -158,19 +172,13 @@ namespace bind
             for (; *b && n + 1 < cap; b++) out[n++] = *b;
             out[n] = 0;
         }
-
-        /* The twin class used by wrap() needs *a* destructor, because the GC
-        ** walks the parent chain only until it finds one: this stops it. */
-        inline void noop_dtor(VM *, void *) {}
     }
 
     /* ---- class registry: the ObjClass of each bound C++ type, filled by
-    ** ClassDef<T>::end(). ref_klass is the hidden borrowed twin "Name$ref"
-    ** (only for classes with .dtor()) that wrap() instantiates. ---- */
+    ** ClassDef<T>::end(). ---- */
     template <typename T> struct ClassOf
     {
         static inline ObjClass *klass = nullptr;
-        static inline ObjClass *ref_klass = nullptr;
     };
 
     /* ---- argument conversion: Arg<T>::check(Value) / get(VM*, Value) / what() ---- */
@@ -266,26 +274,21 @@ namespace bind
     /* ---- wrapping host-owned memory ---- */
 
     /* A script instance of T's bound class holding `ptr` (None for nullptr).
-    ** Built with new_instance(), NOT make_instance(): the latter would run the
-    ** native constructor with zero arguments. The GC never deletes the
-    ** pointee: a class without .dtor() has nothing to run, and one with
-    ** .dtor() is instantiated through its hidden twin "Name$ref", whose no-op
-    ** destructor ends the GC's walk up the parent chain before it reaches the
-    ** real one. */
+    ** Built with make_instance_borrowed(): the native constructor does not run
+    ** (it would allocate a second object) and the instance is marked
+    ** borrowed, so the GC never calls the class's dtor on `ptr`. */
     template <typename T> Value wrap(VM &vm, T *ptr)
     {
         using U = typename detail::remove_cvref<T>::type;
         if (!ptr)
             return val_nil();
-        ObjClass *k = ClassOf<U>::ref_klass ? ClassOf<U>::ref_klass : ClassOf<U>::klass;
+        ObjClass *k = ClassOf<U>::klass;
         if (!k)
         {
             vm.runtime_error("wrap: C++ type is not bound to a script class");
             return val_nil();
         }
-        ObjInstance *inst = new_instance(&vm.get_gc(), k);
-        inst->native_data = (void *)const_cast<U *>(ptr);
-        return val_obj((Obj *)inst);
+        return vm.make_instance_borrowed(k, (void *)const_cast<U *>(ptr));
     }
 
     /* ---- result conversion: Ret<R>::put(VM*, Value *slot, R) ---- */
@@ -609,7 +612,7 @@ namespace bind
     template <typename T> class ClassDef
     {
     public:
-        ClassDef(VM &vm, const char *name) : vm_(vm), builder_(vm.def_class(name)), name_(name) {}
+        ClassDef(VM &vm, const char *name) : builder_(vm.def_class(name)), name_(name) {}
 
         /* script subclass of an already registered class */
         ClassDef &parent(const char *parent_name) { builder_.parent(parent_name); return *this; }
@@ -628,12 +631,12 @@ namespace bind
             builder_.ctor(&FactoryThunk<factory>::create);
             return *this;
         }
-        /* delete (T *) when the instance is collected: the class owns its
-        ** instances. Objects exposed with wrap<T>() are not deleted. */
+        /* delete (T *) when a script-created instance is collected: the class
+        ** owns those. Host objects exposed with wrap<T>() / make_instance_borrowed
+        ** are never deleted. */
         ClassDef &dtor()
         {
             builder_.dtor([](VM *, void *data) { delete (T *)data; });
-            has_dtor_ = true;
             return *this;
         }
         /* a member function (const or not, optionally VM* first) or a free
@@ -652,23 +655,66 @@ namespace bind
             }
             return *this;
         }
-        /* data member `T::x` -> script method x() */
+        /* Read side of `x`: the script method x() AND the property `x` (read-only
+        ** until a setter is registered under the same name). PM is either a
+        ** data member `T::x` or a function with no script parameters (member
+        ** function, or a free function taking T * first). */
         template <auto PM> ClassDef &getter(const char *name)
         {
-            MemberThunk<PM, T>::get_name = name;
-            builder_.method(name, &MemberThunk<PM, T>::get, 0);
+            if constexpr (DataMember<decltype(PM)>::is_data)
+            {
+                MemberThunk<PM, T>::get_name = name;
+                builder_.method(name, &MemberThunk<PM, T>::get, 0);
+                builder_.property(name, &MemberThunk<PM, T>::get, nullptr);
+            }
+            else
+            {
+                static_assert(fn_arity<PM>() == 0, "zen_bind: a getter function takes no script parameters");
+                static_assert(!detail::is_same<typename Sig<decltype(PM)>::Ret, void>::value,
+                              "zen_bind: a getter function must return the value");
+                NativeFn fn = bind_fn<PM>(name);
+                builder_.method(name, fn, 0);
+                builder_.property(name, fn, nullptr);
+            }
             return *this;
         }
-        /* data member `T::x` -> script method set_x(v) (range/type checked) */
+        /* Write side of `x`: the script method set_x(v) (range / type checked)
+        ** AND the setter half of the property `x`. PM as for getter<>, with
+        ** exactly one script parameter for a function. */
         template <auto PM> ClassDef &setter(const char *name)
         {
             char buf[96];
             detail::concat(buf, sizeof(buf), "set_", name);
-            MemberThunk<PM, T>::set_name = name;
-            builder_.method(buf, &MemberThunk<PM, T>::set, 1);
+            if constexpr (DataMember<decltype(PM)>::is_data)
+            {
+                MemberThunk<PM, T>::set_name = name;
+                builder_.method(buf, &MemberThunk<PM, T>::set, 1);
+                builder_.property(name, nullptr, &MemberThunk<PM, T>::set);
+            }
+            else
+            {
+                static_assert(fn_arity<PM>() == 1, "zen_bind: a setter function takes exactly one script parameter");
+                NativeFn fn = bind_fn<PM>(FnName<PM>::make(buf));
+                builder_.method(buf, fn, 1);
+                builder_.property(name, nullptr, fn);
+            }
             return *this;
         }
-        template <auto PM> ClassDef &property(const char *name) { return getter<PM>(name).template setter<PM>(name); }
+        /* Both sides: data member `T::x` (a const char * member is read-only). */
+        template <auto PM> ClassDef &property(const char *name)
+        {
+            getter<PM>(name);
+            if constexpr (!detail::is_same<typename MemberThunk<PM, T>::V, const char *>::value)
+                setter<PM>(name);
+            return *this;
+        }
+        /* Accessor pair: T::getPos() / T::setPos(v) (or free functions taking T *
+        ** first) -> pos, pos(), set_pos(v). The property's type is the getter's
+        ** return type. */
+        template <auto G, auto S> ClassDef &property(const char *name)
+        {
+            return getter<G>(name).template setter<S>(name);
+        }
 
         ClassDef &field(const char *name) { builder_.field(name); return *this; }
         ClassDef &persistent(bool p = true) { builder_.persistent(p); return *this; }
@@ -680,30 +726,45 @@ namespace bind
         {
             ObjClass *k = builder_.end();
             ClassOf<T>::klass = k;
-            ClassOf<T>::ref_klass = nullptr;
-            if (has_dtor_)
-            {
-                /* wrap() must hand out instances the GC will NOT delete. The
-                ** destructor is found by walking the parent chain, so a hidden
-                ** subclass with a no-op destructor shields host memory. The
-                ** name is not a valid identifier: scripts cannot spell it,
-                ** they only see it through type(). */
-                char refname[128];
-                detail::concat(refname, sizeof(refname), name_, "$ref");
-                ClassOf<T>::ref_klass = vm_.def_class(refname)
-                                            .parent(name_)
-                                            .dtor(&detail::noop_dtor)
-                                            .constructable(false)
-                                            .end();
-            }
             return k;
         }
 
     private:
-        VM &vm_;
+        /* script-visible parameter count of a method-like function */
+        template <auto F> static constexpr int fn_arity()
+        {
+            if constexpr (SelfSig<decltype(F), T>::value)
+                return SelfThunk<F, T>::arity;
+            else
+                return Sig<decltype(F)>::arity;
+        }
+        /* storage for the "set_<name>" a Thunk reports in its errors */
+        template <auto F> struct FnName
+        {
+            static inline char buf[96];
+            static const char *make(const char *n)
+            {
+                detail::concat(buf, sizeof(buf), n, "");
+                return buf;
+            }
+        };
+        /* names the function's thunk (for error messages) and returns it */
+        template <auto F> static NativeFn bind_fn(const char *name)
+        {
+            if constexpr (SelfSig<decltype(F), T>::value)
+            {
+                SelfThunk<F, T>::name = name;
+                return &SelfThunk<F, T>::native;
+            }
+            else
+            {
+                Thunk<F>::name = name;
+                return &Thunk<F>::native;
+            }
+        }
+
         VM::ClassBuilder builder_;
         const char *name_;
-        bool has_dtor_ = false;
     };
 
     template <typename T> ClassDef<T> def_class(VM &vm, const char *name) { return ClassDef<T>(vm, name); }

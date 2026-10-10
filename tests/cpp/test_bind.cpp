@@ -1,8 +1,11 @@
 /*
 ** test_bind.cpp — zen_bind.hpp: member-function pointers become script methods.
 **
-** Covers constructor/method/property generation, a leading VM* parameter,
-** wrapping host-owned objects (and proving the GC never deletes them),
+** Covers constructor/method/property generation (attribute syntax b.x, b.x = v,
+** b.x.y += 1 reaching the C++ member; accessor pairs; read-only properties; the
+** methods x() / set_x() kept alongside), a leading VM* parameter,
+** wrapping host-owned objects (and proving the GC never deletes them, also for
+** a class with .dtor()),
 ** type errors that report instead of casting, the class check on C* / C&
 ** parameters, integer range checks, script subclasses of a bound class, and
 ** free functions.
@@ -22,6 +25,7 @@ using namespace zen;
 using zen::bind::def_class;
 using zen::bind::def_fn;
 using zen::bind::wrap;
+using zen::bind::ClassOf;
 
 static int g_tests_passed = 0;
 static int g_tests_failed = 0;
@@ -70,6 +74,9 @@ struct Body
     float x, y;
     float z = 0;
     int hits = 0;
+    float mass = 2.5f;
+    Vec3f vel{0, 0, 0};
+    const char *label = "ship";
     Body(float x_, float y_) : x(x_), y(y_) { g_body_ctors++; }
     ~Body() { g_body_dtors++; }
     void move(float dx, float dy) { x += dx; y += dy; }
@@ -81,6 +88,7 @@ struct Body
     bool same(Body *o) const { return o == this; }
     void move_by(Vec3f d) { x += d.x; y += d.y; z += d.z; }
     Vec3f position() const { return Vec3f{x, y, z}; }
+    void setPosition(const Vec3f &p) { x = p.x; y = p.y; z = p.z; }
     float dot_xy(const Vec2f &v) const { return x * v.x + y * v.y; }
     Vec2f flat() const { return Vec2f{x, y}; }
 };
@@ -100,17 +108,20 @@ static void bind_all(VM &vm)
         .ctor<float, float>()
         .dtor()
         .method<&Body::move>("move")
-        .method<&Body::speed>("speed")
+        .getter<&Body::speed>("speed") /* read-only property + speed() */
         .method<&Body::alive>("alive")
         .method<&Body::name>("name")
         .method<&Body::tag>("tag")
         .method<&Body::dist_to>("dist_to")
         .method<&Body::same>("same")
         .method<&Body::move_by>("move_by")
-        .method<&Body::position>("position")
+        .property<&Body::position, &Body::setPosition>("position") /* accessor pair */
         .method<&Body::dot_xy>("dot_xy")
         .method<&Body::flat>("flat")
         .property<&Body::hits>("hits")
+        .property<&Body::mass>("mass")
+        .property<&Body::vel>("vel")
+        .property<&Body::label>("label") /* const char * member: read-only */
         .end();
 }
 
@@ -355,6 +366,171 @@ int main()
         ok = run_source(vm, "b3 = Body(1, 1)\nb3.dot_xy(Vec3(1, 2, 3))\n");
         CHECK(!ok && strstr(g_err, "must be Vec2") && strstr(g_err, "got Vec3"),
               "a Vec3 must not pass for a const Vec2 &");
+    }
+
+    {
+        VM vm;
+        setup(vm);
+        bind_all(vm);
+        TEST("attribute syntax: float / int members read and write the C++ member");
+        bool ok = run_source(vm,
+            "b = Body(3, 4)\n"
+            "r0 = b.mass\n"
+            "b.mass = 4.0\n"
+            "b.mass += 1\n"
+            "r1 = b.mass\n"
+            "r2 = b.mass()\n"
+            "b.hits = 7\n"
+            "b.hits += 2\n"
+            "r3 = b.hits\n"
+            "b.set_hits(1)\n"
+            "r4 = b.hits\n"
+            "r5 = b.hits()\n");
+        Body *host = ok ? zen_instance_data<Body>(vm.get_global("b")) : nullptr;
+        CHECK(ok && host && near_to(vm.get_global("r0"), 2.5) && near_to(vm.get_global("r1"), 5.0) &&
+                  near_to(vm.get_global("r2"), 5.0) && host->mass == 5.0f && vm.get_global("r3").as.integer == 9 &&
+                  vm.get_global("r4").as.integer == 1 && vm.get_global("r5").as.integer == 1 && host->hits == 1,
+              "float/int attribute forms did not reach the member");
+
+        TEST("attribute syntax: Vec3f member (value type), b.vel.x += 5 writes back");
+        ok = run_source(vm,
+            "b.vel = Vec3(1, 2, 3)\n"
+            "b.vel.x += 5\n"
+            "b.vel.z = 9.5\n"
+            "v = b.vel\n"
+            "vx = b.vel.x\n"
+            "v2 = b.vel()\n");
+        Value v = vm.get_global("v");
+        CHECK(ok && host && host->vel.x == 6 && host->vel.y == 2 && host->vel.z == 9.5f && is_vec3(v) &&
+                  as_vec3(v).x == 6 && near_to(vm.get_global("vx"), 6.0) && is_vec3(vm.get_global("v2")) &&
+                  as_vec3(vm.get_global("v2")).z == 9.5f,
+              "Vec3f member attribute forms wrong");
+
+        TEST("accessor pair property<&Body::position, &Body::setPosition>");
+        ok = run_source(vm,
+            "b.position = Vec3(10, 20, 30)\n"
+            "b.position.y += 1\n"
+            "p = b.position\n"
+            "p2 = b.position()\n"
+            "b.set_position(Vec3(1, 1, 1))\n"
+            "p3 = b.position\n");
+        CHECK(ok && host && host->x == 1 && host->y == 1 && host->z == 1 && is_vec3(vm.get_global("p")) &&
+                  as_vec3(vm.get_global("p")).x == 10 && as_vec3(vm.get_global("p")).y == 21 &&
+                  as_vec3(vm.get_global("p2")).z == 30 && as_vec3(vm.get_global("p3")).x == 1,
+              "accessor pair wrong");
+
+        TEST("getter<&Body::speed>: read-only property from a function, speed() kept");
+        ok = run_source(vm, "b.position = Vec3(3, 4, 0)\nsp = b.speed\nsp2 = b.speed()\n");
+        CHECK(ok && near_to(vm.get_global("sp"), 5.0) && near_to(vm.get_global("sp2"), 5.0), "speed property wrong");
+
+        TEST("property read as a value is the value; a plain method read is still a bound method");
+        ok = run_source(vm, "m = b.move\nm(1, 0)\nq = b.mass\n");
+        CHECK(ok && host && host->x == 4 && near_to(vm.get_global("q"), 5.0), "bound method / property value wrong");
+    }
+
+    {
+        VM vm;
+        setup(vm);
+        bind_all(vm);
+        TEST("read-only property: writing a function-getter property is an error");
+        bool ok = run_source(vm, "b = Body(3, 4)\nb.speed = 3\n");
+        CHECK(!ok && strstr(g_err, "'Body.speed' is read-only"), "write to a getter-only property accepted");
+        printf("      msg: %.*s\n", (int)strcspn(g_err, "\n"), g_err);
+        TEST("const char * member property is read-only");
+        VM vm2;
+        setup(vm2);
+        bind_all(vm2);
+        bool r1 = run_source(vm2, "b = Body(3, 4)\nl = b.label\n");
+        bool r2 = !run_source(vm2, "b.label = \"x\"\n") && strstr(g_err, "'Body.label' is read-only");
+        CHECK(r1 && r2 && is_string(vm2.get_global("l")) && strcmp(safe_string_chars(vm2.get_global("l")), "ship") == 0,
+              "label should read \"ship\" and reject writes");
+        TEST("no script field is created by a rejected write");
+        Value b = vm2.get_global("b");
+        bool shadow = false;
+        for (int i = 0; i < as_instance(b)->klass->num_fields; i++)
+            shadow |= strcmp(as_instance(b)->klass->field_names[i]->chars, "label") == 0;
+        CHECK(!shadow, "a script field named label appeared");
+    }
+
+    {
+        VM vm;
+        setup(vm);
+        bind_all(vm);
+        TEST("attribute write of the wrong type / out of range: error, member unchanged");
+        bool a = !run_source(vm, "b = Body(3, 4)\nb.vel = 5\n") && strstr(g_err, "must be Vec3") && strstr(g_err, "got int");
+        printf("\n      msg: %.*s\n", (int)strcspn(g_err, "\n"), g_err);
+        g_err[0] = 0;
+        bool c = !run_source(vm, "b.mass = \"heavy\"\n") && strstr(g_err, "must be a number") && strstr(g_err, "got string");
+        g_err[0] = 0;
+        bool d = !run_source(vm, "b.hits = 5000000000\n") && strstr(g_err, "int in range");
+        Body *host = zen_instance_data<Body>(vm.get_global("b"));
+        CHECK(a && c && d && host && host->mass == 2.5f && host->hits == 0 && host->vel.x == 0, "bad write accepted");
+    }
+
+    {
+        VM vm;
+        setup(vm);
+        bind_all(vm);
+        TEST("script subclass of a bound class inherits the properties (self.mass, self.vel.y)");
+        bool ok = run_source(vm,
+            "class Hero(Body):\n"
+            "    def boost(self):\n"
+            "        self.mass += 1\n"
+            "        self.vel.y = 9\n"
+            "        self.position = self.position + Vec3(1, 1, 1)\n"
+            "        return self.mass\n"
+            "\n"
+            "class Boss(Hero):\n"
+            "    def rage(self):\n"
+            "        self.vel = self.vel * 2\n"
+            "\n"
+            "h = Hero(6, 8)\n"
+            "r = h.boost()\n"
+            "k = Boss(1, 1)\n"
+            "k.vel = Vec3(1, 2, 3)\n"
+            "k.rage()\n");
+        Body *h = ok ? zen_instance_data<Body>(vm.get_global("h")) : nullptr;
+        Body *k = ok ? zen_instance_data<Body>(vm.get_global("k")) : nullptr;
+        bool no_phantom = true;
+        ObjClass *hk = as_class(vm.get_global("Hero"));
+        for (int i = 0; i < hk->num_fields; i++)
+            no_phantom &= strcmp(hk->field_names[i]->chars, "mass") != 0 && strcmp(hk->field_names[i]->chars, "vel") != 0 &&
+                          strcmp(hk->field_names[i]->chars, "position") != 0;
+        CHECK(ok && h && k && near_to(vm.get_global("r"), 3.5) && h->vel.y == 9 && h->x == 7 && h->y == 9 && h->z == 1 &&
+                  k->vel.x == 2 && k->vel.z == 6 && no_phantom,
+              "subclass property access did not reach the C++ member");
+    }
+
+    {
+        /* wrap<T>() of a class WITH .dtor(): borrowed, so the GC never deletes the host object */
+        VM vm;
+        setup(vm);
+        bind_all(vm);
+        Body host(1, 2);
+        int dtors = g_body_dtors;
+        vm.def_global("kept", wrap<Body>(vm, &host));
+        TEST("wrap<T> of a class with .dtor(): borrowed, survives collect()");
+        bool ok = run_source(vm,
+            "for i in range(500):\n"
+            "    t = kept\n"
+            "kept.mass = 8.0\n");
+        Value stray = wrap<Body>(vm, &host); /* a second wrapper that nothing roots */
+        (void)stray;
+        vm.collect();
+        vm.collect();
+        bool borrowed = is_instance(vm.get_global("kept")) && as_instance(vm.get_global("kept"))->borrowed &&
+                        as_instance(vm.get_global("kept"))->klass == ClassOf<Body>::klass;
+        CHECK(ok && borrowed && g_body_dtors == dtors && host.mass == 8.0f, "wrapper destructor ran on host memory");
+        TEST("no hidden $ref class is registered any more");
+        CHECK(vm.find_global("Body$ref") < 0, "Body$ref still defined");
+        TEST("make_instance_borrowed on a script subclass of a .dtor() class");
+        vm.run(Compiler().compile(&vm.get_gc(), &vm, "class Pilot(Body):\n    def f(self):\n        return self.mass\n", "<p>"));
+        Value pv = vm.make_instance_borrowed(as_class(vm.get_global("Pilot")), &host);
+        Value out = vm.invoke(pv, "f", nullptr, 0);
+        pv = val_nil();
+        vm.collect();
+        vm.collect();
+        CHECK(near_to(out, 8.0) && g_body_dtors == dtors, "script subclass of Body ran the dtor on a borrowed instance");
     }
 
     printf("\n  passed: %d  failed: %d\n", g_tests_passed, g_tests_failed);

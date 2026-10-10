@@ -447,23 +447,26 @@ function and member-function pointers at compile time, on top of the
 using namespace zen;
 
 struct Body {
-    float x, y; int hits = 0;
+    float x, y; int hits = 0; Vec3f vel{0, 0, 0};
     Body(float x, float y);
     void move(float dx, float dy);
     float speed() const;
     Body *nearest(Body &other);
+    Vec3f getPos() const;  void setPos(const Vec3f &p);
 };
 static double dist(double a, double b);
 
 bind::def_class<Body>(vm, "Body")
     .ctor<float, float>().dtor()          // Body(3, 4) -> new Body(3, 4); delete on collect
     .method<&Body::move>("move")          // arity deduced from the signature
-    .method<&Body::speed>("speed")
-    .method<&Body::nearest>("nearest")    // returns a wrapped Body* (None for nullptr)
-    .property<&Body::hits>("hits")        // hits() and set_hits(v)
+        .method<&Body::nearest>("nearest")    // returns a wrapped Body* (None for nullptr)
+    .property<&Body::hits>("hits")        // b.hits, b.hits = 7, hits(), set_hits(v)
+    .property<&Body::vel>("vel")          // b.vel = Vec3(1, 2, 3); b.vel.x += 1
+    .property<&Body::getPos, &Body::setPos>("pos")   // accessor pair, same attribute syntax
+    .getter<&Body::speed>("speed")        // read-only property (and speed())
     .end();
 bind::def_fn<&dist>(vm, "dist");          // free functions too
-// script:  b = Body(3, 4); b.move(1, 1); print(b.speed()); b.set_hits(7)
+// script:  b = Body(3, 4); b.move(1, 1); print(b.speed); b.hits = 7; b.vel.x += 1
 vm.def_global("hero", bind::wrap<Body>(vm, &host_hero));   // host-owned, never deleted
 ```
 
@@ -473,11 +476,29 @@ vm.def_global("hero", bind::wrap<Body>(vm, &host_hero));   // host-owned, never 
   `const &`; script `Vec2`/`Vec3` values, a wrong type is `must be Vec3`), and
   `T*`/`T&` for bound classes. A leading `VM*` is injected and is not a script
   argument.
-- **Property and wrap.** `property<&T::x>` registers a getter `x()` and a setter
-  `set_x(v)` (`getter`/`setter` do one each). `wrap<T>(vm, ptr)` makes a script
-  instance over memory the host owns (`nullptr` becomes `None`); a bound
-  method returning `T*` or `T&` does the same. The GC deletes only what a class
-  with `.dtor()` created from script, never a wrapped pointer.
+- **Properties.** `property<&T::x>("x")` makes `obj.x`, `obj.x = v` and
+  `obj.x.y += 1` reach the C++ member (Vec2/Vec3 members are value types; a
+  wrong type or out-of-range int is an error and the member is untouched) and
+  keeps the methods `x()` / `set_x(v)`. For engines that expose accessor
+  methods use `property<&T::getPos, &T::setPos>("pos")` (getter with no
+  parameters, setter with one; free functions taking `T*` first work too), and
+  `getter<&T::getFov>("fov")` for a read-only property: writing it is the error
+  `'Camera.fov' is read-only`. A `const char *` member is read-only.
+  `getter`/`setter` on their own register the method and that half of the
+  property. A script subclass (`class Player(Node3D)`) inherits them, and inside
+  it `self.position`, `self.position = v` and `self.position.x += dt` reach the
+  C++ member. Lookup order for `obj.x`: script field, then property, then
+  method. The engine class has to be bound before the script is compiled (the
+  compiler asks the VM which names are properties).
+- **wrap and borrowed instances.** `wrap<T>(vm, ptr)` makes a script instance
+  over memory the host owns (`nullptr` becomes `None`); a bound method
+  returning `T*` or `T&` does the same. Such an instance is *borrowed*
+  (`vm.make_instance_borrowed(klass, ptr)`: no native ctor, and neither the GC
+  nor `destroy_instance` ever runs the class's dtor on it), so it is safe for
+  classes with `.dtor()` and for a script class attached to a node the engine
+  already owns. The GC deletes only what a `.dtor()` class created from script;
+  if the host takes such an object over (e.g. `add_child`), it sets
+  `inst->borrowed = true`.
 - **Errors.** A wrong-typed argument raises a runtime error naming the function,
   the argument and what it got (`move: argument 1 must be a number, got
   string`), and the C++ function is not called. A `T*`/`T&` parameter checks the

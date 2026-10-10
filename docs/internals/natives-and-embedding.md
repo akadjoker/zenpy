@@ -45,9 +45,74 @@ O método fica num slot da vtable como qualquer método de script, por isso
 `NativeFn` directamente. Medido no texmark: um objecto nativo por sprite
 custa o mesmo que o host desenhar directamente.
 
+`.property("hp", getter, setter, flags)`: propriedade nativa (ver abaixo).
+
 `persistent(true)`: instâncias não geridas pelo GC (o host destrói).
 `constructable(false)`: o script não pode chamar `Cls(...)`.
 `field(name)`: campo normal (em `inst->fields`), visível ao script.
+
+## Propriedades nativas
+
+`obj.hp`, `obj.hp = v` e `obj.hp += 1` chamam código C++ em vez de lerem um
+campo de instância:
+
+```cpp
+vm.def_class("Unit").ctor(...).dtor(...)
+  .property("hp", unit_get_hp, unit_set_hp)   // setter nullptr = só leitura
+  .end();
+// int unit_get_hp(VM*, Value *args, int): self em args[-1], resultado em args[0], return 1
+// int unit_set_hp(VM*, Value *args, int): valor em args[0], return 0
+```
+
+**Tabela na classe.** `ObjClass::props` / `num_props` guarda
+`NativeProperty { ObjString *name; ObjNative *getter, *setter; }` (nomes
+internados, comparação por ponteiro como `field_names`). O GC marca nomes e
+nativos em `gc_blacken` (OBJ_CLASS) e liberta a tabela com a classe. Registar
+o mesmo nome duas vezes completa/substitui a propriedade (getter primeiro,
+setter depois, como `getter<>` + `setter<>`); getter `nullptr` = só escrita.
+Classes com propriedades não se serializam em bytecode (como as nativas).
+`class_find_property(klass, name)` sobe a cadeia de `parent`, por isso uma
+subclasse de script herda as propriedades.
+
+**Ordem de procura em `inst.name`: campo → propriedade → método.**
+- `OP_GETFIELD` (por nome): falhada a procura nos campos da instância, antes do
+  fallback de método-ligado, chama o getter (`call_native`, GC pausado como em
+  qualquer nativo, `self` em `args[-1]` numa área de scratch pequena em vez do
+  ficheiro de registos, resultado para `R[A]`; função fora de linha para o
+  loop de dispatch não mudar). Só corre depois de a procura de campo ter
+  falhado, por isso o custo dos acessos a campos (`GETFIELD_IDX/IDXC`, que só
+  disparam quando o campo existe) é zero.
+- `OP_SETFIELD` (e o fallback de `SETFIELD_IDXC`): nome que não é campo nem
+  está na classe → propriedade: com setter chama-o, sem setter é o erro
+  `'Cls.name' is read-only`. A propriedade ganha à criação de um campo novo
+  (senão `self.position = v` criava um campo de script a esconder o membro C++).
+- `obj.name()` continua a ser a chamada do **método** `name` (o `zen_bind`
+  regista ambos).
+
+**Regra do compilador.** Dentro de `class Player(Node3D)`, `self.position`
+(leitura, escrita, `+=`, chamada) NÃO regista `position` como campo da classe:
+o atalho `self.campo` (`GETFIELD_IDX/SETFIELD_IDX`) criaria um campo fantasma
+que, por vir primeiro na procura, escondia a propriedade. O compilador sobe a
+cadeia de classes do ficheiro até à primeira classe que a VM já conhece
+(`Compiler::native_property_of`: `ClassBuilder` regista-se antes de o script
+compilar) e, se o nome é propriedade, usa `GETFIELD`/`SETFIELD` por nome.
+Para receptores tipados (`cam: Camera3D`) `registry_field_index` só olha para
+`field_names`, por isso devolve -1 e não sai `GETFIELD_IDXC`. `self.position.x
++= dt` fica `GETFIELD tmp = self.position; GETFIELD ..; ADD; SETFIELD tmp.x;
+SETFIELD self.position = tmp` (o write-back de valores Vec). Ver
+`bin/test_node_engine --dis`.
+
+## Instâncias emprestadas (`borrowed`)
+
+`vm.make_instance_borrowed(klass, ptr)` cria uma instância de `klass` (ou de uma
+subclasse de script) com `native_data = ptr`, **sem** correr o ctor nativo nem
+o `init`, e marca `ObjInstance::borrowed`. O GC (`free_obj` em memory.cpp) e
+`destroy_instance` nunca chamam o `native_dtor` de uma instância emprestada: o
+objecto é do host. É o que um engine quer para anexar uma classe de script a um
+nó que já existe (`new_instance` + `native_data` à mão era o contorno anterior)
+e é o que o `wrap<T>` usa. Um objecto criado pelo script (`Bullet()`) é dono do
+`native_data` até o host o passar a outro dono (`add_child`): nessa altura faz
+`as_instance(v)->borrowed = true`.
 
 ## zen_bind.hpp — bindings a partir da assinatura C++
 
@@ -72,7 +137,7 @@ bind::def_class<Texture>(vm, "Texture")
     .dtor()                            /* delete (T *) quando a instância morre */
     .method<&Texture::draw>("draw", ZEN_NATIVE_GC_SAFE)
     .method<&Texture::width>("width")
-    .property<&Texture::hits>("hits")  /* hits() e set_hits(v) */
+    .property<&Texture::hits>("hits")  /* tex.hits, tex.hits = v, hits(), set_hits(v) */
     .end();
 ```
 
@@ -97,20 +162,28 @@ várias VMs vivas ganha a que fez `end()` por último.
 **`wrap<T>(vm, ptr)`: objectos do host.** Devolve uma instância de script da
 classe de `T` que guarda `ptr` em `native_data` e que o GC **nunca apaga**
 (`nullptr` → `None`). Os métodos que devolvem `T *` / `T &` de uma classe
-registada fazem isto automaticamente. Constrói com `new_instance`, não com
-`make_instance` (que correria o ctor nativo com zero argumentos). Numa classe
-sem `.dtor()` não há nada a apagar e a instância é da própria classe; numa
-classe com `.dtor()` a instância é de uma subclasse escondida `Nome$ref`
-(criada em `end()`, `constructable(false)`, destrutor vazio): o GC sobe a
-cadeia de `parent` só até encontrar um destrutor, e o vazio pára-o antes do
-verdadeiro. Regra: `.dtor()` = a classe é dona das instâncias que o script
-cria; `wrap` = o host é dono.
+registada fazem isto automaticamente. Usa `vm.make_instance_borrowed(klass,
+ptr)`: não corre o ctor nativo (que alocaria um segundo objecto) e a instância
+fica `borrowed`, por isso o `.dtor()` da classe não corre para ela, com ou sem
+`.dtor()` na classe. (Antes havia uma subclasse escondida `Nome$ref` com
+destrutor vazio; já não existe e `ClassOf<T>` só guarda `klass`.) Regra:
+`.dtor()` = a classe é dona das instâncias que o script cria; `wrap` / borrowed
+= o host é dono.
 
-**`getter` / `setter` / `property`.** `.getter<&T::x>("x")` regista `x()`,
-`.setter<&T::x>("x")` regista `set_x(v)` e `.property<&T::x>("x")` os dois. O
-setter converte e verifica como qualquer argumento (intervalo dos inteiros,
-tipo). Um membro `const char *` só pode ter getter (a string do script não
-pertence ao objecto).
+**`getter` / `setter` / `property`.** `.property<&T::x>("x")` regista o método
+`x()`, o método `set_x(v)` e a **propriedade** `x` (atributo: `o.x`, `o.x = v`,
+`o.x.y += 1` chegam ao membro; Vec2/Vec3 chegam como valores). `.getter<&T::x>`
+e `.setter<&T::x>` registam cada um o seu método e a metade respectiva da
+propriedade (getter sozinho = só leitura). O setter converte e verifica como
+qualquer argumento (intervalo dos inteiros, tipo; o membro não muda em caso de
+erro). Um membro `const char *` só pode ter getter (a string do script não
+pertence ao objecto): `property<>` regista só a leitura.
+
+Para engines com métodos de acesso: `.property<&T::getPos, &T::setPos>("pos")`
+(getter sem parâmetros, `const` ou não; setter com um; funções livres com
+`T *`/`T &` à cabeça também servem) e `.getter<&T::getFov>("fov")` (propriedade
+só de leitura a partir de uma função). O tipo vem do retorno do getter e dos
+mesmos `Arg`/`Ret` dos métodos; também ficam os métodos `pos()` / `set_pos(v)`.
 
 Uma função livre cujo primeiro parâmetro é `T *`/`T &` pode ser registada como
 método: o receptor entra nesse parâmetro e a aridade visível ao script desce

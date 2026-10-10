@@ -1365,6 +1365,8 @@ namespace zen
             cls->operator_slots[i] = val_nil();
         cls->native_ctor = nullptr;
         cls->native_dtor = nullptr;
+        cls->props = nullptr;
+        cls->num_props = 0;
         cls->persistent = parent ? parent->persistent : false;
         cls->constructable = true;
         cls->sealed = false;
@@ -1398,6 +1400,7 @@ namespace zen
 
         inst->klass = klass;
         inst->native_data = nullptr;
+        inst->borrowed = false;
         inst->num_fields = nf;
         inst->inline_field_count = nf;
         /* A zero-field instance still starts in the inline state: if a
@@ -1445,8 +1448,9 @@ namespace zen
     {
         if (!inst)
             return;
-        /* Call native destructor — walk parent chain */
-        if (inst->native_data)
+        /* Call native destructor — walk parent chain. A borrowed instance
+        ** (VM::make_instance_borrowed) points at host-owned memory: no dtor. */
+        if (inst->native_data && !inst->borrowed)
         {
             ObjClass *dtor_src = inst->klass;
             while (dtor_src && !dtor_src->native_dtor)
@@ -1622,6 +1626,15 @@ namespace zen
             for (int32_t i = 0; i < kOperatorSlotCount; i++)
                 if (cls->operator_slots[i].type == VAL_OBJ)
                     gc_mark_obj(gc, cls->operator_slots[i].as.obj);
+            /* Native properties: interned names (compared by pointer) and the
+            ** getter/setter natives are held only by the class. */
+            for (int32_t i = 0; i < cls->num_props; i++)
+            {
+                gc_mark_obj(gc, (Obj *)cls->props[i].name);
+                gc_mark_obj(gc, (Obj *)cls->props[i].getter);
+                if (cls->props[i].setter)
+                    gc_mark_obj(gc, (Obj *)cls->props[i].setter);
+            }
             break;
         }
 
@@ -1883,13 +1896,16 @@ namespace zen
                 zen_free(gc, cls->field_defaults, sizeof(Value) * cls->num_field_defaults);
             if (cls->vtable)
                 zen_free(gc, cls->vtable, sizeof(Value) * cls->vtable_size);
+            if (cls->props)
+                zen_free(gc, cls->props, sizeof(NativeProperty) * cls->num_props);
             break;
         }
         case OBJ_INSTANCE:
         {
             ObjInstance *inst = (ObjInstance *)obj;
-            /* Call native destructor — walk parent chain to find dtor */
-            if (inst->native_data)
+            /* Call native destructor — walk parent chain to find dtor.
+            ** Borrowed instances never run it: the host owns the pointee. */
+            if (inst->native_data && !inst->borrowed)
             {
                 ObjClass *dtor_src = inst->klass;
                 while (dtor_src && !dtor_src->native_dtor)

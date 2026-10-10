@@ -11,27 +11,33 @@
 ** The scripts are embedded as raw strings and mirrored (same text) under
 ** tests/manual/node_engine/ (one .py per script) for reading.
 **
-** Host-side design notes (see the report for the VM gaps these work around):
+** Host-side design notes:
 **  - ScriptInstance/attach(): a script CLASS is attached to a node the engine
-**    already owns.  Built with new_instance() + native_data = node (NOT
-**    make_instance(), which would run the native ctor and allocate a second
-**    node).
-**  - Ownership: engine nodes are owned by the tree.  The bound classes get NO
-**    zen_bind .dtor() (it would `delete` the engine node when the script
-**    wrapper is collected).  Instead Node's ObjClass::native_dtor is set by hand
-**    to node_release(), which deletes only nodes that are still "GC owned"
-**    (created from script and never added to a tree).
+**    already owns, with vm.make_instance_borrowed(script_class, node): no native
+**    ctor (no second node) and the instance is "borrowed", so the VM never runs
+**    the class dtor on the engine's node.
+**  - Ownership: bound with zen_bind's plain .dtor() on Node (delete).  A node a
+**    script creates (Bullet()) is owned by its wrapper until the tree takes it:
+**    add_child() flips the wrapper to borrowed (Host::adopt).  Nodes the engine
+**    creates are only ever wrapped borrowed (instance_for/attach), so the GC can
+**    never delete them.  Node::gc_owned is the engine-side mirror of that flag
+**    (queue_free() on an orphan must not double free what the wrapper owns).
 **  - Identity: Host::objectdb (Node* -> zen::Ref) is the ObjectDB; every bound
 **    getter that returns a node goes through Host::instance_for().
 **  - Freed nodes: ~Node -> Host::forget() unrefs the instance and sets its
 **    native_data to nullptr, so stale script references fail with an error
 **    instead of dereferencing freed memory.
+**  - Properties: position/rotation/scale/fov/frames (data members) and
+**    name/processing/mesh (accessor pairs) plus read-only inside_tree/child_count
+**    are native properties: `self.position`, `self.position = v`,
+**    `self.position.x += dt` reach the C++ member (see test_attributes).
 */
 
 #include "vm.h"
 #include "compiler.h"
 #include "module.h"
 #include "memory.h"
+#include "debug.h"
 #include "zen_bind.hpp"
 
 #include <algorithm>
@@ -291,9 +297,7 @@ struct Host
         auto it = objectdb.find(n);
         if (it != objectdb.end()) return it->second.get();
         ObjClass *k = n->engineClass();
-        ObjInstance *inst = new_instance(&vm.get_gc(), k); /* borrowed wrapper */
-        inst->native_data = n;
-        Value v = val_obj((Obj *)inst);
+        Value v = vm.make_instance_borrowed(k, n); /* the engine owns n */
         objectdb.emplace(n, zen::Ref(vm, v));
         return v;
     }
@@ -324,9 +328,8 @@ struct Host
             last_error = "script class does not derive from the node's engine class";
             return nullptr;
         }
-        ObjInstance *inst = new_instance(&vm.get_gc(), script_class);
-        inst->native_data = n; /* NOT make_instance(): no native ctor, no second node */
-        Value v = val_obj((Obj *)inst);
+        /* NOT make_instance(): that would run the native ctor (a second node) */
+        Value v = vm.make_instance_borrowed(script_class, n);
         objectdb.erase(n); /* replaces a lazily created plain wrapper (identity break, see test) */
         objectdb.emplace(n, zen::Ref(vm, v));
         return finish_script(n, v, script_class);
@@ -336,6 +339,7 @@ struct Host
     ** already allocated the node): record it in the ObjectDB and resolve slots. */
     ScriptInstance *adopt(Node *n, Value v)
     {
+        as_instance(v)->borrowed = true; /* the tree owns n from now on: the wrapper must not delete it */
         if (objectdb.find(n) == objectdb.end())
             objectdb.emplace(n, zen::Ref(vm, v));
         if (n->script) return n->script;
@@ -509,12 +513,6 @@ void SceneTree::flush()
 /* =========================================================
 ** Binding layer (what the host has to write)
 ** ========================================================= */
-static void node_release(VM *, void *d)
-{
-    Node *n = (Node *)d;
-    if (n->gc_owned) delete n; /* script-created and never added to a tree */
-}
-
 static Value n_get_parent(VM *, Node *s) { return g_host->instance_for(s->parent); }
 static Value n_get_child(VM *, Node *s, int i) { return g_host->instance_for(s->getChild((size_t)i)); }
 static Value n_find_child(VM *, Node *s, const char *n) { return g_host->instance_for(s->findChild(n)); }
@@ -566,9 +564,13 @@ static MeshInstance3D *make_mesh() { MeshInstance3D *n = new MeshInstance3D(); n
 
 static void bind_engine(VM &vm)
 {
-    ObjClass *k;
-    k = def_class<Node>(vm, "Node")
+    def_class<Node>(vm, "Node")
             .ctor<&make_node>()
+            .dtor() /* owns script-created nodes; engine nodes are only wrapped borrowed */
+            .property<&Node::getName, &Node::setName>("name")
+            .property<&Node::isProcessing, &Node::setProcess>("processing")
+            .getter<&Node::isInsideTree>("inside_tree")
+            .getter<&Node::getChildCount>("child_count")
             .method<&Node::getName>("get_name")
             .method<&Node::setName>("set_name")
             .method<&n_add_child>("add_child")
@@ -588,7 +590,6 @@ static void bind_engine(VM &vm)
             .method<&n_disconnect>("disconnect")
             .method<&n_emit>("emit")
             .end();
-    k->native_dtor = node_release; /* NOT .dtor(): see header comment */
     def_class<Node3D>(vm, "Node3D")
         .parent("Node")
         .ctor<&make_node3d>()
@@ -606,8 +607,7 @@ static void bind_engine(VM &vm)
     def_class<MeshInstance3D>(vm, "MeshInstance3D")
         .parent("Node3D")
         .ctor<&make_mesh>()
-        .method<&MeshInstance3D::getMesh>("mesh")
-        .method<&MeshInstance3D::setMesh>("set_mesh")
+        .property<&MeshInstance3D::getMesh, &MeshInstance3D::setMesh>("mesh")
         .property<&MeshInstance3D::frames>("frames")
         .end();
     def_fn<&host_log>(vm, "log");
@@ -820,12 +820,77 @@ class Probe(Node3D):
         return cam.fov
     def cam_getter(self, cam):
         return cam.fov()
+    def cam_typed(self, cam: Camera3D):
+        cam.fov += 2.0
+        return cam.fov
+    def bad_type(self):
+        self.position = 5
+    def bad_fov(self, cam):
+        cam.fov = "wide"
+    def ro_write(self):
+        self.inside_tree = False
+    def ro_write_other(self, n):
+        n.child_count = 3
+    def counts(self):
+        return self.child_count
+    def rename(self):
+        self.name = "renamed"
+        return self.name
+    def toggle(self):
+        self.processing = not self.processing
+        return self.processing
+    def mesh_set(self, m):
+        m.mesh = "tree.obj"
+        return m.mesh
+    def extra_field(self):
+        self.tag = 11
+        return self.tag
+    def as_value(self):
+        f = self.position
+        return f
+
+class Sub(Probe):
+    def sub_move(self, dt):
+        self.position.x += dt
+        return self.position.x
+
+class Hero(Sub):
+    def hero_set(self):
+        self.position = self.position + Vec3(1, 1, 1)
+        self.scale.y = 3.0
+        return self.scale
+
+class Wide(Camera3D):
+    fov = 5.0
+    def read(self):
+        return self.fov
+)ZEN";
+
+static const char *SRC_DIS = R"ZEN(
+class DisProbe(Node3D):
+    def aug(self, dt):
+        self.position.x += dt
+    def whole(self, dt):
+        self.position = self.position + Vec3(dt, 0, 0)
+    def call(self):
+        return self.position()
+    def typed(self, cam: Camera3D):
+        cam.fov = 40.0
+        return cam.fov
 )ZEN";
 
 static const char *SRC_BENCH = R"ZEN(
 class BMove(Node3D):
     def _process(self, dt):
         self.set_position(self.position() + Vec3(dt, 0, 0))
+
+class BAttr(Node3D):
+    def _process(self, dt):
+        self.position = self.position + Vec3(dt, 0, 0)
+
+class BAugX(Node3D):
+    def _process(self, dt):
+        self.position.x += dt
 
 class BNone(Node3D):
     speed = 1.0
@@ -983,27 +1048,31 @@ static void test_attach_apis()
         Env e;
         e.load("class S(Node3D):\n    def f(self):\n        return 1\n");
         Node3D *n = e.add<Node3D>(e.tree->root, "n");
-        int allocs0 = g_node_allocs;
-        TEST("new_instance + native_data = node: no ctor, no second node");
-        ObjInstance *inst = new_instance(&e.vm.get_gc(), e.klass("S"));
-        inst->native_data = n;
-        CHECK(g_node_allocs == allocs0 && inst->native_data == n, "new_instance allocated a node");
-        /* this wrapper is NOT in the ObjectDB: untracked wrappers must not outlive the node (node_release would
-        ** read freed memory at collection) -- everything the host hands out goes through instance_for/attach */
-        inst->native_data = nullptr;
-
-        TEST("vm.make_instance(klass) runs the native ctor (throwaway node)");
+        int allocs0 = g_node_allocs, frees0 = g_node_frees;
+        TEST("make_instance_borrowed: no native ctor, no second node");
+        Value bv = e.vm.make_instance_borrowed(e.klass("S"), n);
+        ObjInstance *inst = as_instance(bv);
+        CHECK(g_node_allocs == allocs0 && inst->native_data == n && inst->borrowed && inst->klass == e.klass("S"),
+              "make_instance_borrowed allocated a node / did not mark the instance");
+        /* the wrapper is unreferenced now: both collections free it. Before the borrowed flag the
+        ** Node dtor (delete) would have taken the engine's node down with it. */
+        TEST("a borrowed wrapper dying does not delete the engine's node (GC ran twice)");
+        bv = val_nil();
+        e.vm.collect();
+        e.vm.collect();
+        CHECK(g_node_frees == frees0 && e.tree->root->getChild(0) == n, "the GC deleted the engine node");
+        TEST("vm.make_instance(klass) still runs the native ctor and OWNS its node");
         int a1 = g_node_allocs;
         Value v = e.vm.make_instance(e.klass("S"));
         Node *thrown = is_instance(v) ? (Node *)as_instance(v)->native_data : nullptr;
-        bool ran_ctor = g_node_allocs == a1 + 1 && thrown != nullptr && thrown != n;
+        bool ran_ctor = g_node_allocs == a1 + 1 && thrown != nullptr && thrown != n && !as_instance(v)->borrowed;
         CHECK(ran_ctor, "make_instance did not call the native ctor");
-        FINDING("make_instance() allocates a fresh gc_owned Node3D; overwriting native_data would leak it; "
-                "the host must delete it (or the GC does at collection via node_release)");
+        FINDING("make_instance() allocates a fresh Node3D owned by the wrapper (deleted by the GC at collection, or "
+                "once the host marks the wrapper borrowed after handing the node to the tree)");
         if (thrown) { as_instance(v)->native_data = nullptr; delete thrown; }
     }
     {
-        /* stock zen_bind .dtor(): the script wrapper OWNS the pointee */
+        /* a dtor on the native base: owned instances run it, borrowed ones never do */
         struct Probe { int id; };
         static int probe_dtors = 0;
         struct PR { static void d(VM *, void *) { probe_dtors++; } };
@@ -1014,19 +1083,23 @@ static void test_attach_apis()
         ObjFunc *fn = compiler.compile(&vm.get_gc(), &vm, "class PS(Probe):\n    def f(self):\n        return 1\n", "<p>");
         vm.run(fn);
         ObjClass *ps = as_class(vm.get_global("PS"));
-        TEST("a dtor on the native base fires for an attached script SUBCLASS (hazard)");
+        TEST("a borrowed script SUBCLASS instance never fires the native base dtor");
         Probe engine_owned{1};
         int before = probe_dtors;
+        {
+            vm.make_instance_borrowed(ps, &engine_owned);
+        }
+        vm.collect();
+        vm.collect();
+        CHECK(probe_dtors == before, "dtor ran on engine memory");
+        TEST("an owned instance (new_instance + native_data) still fires it once");
         {
             ObjInstance *inst = new_instance(&vm.get_gc(), ps);
             inst->native_data = &engine_owned;
         }
         vm.collect();
         vm.collect();
-        CHECK(probe_dtors == before + 1, "dtor did not run");
-        FINDING("with stock .dtor() semantic the GC runs the base dtor (`delete`) on engine memory when the attached "
-                "script wrapper dies; zen_bind's Name$ref shield only covers wrap<T>(), not script subclasses -- "
-                "avoided here by setting ObjClass::native_dtor by hand instead of .dtor()");
+        CHECK(probe_dtors == before + 1, "dtor did not run for an owned instance");
     }
 }
 
@@ -1090,7 +1163,7 @@ static void test_orphans()
     /* ownership of an orphan script-created node: GC deletes it
     ** (a separate function: the mock's g_host/g_tree globals allow one live Env) */
     printf("-- ownership of script-created orphans --\n");
-    TEST("orphan script node (never added) is deleted by the GC via node_release");
+    TEST("orphan script node (never added) is deleted by the GC via the class dtor");
     Env e2;
     e2.load("def make():\n    for i in range(50):\n        n = Node3D()\n        n.set_name(\"orphan\")\n    return 1\n");
     int allocs = g_node_allocs, frees = g_node_frees;
@@ -1247,9 +1320,28 @@ static void probe(Env &e, Value inst, const char *label, const char *method, Val
         printf("      attr probe %-34s -> ok (%s)\n", label, zen::bind::detail::type_name_of(r));
 }
 
+static bool has_field(ObjClass *k, const char *name)
+{
+    for (int i = 0; i < k->num_fields; i++)
+        if (k->field_names[i] && strcmp(k->field_names[i]->chars, name) == 0) return true;
+    return false;
+}
+
+/* The compiled shape (run `bin/test_node_engine --dis`; the zen CLI has no Node3D to ask):
+**
+**   def aug(self, dt):   self.position.x += dt
+**     GETFIELD  R[2] = R[0].position        <- by name: the native property getter
+**     GETFIELD  R[4] = R[2].x               <- field of the Vec3 value
+**     ADD       R[4] = R[4] + R[1]
+**     SETFIELD  R[2].x = R[4]               <- rewrites the copy in R[2]
+**     SETFIELD  R[0].position = R[2]        <- write-back: the native property setter
+**
+**   self.position = v  ->  SETFIELD R[0].position = ...   (no SETFIELD_IDX, no class field)
+**   self.position()    ->  INVOKE_VT_R ... position       (the method is still there)
+** Neither `position` nor any other property is ever registered as a class field of Probe. */
 static void test_attributes()
 {
-    printf("-- native properties: attribute syntax vs getter/setter --\n");
+    printf("-- native properties: attribute syntax reaches the C++ member --\n");
     Env e;
     TEST("script compiles and runs");
     CHECK(e.load(SRC_ATTR), "attr script failed");
@@ -1257,27 +1349,116 @@ static void test_attributes()
     Camera3D *cam = e.add<Camera3D>(n, "cam");
     n->position = Vec3f{1, 2, 3};
     Value nv = e.host->instance_for(n), cv = e.host->instance_for(cam);
+    Value out;
+
+    TEST("self.position / self.rotation are not class fields (no phantom slot shadowing the member)");
+    CHECK(!has_field(e.klass("Probe"), "position") && !has_field(e.klass("Probe"), "rotation") &&
+              !has_field(e.klass("Probe"), "scale") && !has_field(e.klass("Probe"), "fov") &&
+              !has_field(e.klass("Hero"), "position"),
+          "a property name became a script field");
 
     probe(e, nv, "self.position.x (read)", "read_x");
+    TEST("self.position.x reads the C++ member");
+    CHECK(call_ok(e, nv, "read_x", &out) && near_to(out, 1.0), "read_x wrong");
     probe(e, nv, "self.position.x = 5 (write)", "assign_x");
+    TEST("self.position.x = 5.0 updates the C++ member (read-modify-write through the property)");
+    CHECK(n->position.x == 5 && n->position.y == 2 && n->position.z == 3, "x not written");
     probe(e, nv, "self.position.x += 1", "aug_x");
-    TEST("attribute .x read/write forms did not change the C++ position");
-    CHECK(n->position.x == 1 && n->position.y == 2 && n->position.z == 3, "C++ member changed?!");
+    TEST("self.position.x += 1.0 updates the C++ member");
+    CHECK(n->position.x == 6 && n->position.y == 2 && n->position.z == 3, "aug not written");
     probe(e, nv, "self.position = Vec3(9,9,9)", "assign_whole");
-    TEST("whole-attribute assignment does NOT reach the C++ member");
-    CHECK(n->position.x == 1 && n->position.y == 2 && n->position.z == 3, "assignment reached C++?!");
+    TEST("self.position = Vec3(9,9,9) reaches the C++ member");
+    CHECK(n->position.x == 9 && n->position.y == 9 && n->position.z == 9, "assignment did not reach C++");
     probe(e, nv, "self.position (read after)", "read_after_assign");
     probe(e, nv, "self.position() (call after)", "call_after_assign");
+    TEST("self.position and self.position() agree with each other and with the member");
+    Value r1, r2;
+    n->position = Vec3f{4, 5, 6};
+    CHECK(call_ok(e, nv, "read_after_assign", &r1) && call_ok(e, nv, "call_after_assign", &r2) && is_vec3(r1) &&
+              is_vec3(r2) && as_vec3(r1).x == 4 && as_vec3(r2).y == 5 && as_vec3(r1).z == as_vec3(r2).z,
+          "attribute and method disagree");
+    TEST("the host writes the member, the script sees it on the next read (no cached copy)");
+    n->position = Vec3f{7, 7, 7};
+    CHECK(call_ok(e, nv, "read_x", &out) && near_to(out, 7.0), "stale read");
     Value dt[1] = {val_float(0.1)};
     probe(e, nv, "self.rotation = Vec3(..) (Spinner)", "spin", dt, 1);
-    TEST("rotation attribute write left the C++ rotation untouched");
-    CHECK(n->rotation.y == 0, "rotation reached C++?!");
+    TEST("self.rotation = Vec3(0, dt, 0) reaches the C++ rotation");
+    CHECK(std::fabs(n->rotation.y - 0.1f) < 1e-6 && n->rotation.x == 0, "rotation not written");
+
     Value ca[1] = {cv};
     probe(e, nv, "cam.fov = 33.0 (write)", "cam_attr_write", ca, 1);
+    TEST("cam.fov = 33.0 writes the C++ float (property<&Camera3D::fov>)");
+    CHECK(cam->fov == 33.0f, "fov not written");
     probe(e, nv, "cam.fov (read)", "cam_attr_read", ca, 1);
     probe(e, nv, "cam.fov() (getter call)", "cam_getter", ca, 1);
-    TEST("cam.fov = 33 attribute write did not reach C++ (fov stays 70)");
-    CHECK(cam->fov == 70.0f, "fov changed");
+    TEST("cam.fov and cam.fov() both read the member");
+    CHECK(call_ok(e, nv, "cam_attr_read", &r1, ca, 1) && call_ok(e, nv, "cam_getter", &r2, ca, 1) &&
+              near_to(r1, 33.0) && near_to(r2, 33.0),
+          "fov reads differ");
+    TEST("typed receiver (cam: Camera3D): cam.fov += 2.0 goes through the property, not an index");
+    CHECK(call_ok(e, nv, "cam_typed", &out, ca, 1) && near_to(out, 35.0) && cam->fov == 35.0f, "typed receiver wrong");
+
+    TEST("a wrong value type is an error naming the setter, member unchanged");
+    n->position = Vec3f{1, 1, 1};
+    bool bad = !call_ok(e, nv, "bad_type") && strstr(g_err, "Vec3") != nullptr;
+    FINDING("self.position = 5 -> %s", first_line(g_err).c_str());
+    bool bad2 = !call_ok(e, nv, "bad_fov", nullptr, ca, 1) && strstr(g_err, "number") != nullptr;
+    FINDING("cam.fov = \"wide\" -> %s", first_line(g_err).c_str());
+    CHECK(bad && bad2 && n->position.x == 1 && cam->fov == 35.0f, "type errors not reported / member changed");
+
+    TEST("read-only property (getter<&Node::isInsideTree>): writing is a clear error, no script field is created");
+    bool ro = !call_ok(e, nv, "ro_write") && strstr(g_err, "'Probe.inside_tree' is read-only") != nullptr;
+    FINDING("self.inside_tree = False -> %s", first_line(g_err).c_str());
+    Value nargs[1] = {nv};
+    bool ro2 = !call_ok(e, nv, "ro_write_other", nullptr, nargs, 1) && strstr(g_err, "'Probe.child_count' is read-only");
+    CHECK(ro && ro2 && !has_field(e.klass("Probe"), "inside_tree") && !has_field(e.klass("Probe"), "child_count"),
+          "read-only write not rejected / created a field");
+    TEST("read-only property reads work (self.child_count == 1 child)");
+    CHECK(call_ok(e, nv, "counts", &out) && is_int(out) && out.as.integer == 1, "child_count wrong");
+
+    TEST("accessor-pair property: self.name = \"renamed\" reaches Node::setName, self.name reads getName");
+    CHECK(call_ok(e, nv, "rename", &out) && is_string(out) && n->name == "renamed" &&
+              strcmp(as_string(out)->chars, "renamed") == 0,
+          "name pair wrong");
+    TEST("accessor-pair property with bool: self.processing toggles Node::processing");
+    bool before = n->processing;
+    CHECK(call_ok(e, nv, "toggle", &out) && is_bool(out) && n->processing == !before && out.as.boolean == n->processing,
+          "processing pair wrong");
+    MeshInstance3D *mi = e.add<MeshInstance3D>(e.tree->root, "mi");
+    Value ma[1] = {e.host->instance_for(mi)};
+    TEST("accessor-pair const char * property: m.mesh = \"tree.obj\" / m.mesh");
+    CHECK(call_ok(e, nv, "mesh_set", &out, ma, 1) && is_string(out) && mi->mesh == "tree.obj", "mesh pair wrong");
+
+    TEST("unrelated attributes still create ordinary script fields");
+    CHECK(call_ok(e, nv, "extra_field", &out) && is_int(out) && out.as.integer == 11 && has_field(e.klass("Probe"), "tag"),
+          "plain field broken");
+    TEST("a property read as a value is the property value, not a bound method");
+    n->position = Vec3f{2, 4, 6};
+    CHECK(call_ok(e, nv, "as_value", &out) && is_vec3(out) && as_vec3(out).z == 6, "bound method leaked");
+
+    /* inheritance: Sub(Probe) and Hero(Sub) are script subclasses of a script subclass of Node3D */
+    Node3D *sn = e.add<Node3D>(e.tree->root, "sn", "Sub");
+    Node3D *hn = e.add<Node3D>(e.tree->root, "hn", "Hero");
+    sn->position = Vec3f{1, 0, 0};
+    hn->position = Vec3f{0, 0, 0};
+    Value sv = e.host->instance_for(sn), hv = e.host->instance_for(hn);
+    Value d2[1] = {val_float(0.5)};
+    TEST("a script subclass inherits the property (Sub.sub_move: self.position.x += dt)");
+    CHECK(call_ok(e, sv, "sub_move", &out, d2, 1) && near_to(out, 1.5) && sn->position.x == 1.5f, "Sub did not reach C++");
+    TEST("two levels down (Hero): self.position = self.position + Vec3(1,1,1); self.scale.y = 3.0");
+    CHECK(call_ok(e, hv, "hero_set", &out) && hn->position.x == 1 && hn->position.z == 1 && hn->scale.y == 3.0f &&
+              hn->scale.x == 1 && is_vec3(out) && as_vec3(out).y == 3.0f,
+          "Hero did not reach C++");
+    TEST("the inherited property is also reachable from a base-class method on a Sub instance");
+    CHECK(call_ok(e, sv, "read_x", &out) && near_to(out, 1.5), "inherited base method wrong");
+
+    TEST("lookup order: a script field named like a property wins (Wide.fov = 5.0 class default)");
+    Camera3D *wn = e.add<Camera3D>(e.tree->root, "wn", "Wide");
+    Value wv = e.host->instance_for(wn);
+    CHECK(call_ok(e, wv, "read", &out) && near_to(out, 5.0) && wn->fov == 70.0f, "field did not win");
+
+    TEST("no script errors left over");
+    CHECK(e.host->errors == 0, "unexpected host errors");
 }
 
 /* =========================================================
@@ -1347,11 +1528,19 @@ static void run_bench(int N, int frames)
     double b = bench_mode(N, frames, "BMove");
     double c = bench_mode(N, frames, "BNone");
     double d = bench_mode(N, frames, "BEmpty");
+    double f_attr = bench_mode(N, frames, "BAttr");
+    double g_aug = bench_mode(N, frames, "BAugX");
     printf("per-frame (ms/frame, %d nodes):\n", N);
     printf("  (a) all C++ _process, no script                       : %8.4f ms  %7.1f ns/node\n", a, a * 1e6 / N);
     printf("  (b) script _process set_position(position()+Vec3)     : %8.4f ms  %7.1f ns/node\n", b, b * 1e6 / N);
     printf("  (c) script attached, NO _process override (skips VM)  : %8.4f ms  %7.1f ns/node\n", c, c * 1e6 / N);
     printf("  (d) script _process, empty body                       : %8.4f ms  %7.1f ns/node\n", d, d * 1e6 / N);
+    printf("  (e) script _process self.position = self.position + Vec3  : %8.4f ms  %7.1f ns/node\n", f_attr,
+           f_attr * 1e6 / N);
+    printf("  (f) script _process self.position.x += dt (attribute)  : %8.4f ms  %7.1f ns/node\n", g_aug,
+           g_aug * 1e6 / N);
+    printf("  derived: attribute form body (e-d) = %.1f ns/node vs method form (b-d) = %.1f ns/node\n",
+           (f_attr - d) * 1e6 / N, (b - d) * 1e6 / N);
     printf("  derived: call overhead (d-c) = %.1f ns/node;  body cost (b-d) = %.1f ns/node\n", (d - c) * 1e6 / N,
            (b - d) * 1e6 / N);
 
@@ -1415,8 +1604,25 @@ static void run_bench(int N, int frames)
     }
 }
 
+/* --dis: the disassembly of the attribute forms (what `zen --dis-only` would
+** print if the zen CLI had Node3D bound). Documented shape, see test_attributes(). */
+static void run_dis()
+{
+    Env e;
+    if (!e.load(SRC_DIS)) return;
+    ObjClass *k = e.klass("DisProbe");
+    for (int i = 0; k && i < k->vtable_size; i++)
+        if (is_closure(k->vtable[i]) && as_closure(k->vtable[i])->func->name)
+            disassemble_func(as_closure(k->vtable[i])->func, as_closure(k->vtable[i])->func->name->chars, &e.vm);
+}
+
 int main(int argc, char **argv)
 {
+    if (argc >= 2 && strcmp(argv[1], "--dis") == 0)
+    {
+        run_dis();
+        return 0;
+    }
     if (argc >= 2 && strcmp(argv[1], "--bench") == 0)
     {
         int N = argc >= 3 ? atoi(argv[2]) : 10000;

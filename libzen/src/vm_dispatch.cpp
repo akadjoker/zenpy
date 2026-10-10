@@ -63,6 +63,39 @@ namespace zen
         return ret;
     }
 
+    /* Native property access (ClassBuilder::property), reached from OP_GETFIELD /
+    ** OP_SETFIELD only after the instance field lookup failed. Out of line so
+    ** the dispatch loop's frame and register allocation stay as they were. The
+    ** natives follow the method convention (self at args[-1]), laid out in a
+    ** small scratch area instead of the register file: sc[0] = self,
+    ** sc[1..] = the argument / result slot. */
+    static ZEN_NOINLINE bool property_get(VM *vm, const NativeProperty *prop, Value self, Value *out)
+    {
+        Value sc[2] = {self, val_nil()};
+        int nret = call_native(vm, prop->getter, &sc[1], 0);
+        if (nret < 0)
+        {
+            if (!vm->had_error())
+                vm->runtime_error("native property '%s' getter failed", prop->name->chars);
+            return false;
+        }
+        *out = nret > 0 ? sc[1] : val_nil();
+        return true;
+    }
+
+    static ZEN_NOINLINE bool property_set(VM *vm, const NativeProperty *prop, Value self, Value val)
+    {
+        Value sc[2] = {self, val};
+        int nret = call_native(vm, prop->setter, &sc[1], 1);
+        if (nret < 0)
+        {
+            if (!vm->had_error())
+                vm->runtime_error("native property '%s' setter failed", prop->name->chars);
+            return false;
+        }
+        return true;
+    }
+
     /* Method by name in a class or an ancestor (`methods` holds only a
        class's own definitions; `name` is interned, so the map probe is a
        pointer compare). Used to turn `obj.method` read as a value into a
@@ -3803,7 +3836,25 @@ namespace zen
                         goto getfield_done;
                     }
                 }
-                /* Not a field: a method read as a value becomes a bound
+                /* Not a field: a native property (ClassBuilder::property, own or
+                ** inherited) calls its getter. Fields win over properties,
+                ** properties over methods. */
+                if (klass->num_props > 0 || klass->parent)
+                {
+                    const NativeProperty *prop = class_find_property(klass, name);
+                    if (prop)
+                    {
+                        SAVE_IP();
+                        if (!prop->getter)
+                            RT_ERROR("'%s.%s' is write-only", klass->name->chars, name->chars);
+                        Value pv;
+                        if (!property_get(this, prop, receiver, &pv))
+                            return;
+                        R[ZEN_A(i)] = pv;
+                        goto getfield_done;
+                    }
+                }
+                /* A method read as a value becomes a bound
                 ** method {receiver, method} (`f = obj.m; f(x)`). */
                 {
                     Value method;
@@ -3963,6 +4014,22 @@ namespace zen
                         {
                             class_idx = fi;
                             break;
+                        }
+                    }
+                    if (class_idx < 0 && (klass->num_props > 0 || klass->parent))
+                    {
+                        /* Not a field anywhere: a native property (own or
+                        ** inherited) takes the store instead of a new
+                        ** script field that would shadow it. */
+                        const NativeProperty *prop = class_find_property(klass, name);
+                        if (prop)
+                        {
+                            SAVE_IP();
+                            if (!prop->setter)
+                                RT_ERROR("'%s.%s' is read-only", klass->name->chars, name->chars);
+                            if (!property_set(this, prop, receiver, val))
+                                return;
+                            goto setfield_done;
                         }
                     }
                     if (class_idx < 0)

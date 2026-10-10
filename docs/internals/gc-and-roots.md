@@ -81,6 +81,58 @@ lançado de dentro de um nativo herda a pausa). A excepção é o nativo
 `ZEN_NATIVE_GC_SAFE`, que corre sem pausa e por isso pode ser interrompido
 pela alocação de buffers que ele próprio fizer.
 
+## Afinação (limiar mínimo e factor de crescimento)
+
+Dois parâmetros no `GC` decidem *quando* corre o próximo ciclo (o *como* não
+muda):
+
+- `min_threshold` (por omissão **8 MB**, `kGCDefaultMinThreshold`): o heap
+  mínimo que dispara uma colecção. A primeira corre quando `bytes_allocated`
+  passa este valor.
+- `grow_factor` (por omissão **2.0**, `kGCDefaultGrowFactor`, o "pause de 200 %"
+  do Lua): depois de cada ciclo,
+  `next_gc = max(bytes_allocated * grow_factor, min_threshold)`; e
+  `next_gc` fica sempre acima de `bytes_allocated`.
+
+Regra prática: um jogo com um live set de N MB faz uma colecção de
+aproximadamente N*(factor-1) MB em N*(factor-1) MB de alocação, mas nunca com o
+heap abaixo de `min_threshold`. Hospedeiros móveis ou com pouca RAM podem baixar
+o mínimo (o piso é 64 KB, `kGCFloorThreshold`); quem tem muita RAM e quer menos
+pausas pode subir o factor.
+
+Medido em `tests/manual/cross_lang_bench/zen/binary_trees.py` (live set ~1 MB;
+os valores antigos eram 256 KB / 2.0, o que dava um mark+sweep completo a cada
+1-2 MB alocados):
+
+| configuração | tempo | RSS |
+|---|---|---|
+| antiga (256 KB, 2.0) | 0.229-0.239 s | ~13 MB |
+| nova por omissão (8 MB, 2.0) | 0.207-0.210 s | ~13 MB |
+| 8 MB, 3.0 | 0.195-0.201 s | ~17 MB |
+| GC pausado | 0.208 s | 166 MB |
+
+(Melhor de várias execuções; RSS medido com `/usr/bin/time -v`. O custo do
+colector era toda a diferença para a VM irmã neste benchmark.)
+
+API:
+
+- C++: `vm.set_gc_tuning(min_bytes, factor)` e
+  `vm.gc_tuning(&min_out, &factor_out)`. Valores fora de gama são cortados, não
+  rejeitados: mínimo < 64 KB passa a 64 KB, factor < 1.0 (ou NaN) passa a 1.0.
+  Subir o mínimo acima do heap actual sobe `next_gc` logo (o novo valor vale
+  já); baixá-lo não mexe num limiar pendente, só vale a partir do próximo
+  ciclo. Com o GC pausado (`pause_depth > 0`, o caso de qualquer nativo) o que
+  se actualiza é `pause_saved_next_gc`, nunca o `next_gc` vivo (que é o
+  sentinela "nunca").
+- Scripts: `gc_tune(min_bytes, factor)` e `gc_stats()`, que devolve um map
+  `{"bytes", "next_gc", "objects", "collections", "min_threshold",
+  "grow_factor"}` (`next_gc` é o limiar pendente, também dentro de um nativo).
+  `mem_info()` continua a devolver o tuplo `(objects, bytes, next_gc)`.
+
+`ZEN_DEBUG_STRESS_GC` ignora o limiar (recolhe em cada alocação/safe point).
+Testes: `tests/81_gc_tuning.py` e o bloco "GC tuning" de
+`tests/cpp/test_embedding.cpp`.
+
 ## Para quem embebe: Values fora do heap da VM
 
 Como o GC já corre em qualquer entrada de função ou volta de ciclo, **um

@@ -2214,6 +2214,79 @@ nat_count = sig.count
     g_cb_ref.reset();
 }
 
+/* =========================================================
+** TEST: GC tuning (set_gc_tuning / gc_tuning / paused tuning)
+** ========================================================= */
+static void test_gc_tuning()
+{
+    printf("\n--- GC tuning ---\n");
+    VM vm;
+    vm.open_lib_globals(&zen_lib_base);
+    GC &gc = vm.get_gc();
+    size_t mn = 0;
+    float fac = 0.0f;
+
+    TEST("defaults are 8 MB / 2.0 and the first cycle waits for 8 MB");
+    vm.gc_tuning(&mn, &fac);
+    CHECK(mn == kGCDefaultMinThreshold && mn == 8u * 1024 * 1024 && fac == 2.0f &&
+          gc.next_gc == mn,
+          "unexpected defaults");
+
+    TEST("set_gc_tuning / gc_tuning round trip");
+    vm.set_gc_tuning(2 * 1024 * 1024, 3.5f);
+    vm.gc_tuning(&mn, &fac);
+    CHECK(mn == 2u * 1024 * 1024 && fac == 3.5f, "tuning not stored");
+
+    TEST("values are clamped, not rejected");
+    vm.set_gc_tuning(1, 0.25f);
+    vm.gc_tuning(&mn, &fac);
+    bool ok = mn == 64u * 1024 && fac == 1.0f;
+    vm.set_gc_tuning(100 * 1024, -3.0f);
+    vm.gc_tuning(&mn, &fac);
+    ok = ok && mn == 100u * 1024 && fac == 1.0f;
+    vm.gc_tuning(nullptr, nullptr); /* null outputs are allowed */
+    CHECK(ok, "expected clamping to 64 KB / 1.0");
+
+    TEST("raising the minimum raises next_gc immediately");
+    vm.set_gc_tuning(1024 * 1024, 2.0f);
+    vm.collect(); /* next_gc = max(live * 2, 1 MB) = 1 MB for this tiny heap */
+    size_t before = gc.next_gc;
+    vm.set_gc_tuning(16 * 1024 * 1024, 2.0f);
+    bool raised = before < 16u * 1024 * 1024 && gc.next_gc == 16u * 1024 * 1024;
+    /* lowering the minimum never moves a pending threshold */
+    vm.set_gc_tuning(1024 * 1024, 2.0f);
+    CHECK(raised && gc.next_gc == 16u * 1024 * 1024,
+          "expected next_gc = 16 MB after raising, unchanged after lowering");
+
+    TEST("a collection reschedules from the new tuning");
+    vm.set_gc_tuning(4 * 1024 * 1024, 2.0f);
+    vm.collect();
+    CHECK(gc.next_gc == 4u * 1024 * 1024, "expected next_gc = 4 MB after a cycle");
+
+    TEST("tuning while paused updates the saved threshold");
+    vm.set_gc_tuning(1024 * 1024, 2.0f);
+    vm.collect();
+    gc_pause(&gc);
+    bool sentinel = gc.next_gc == (size_t)-1;
+    vm.set_gc_tuning(32 * 1024 * 1024, 2.0f);
+    bool still_paused = gc.next_gc == (size_t)-1 && gc.pause_saved_next_gc == 32u * 1024 * 1024;
+    gc_resume(&gc);
+    CHECK(sentinel && still_paused && gc.next_gc == 32u * 1024 * 1024,
+          "expected live threshold untouched while paused, 32 MB after resume");
+
+    TEST("gc_stats()/gc_tune() from script see the host tuning");
+    vm.set_gc_tuning(5 * 1024 * 1024, 2.0f);
+    ok = run_source(vm, R"(
+s0 = gc_stats()
+gc_tune(6 * 1024 * 1024, 3.0)
+s1 = gc_stats()
+)");
+    vm.gc_tuning(&mn, &fac);
+    Value s0 = vm.get_global("s0");
+    ok = ok && !vm.had_error() && is_map(s0) && mn == 6u * 1024 * 1024 && fac == 3.0f;
+    CHECK(ok, "expected script gc_tune to reach the VM");
+}
+
 int main()
 {
     printf("=== Zen Embedding Tests (C++ <-> Script) ===\n");
@@ -2242,6 +2315,7 @@ int main()
     test_zen_bind();
     test_vec_values();
     test_host_refs_and_bound_methods();
+    test_gc_tuning();
 
     printf("\n========================================\n");
     printf("Results: %d passed, %d failed\n", g_tests_passed, g_tests_failed);

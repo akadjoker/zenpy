@@ -107,6 +107,8 @@ Control garbage collection and inspect memory usage.
 | `gc_resume` | 0 | Resume automatic GC. |
 | `mem_used` | 0 | Get current memory usage in bytes. |
 | `mem_info` | 0 | Get `(object_count, bytes_allocated, next_gc_threshold)`. |
+| `gc_tune` | 2 | `gc_tune(min_bytes, factor)`: set the smallest heap that triggers a collection (default 8 MB, min 64 KB) and the growth factor (default 2.0, min 1.0). Out-of-range values are clamped. |
+| `gc_stats` | 0 | Map `{bytes, next_gc, objects, collections, min_threshold, grow_factor}`. |
 | `clock` | 0 | Get a monotonic time value in seconds. |
 
 **Example:**

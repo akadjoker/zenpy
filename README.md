@@ -104,6 +104,23 @@ cmake --build build
 ./bin/zen tests/01_print.py
 ```
 
+#### Profile-guided build (faster interpreter)
+
+The interpreter is one very large function, so the compiler has to guess
+which of its branches are hot. `tools/build_pgo.sh` replaces the guess with
+counts from a real run — it builds instrumented, runs the benchmarks, then
+rebuilds using those counts. Same source, better code layout:
+
+```bash
+tools/build_pgo.sh            # or: tools/build_pgo.sh my_workload.py ...
+./run_tests.sh                # verify before trusting it
+```
+
+Measured against the plain Release build: -10% on integer arithmetic, -7% on
+native calls, -4% on script-driving-natives, -2% on the game benchmark. Worth
+it for a binary you ship; re-run it after substantial interpreter changes,
+since a stale profile helps less.
+
 ### Getting Started
 
 Try the interactive REPL:
@@ -357,14 +374,84 @@ int main() {
 ### ClassBuilder — expose C++ classes to scripts
 
 ```cpp
-zen::ClassBuilder(vm, "Vec2")
+// Native methods: `self` is args[-1], the arguments are args[0..], the result
+// goes in args[0], and the return value is how many results you wrote.
+static int vec2_init(zen::VM *, zen::Value *args, int) {
+    zen::ObjInstance *self = zen::as_instance(args[-1]);
+    self->fields[0] = args[0];                        // x (declaration order)
+    self->fields[1] = args[1];                        // y
+    return 0;                                         // no result
+}
+static int vec2_length(zen::VM *, zen::Value *args, int) {
+    zen::ObjInstance *self = zen::as_instance(args[-1]);
+    double x = zen::to_number(self->fields[0]), y = zen::to_number(self->fields[1]);
+    args[0] = zen::val_float(std::sqrt(x * x + y * y));
+    return 1;                                         // one result, in args[0]
+}
+
+vm.def_class("Vec2")
     .field("x").field("y")
-    .method("__init__", 2, vec2_init)
-    .method("length", 0, vec2_length)
-    .build();
+    .method("__init__", vec2_init, 2)
+    .method("length", vec2_length, 0)
+    .end();
+// script:  v = Vec2(3, 4); print(v.length())        # 5.0
 ```
 
+A native method sees the receiver one slot *before* its arguments (`args[-1]`);
+`arity` is the number of script arguments, and fields are indexed in the order
+you declared them.
+
 Script classes can inherit from C++ classes — the VM handles the vtable dispatch.
+
+### zen_bind.hpp — typed bindings
+
+Writing one `static int f(VM*, Value*, int)` per method gets old fast.
+`<zen_bind.hpp>` (header-only, C++17, no STL) generates those wrappers from
+function and member-function pointers at compile time, on top of the
+`ClassBuilder` calls above:
+
+```cpp
+#include "zen_bind.hpp"
+using namespace zen;
+
+struct Body {
+    float x, y; int hits = 0;
+    Body(float x, float y);
+    void move(float dx, float dy);
+    float speed() const;
+    Body *nearest(Body &other);
+};
+static double dist(double a, double b);
+
+bind::def_class<Body>(vm, "Body")
+    .ctor<float, float>().dtor()          // Body(3, 4) -> new Body(3, 4); delete on collect
+    .method<&Body::move>("move")          // arity deduced from the signature
+    .method<&Body::speed>("speed")
+    .method<&Body::nearest>("nearest")    // returns a wrapped Body* (None for nullptr)
+    .property<&Body::hits>("hits")        // hits() and set_hits(v)
+    .end();
+bind::def_fn<&dist>(vm, "dist");          // free functions too
+// script:  b = Body(3, 4); b.move(1, 1); print(b.speed()); b.set_hits(7)
+vm.def_global("hero", bind::wrap<Body>(vm, &host_hero));   // host-owned, never deleted
+```
+
+- **Conversions.** `bool`, every integer width (out-of-range is an error, not a
+  truncation), enums, `float`/`double` (ints promote), `const char*` (valid only
+  during the call, copy it to keep it), `zen::Value`, and `T*`/`T&` for bound
+  classes. A leading `VM*` is injected and is not a script argument.
+- **Property and wrap.** `property<&T::x>` registers a getter `x()` and a setter
+  `set_x(v)` (`getter`/`setter` do one each). `wrap<T>(vm, ptr)` makes a script
+  instance over memory the host owns (`nullptr` becomes `None`); a bound
+  method returning `T*` or `T&` does the same. The GC deletes only what a class
+  with `.dtor()` created from script, never a wrapped pointer.
+- **Errors.** A wrong-typed argument raises a runtime error naming the function,
+  the argument and what it got (`move: argument 1 must be a number, got
+  string`), and the C++ function is not called. A `T*`/`T&` parameter checks the
+  instance's class (or a script subclass of it) before touching `native_data`,
+  and `None` is rejected, so nothing is ever cast blindly.
+
+Details, the class check and the ownership rules are in
+[docs/internals/natives-and-embedding.md](docs/internals/natives-and-embedding.md).
 
 ### Trimming modules
 
@@ -574,7 +661,7 @@ expression, `a, *b = ...`, `**kwargs` parameters, keyword-only `*`, lambda
 defaults, `f(**d)`, `[*a]`, f-string `!r`, raw strings, `for/while ... else`.
 See bugs.md "Ronda 5" for the full list.
 
-### Bytecode format (`.zenbc`, version 2.7)
+### Bytecode format (`.zenbc`, version 2.8)
 
 ```
 Header:  ZENBC(5) | major(u16) | minor(u16) | flags(u32)
@@ -596,6 +683,9 @@ Functions: recursive tree of function bodies
 
 ### `net`
 `resolve`, `tcp_connect`, `tcp_listen`, `tcp_accept`, `udp_create`, `send`, `recv`, `sendto`, `recvfrom`, `set_blocking`, `set_nodelay`, `poll`, `close`
+
+### `xml`
+`parse`, `stringify` — documents as dicts/lists (`tag`, `attrs`, `text`, `children`), on the vendored `ct::Xml` parser; see docs/zenpy_xml.md
 
 ### `http`
 `get`, `post`, `download`, `ping`, `get_local_ip`

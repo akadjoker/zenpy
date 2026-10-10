@@ -54,6 +54,17 @@ namespace zen
 
     int Compiler::parse_precedence_inner(int prec, int dest)
     {
+        /* Snapshot before consuming anything: `a if c else b` needs to
+        ** re-parse `a` inside the true branch, and by the time the `if` is
+        ** seen both the tokens and the code for `a` are already behind us. */
+        const LexerState operand_lex = lexer_.save_state();
+        const Token operand_prev = previous_;
+        const Token operand_curr = current_;
+        const int operand_code = state_->emitter.current_offset();
+
+        const OperandSnapshot operand_snap = {operand_lex, operand_prev,
+                                              operand_curr, operand_code};
+
         advance();
         Token token = previous_;
 
@@ -124,7 +135,7 @@ namespace zen
                 {
                     /* 'not in' is the operator — hand to infix_rule with op=TOK_NOT */
                     Token op = previous_; /* the 'not' token */
-                    reg = infix_rule(op, reg, dest);
+                    reg = infix_rule(op, reg, dest, &operand_snap);
                     last_expr_ctor_valid_ = false;
                     if (had_error_)
                         return reg;
@@ -150,7 +161,7 @@ namespace zen
             pending_subscript_receiver_valid_ = bare_name && op.type == TOK_LBRACKET;
             pending_subscript_receiver_ = token;
             bare_name = false;
-            reg = infix_rule(op, reg, dest);
+            reg = infix_rule(op, reg, dest, &operand_snap);
             /* Only a call can leave "this was ClassName(...)" standing. */
             if (op.type != TOK_LPAREN)
                 last_expr_ctor_valid_ = false;
@@ -252,7 +263,7 @@ namespace zen
     ** Infix rules
     ** ========================================================= */
 
-    int Compiler::infix_rule(Token op, int left, int dest)
+    int Compiler::infix_rule(Token op, int left, int dest, const OperandSnapshot *snap)
     {
         switch (op.type)
         {
@@ -289,7 +300,7 @@ namespace zen
         case TOK_OR:
             return logical_or(left, dest);
         case TOK_IF:
-            return ternary_expr(left, dest);
+            return ternary_expr(left, dest, snap);
 
         /* Postfix-like (call, subscript, dot) */
         case TOK_LPAREN:
@@ -947,9 +958,68 @@ namespace zen
     ** `left` already holds true_val (evaluated before `if` token)
     ** ========================================================= */
 
-    int Compiler::ternary_expr(int true_val, int dest)
+    int Compiler::ternary_expr(int true_val, int dest, const OperandSnapshot *snap)
     {
         int reg = (dest >= 0) ? dest : alloc_reg();
+
+        /* `a if c else b` must not evaluate `a` when c is false. Python
+        ** guarantees it and ordinary code leans on it: `x[0] if x else d`,
+        ** `n // d if d else 0` — the second raised on division by zero here.
+        **
+        ** The shape of the syntax is what made this wrong: the value comes
+        ** before the condition, so by the time `if` is parsed, `a` has
+        ** already been compiled AND emitted. (zenvm's `c ? a : b` puts the
+        ** condition first and gets laziness for free.)
+        **
+        ** Fix: the snapshot says where `a` began, in tokens and in code.
+        ** Discard its code, emit the condition and the branch, then rewind
+        ** the lexer and parse `a` again inside the true arm. Re-parsing is
+        ** what the map/set literals and comprehensions already do. */
+        if (snap != nullptr && !panic_mode_ && !abort_parse_ &&
+            snap->code_offset <= state_->emitter.current_offset())
+        {
+            /* Where the condition starts — we come back here after `a`. */
+            LexerState cond_lex = lexer_.save_state();
+            Token cond_prev = previous_, cond_curr = current_;
+
+            state_->emitter.shrink_to(snap->code_offset);
+            if (true_val != reg)
+                free_reg(true_val);
+
+            int cond = parse_precedence(PREC_OR, -1);
+            int jump_to_else = state_->emitter.emit_jump(OP_JMPIFNOT, cond, previous_.line);
+            free_reg(cond);
+
+            /* True arm: rewind to just before `a` and compile it here. */
+            LexerState after_cond = lexer_.save_state();
+            Token after_prev = previous_, after_curr = current_;
+            lexer_.restore_state(snap->lex);
+            previous_ = snap->prev;
+            current_ = snap->curr;
+            int tv = parse_precedence(PREC_TERNARY + 1, reg);
+            if (tv != reg)
+            {
+                emit_move(reg, tv);
+                free_reg(tv);
+            }
+            /* Skip the `if <cond>` we already consumed above. */
+            lexer_.restore_state(after_cond);
+            previous_ = after_prev;
+            current_ = after_curr;
+            (void)cond_lex; (void)cond_prev; (void)cond_curr;
+
+            int jump_over_else = state_->emitter.emit_jump(OP_JMP, 0, previous_.line);
+            state_->emitter.patch_jump(jump_to_else);
+            consume(TOK_ELSE, "Expected 'else' in ternary expression.");
+            int fv = parse_precedence(PREC_TERNARY, -1);
+            if (fv != reg)
+            {
+                emit_move(reg, fv);
+                free_reg(fv);
+            }
+            state_->emitter.patch_jump(jump_over_else);
+            return reg;
+        }
 
         /* Move true_val into result reg */
         if (true_val != reg)

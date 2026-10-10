@@ -133,8 +133,18 @@ namespace zen
         "INVOKE_VT_R",
         "EQJMPIFNOT",
         "NEJMPIFNOT",
+        "NEXT",
         "RETURNNIL",
     };
+
+    /* Indexed by OpCode: opcode_name() reads it as s_opnames[(int)op], so an
+    ** opcode added to the enum without an entry here shifts every later name
+    ** and the disassembler silently prints the wrong one — which is exactly
+    ** what the comment above describes happening. This makes it a build
+    ** error instead. */
+    static_assert(sizeof(s_opnames) / sizeof(s_opnames[0]) == (size_t)OP_RETURNNIL + 1,
+                  "s_opnames is out of sync with the OpCode enum");
+
 
     const char *opcode_name(OpCode op)
     {
@@ -161,12 +171,6 @@ namespace zen
             break;
         case VAL_FLOAT:
             printf("%g", val.as.number);
-            break;
-        case VAL_SMALL_STRING:
-            printf("\"");
-            for (int i = 0; i < val.as.sso.len; i++)
-                printf("%c", val.as.sso.chars[i]);
-            printf("\"");
             break;
         case VAL_OBJ:
         {

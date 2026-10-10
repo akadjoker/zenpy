@@ -449,7 +449,7 @@ namespace zen
             if (check(TOK_IF) && current_.line == previous_.line)
             {
                 advance();
-                reg = infix_rule(previous_, reg, -1);
+                reg = infix_rule(previous_, reg, -1, nullptr); /* no snapshot on this path */
             }
             return reg;
         }
@@ -1017,6 +1017,22 @@ namespace zen
             return r;
         }
 
+        /* Intrinsic: next(g) → OP_NEXT. Generators are fibers and resuming
+        ** one has to re-enter execute(), which a native cannot do, so this
+        ** is an opcode rather than a builtin function. */
+        if (name.length == 4 && memcmp(name.start, "next", 4) == 0 && check(TOK_LPAREN))
+        {
+            advance(); /* consume '(' */
+            int r = (dest >= 0) ? dest : alloc_reg();
+            int arg = expression(-1);
+            consume(TOK_RPAREN, "Expected ')' after argument to next().");
+            state_->emitter.emit_abc(OP_NEXT, r, arg, 0, previous_.line);
+            free_reg(arg);
+            state_->next_reg = r + 1;
+            if (state_->next_reg > state_->max_reg) state_->max_reg = state_->next_reg;
+            return r;
+        }
+
         /* Intrinsic: len(x) → OP_LEN */
         if (name.length == 3 && memcmp(name.start, "len", 3) == 0 && check(TOK_LPAREN))
         {
@@ -1037,9 +1053,48 @@ namespace zen
 
         if (can_assign && match(TOK_EQ))
         {
+            /* `g = g + x` is the same operation as `g += x`, and the += path
+            ** already emits the non-marking AUG pair so ADD can append a
+            ** string in place. Written the long way it took OP_GETGLOBAL,
+            ** which marks the string shared, so every append copied the whole
+            ** accumulator: 200k appends went from 0.01s to 51s, quadratic.
+            **
+            ** Detect it after the fact: the RHS is one instruction, that
+            ** instruction reads the global we are assigning, and it was
+            ** loaded by the GETGLOBAL immediately before. Rewrite the pair
+            ** rather than re-parse. */
+            int rhs_start = state_->emitter.current_offset();
             int val = expression(r);
             if (val != r) emit_move(r, val);
-            state_->emitter.emit_abx(OP_SETGLOBAL, r, gidx, previous_.line);
+
+            bool aug = false;
+            int off = state_->emitter.current_offset() - 1;
+            if (off >= rhs_start + 1)
+            {
+                Instruction last = state_->emitter.instruction_at(off);
+                OpCode lop = (OpCode)ZEN_OP(last);
+                /* Only the ops whose AUG form is meaningful — a string
+                ** accumulator is ADD; the rest are here because += accepts
+                ** them and the shape is identical. */
+                if ((lop == OP_ADD || lop == OP_SUB || lop == OP_MUL ||
+                     lop == OP_DIV || lop == OP_MOD || lop == OP_IDIV ||
+                     lop == OP_POW || lop == OP_BAND || lop == OP_BOR ||
+                     lop == OP_BXOR || lop == OP_SHL || lop == OP_SHR) &&
+                    ZEN_A(last) == r)
+                {
+                    Instruction first = state_->emitter.instruction_at(rhs_start);
+                    if (ZEN_OP(first) == OP_GETGLOBAL &&
+                        (int)ZEN_BX(first) == gidx &&
+                        ZEN_B(last) == (int)ZEN_A(first))
+                    {
+                        state_->emitter.rewrite_opcode_at(rhs_start, OP_GETGLOBAL_AUG);
+                        aug = true;
+                    }
+                }
+            }
+
+            state_->emitter.emit_abx(aug ? OP_SETGLOBAL_AUG : OP_SETGLOBAL,
+                                     r, gidx, previous_.line);
             note_global_written_in_function(gidx);
             infer_assigned_class_global(gidx);
             return r;
@@ -1850,6 +1905,24 @@ namespace zen
                     return j;
             return -1;
         }
+        /* Not a script class: it may be an engine class registered through
+        ** ClassBuilder, whose field_names are interned in the same GC table
+        ** as the compiler's tokens (pointer compare, like the registry). */
+        if (vm_)
+        {
+            char buf[256];
+            int n = cls_len < 255 ? cls_len : 255;
+            memcpy(buf, cls, n);
+            buf[n] = '\0';
+            int gidx = vm_->find_global(buf);
+            if (gidx >= 0 && is_class(vm_->get_global(gidx)))
+            {
+                ObjClass *klass = as_class(vm_->get_global(gidx));
+                for (int j = 0; j < klass->num_fields; j++)
+                    if (klass->field_names[j] == fname)
+                        return j;
+            }
+        }
         return -1;
     }
 
@@ -2157,7 +2230,23 @@ namespace zen
         }
         if (find_signature(nullptr, 0, name.start, name.length))
             return false;
-        return find_sig_class(name.start, name.length) != nullptr;
+        if (find_sig_class(name.start, name.length) != nullptr)
+            return true;
+        /* Engine classes come from ClassBuilder before the script compiles,
+        ** so they are visible in the VM globals. Treating them like script
+        ** classes lets e.x / e.m() use the IDXC / INVOKE_VT opcodes; those
+        ** are checked at runtime, so a rebound global still behaves. */
+        if (vm_)
+        {
+            char buf[256];
+            int n = name.length < 255 ? name.length : 255;
+            memcpy(buf, name.start, n);
+            buf[n] = '\0';
+            int gidx = vm_->find_global(buf);
+            if (gidx >= 0 && is_class(vm_->get_global(gidx)))
+                return true;
+        }
+        return false;
     }
 
     void Compiler::infer_assigned_class_local(int reg)

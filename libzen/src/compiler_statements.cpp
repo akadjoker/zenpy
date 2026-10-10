@@ -298,11 +298,11 @@ namespace zen
                     int di = arity - default_start_idx;
                     default_is_strk[di] = false;
                     if (check(TOK_MINUS)) { advance();
-                        if (check(TOK_INT)) { advance(); default_vals[di] = val_int(-(int32_t)strtol(previous_.start, nullptr, 0)); }
+                        if (check(TOK_INT)) { advance(); default_vals[di] = val_int(-(int64_t)strtoll(previous_.start, nullptr, 0)); }
                         else if (check(TOK_FLOAT)) { advance(); default_vals[di] = val_float(-strtod(previous_.start, nullptr)); }
                         else { error("Expected number after '-' in default."); default_vals[di] = val_nil(); }
                     }
-                    else if (check(TOK_INT))   { advance(); default_vals[di] = val_int((int32_t)strtol(previous_.start, nullptr, 0)); }
+                    else if (check(TOK_INT))   { advance(); default_vals[di] = val_int((int64_t)strtoll(previous_.start, nullptr, 0)); }
                     else if (check(TOK_FLOAT)) { advance(); default_vals[di] = val_float(strtod(previous_.start, nullptr)); }
                     else if (check(TOK_STRING)) {
                         advance();

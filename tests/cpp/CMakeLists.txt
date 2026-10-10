@@ -28,8 +28,16 @@ foreach(cfg DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
 endforeach()
 target_link_libraries(test_gc_native zen_static)
 
+# --- C++ binding layer (zen_bind.hpp) ---
+add_executable(test_bind test_bind.cpp)
+set_target_properties(test_bind PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${ZEN_BIN_DIR})
+foreach(cfg DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+    set_target_properties(test_bind PROPERTIES RUNTIME_OUTPUT_DIRECTORY_${cfg} ${ZEN_BIN_DIR})
+endforeach()
+target_link_libraries(test_bind zen_static)
+
 if(EMSCRIPTEN)
-    foreach(t test_embedding test_script_info test_gc_native)
+    foreach(t test_embedding test_script_info test_gc_native test_bind)
         set_target_properties(${t} PROPERTIES SUFFIX ".js")
         target_link_options(${t} PRIVATE
             -sNODERAWFS=1

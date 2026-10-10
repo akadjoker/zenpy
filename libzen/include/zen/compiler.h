@@ -278,7 +278,18 @@ namespace zen
         int parse_precedence(int prec, int dest);
         int parse_precedence_inner(int prec, int dest);
         int prefix_rule(Token token, int dest);
-        int infix_rule(Token op, int left, int dest);
+        /* Where an operand began, in both the token stream and the emitted
+        ** code — ternary_expr() rewinds to it to move `a` inside the branch
+        ** that actually wants it. */
+        struct OperandSnapshot
+        {
+            LexerState lex;
+            Token prev;
+            Token curr;
+            int code_offset;
+        };
+
+        int infix_rule(Token op, int left, int dest, const OperandSnapshot *snap);
         int number(Token token, int dest);
         int string_literal(Token token, int dest);
         int fstring_literal(Token token, int dest);
@@ -289,7 +300,7 @@ namespace zen
         int comparison(Token op, int left, int dest);
         int logical_and(int left, int dest);
         int logical_or(int left, int dest);
-        int ternary_expr(int true_val, int dest);
+        int ternary_expr(int true_val, int dest, const OperandSnapshot *snap);
         /* True when current_ continues the same postfix chain (`.`, `(`,
         ** `[`, `?.`) — see the definition in compiler_expressions.cpp for
         ** why this lets a call adjourn its own move-into-dest to whichever

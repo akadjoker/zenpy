@@ -12,7 +12,6 @@
 #include "vm.h"
 #include "memory.h"
 #include <cmath>
-#include <limits>
 #include <cstdlib>
 
 namespace zen
@@ -173,10 +172,10 @@ namespace zen
             return 1;
         }
 
-        double wrapped = std::fmod(t, length * 2.0);
+        double wrapped = fmod(t, length * 2.0);
         if (wrapped < 0.0)
             wrapped += length * 2.0;
-        args[0] = val_float(length - std::fabs(wrapped - length));
+        args[0] = val_float(length - fabs(wrapped - length));
         return 1;
     }
 
@@ -240,21 +239,21 @@ namespace zen
         return 1;
     }
 
-    /* isnan(x) */
+    /* zen_isnan(x) */
     static int nat_math_isnan(VM *vm, Value *args, int nargs)
     {
         (void)vm;
         (void)nargs;
-        args[0] = val_bool(std::isnan(to_number(args[0])));
+        args[0] = val_bool(zen_isnan(to_number(args[0])));
         return 1;
     }
 
-    /* isinf(x) */
+    /* zen_isinf(x) */
     static int nat_math_isinf(VM *vm, Value *args, int nargs)
     {
         (void)vm;
         (void)nargs;
-        args[0] = val_bool(std::isinf(to_number(args[0])));
+        args[0] = val_bool(zen_isinf(to_number(args[0])));
         return 1;
     }
 
@@ -276,40 +275,44 @@ namespace zen
 
     /* ----- function table ----- */
 
-    static const NativeReg math_functions[] = {
-        {"sin", nat_math_sin, 1},
-        {"cos", nat_math_cos, 1},
-        {"tan", nat_math_tan, 1},
-        {"asin", nat_math_asin, 1},
-        {"acos", nat_math_acos, 1},
-        {"atan", nat_math_atan, 1},
-        {"atan2", nat_math_atan2, 2},
-        {"sqrt", nat_math_sqrt, 1},
-        {"cbrt", nat_math_cbrt, 1},
-        {"exp", nat_math_exp, 1},
-        {"log", nat_math_log, 1},
-        {"log2", nat_math_log2, 1},
-        {"log10", nat_math_log10, 1},
-        {"ceil", nat_math_ceil, 1},
-        {"floor", nat_math_floor, 1},
-        {"round", nat_math_round, 1},
-        {"pow", nat_math_pow, 2},
-        {"abs", nat_math_abs, 1},
-        {"min", nat_math_min, 2},
-        {"max", nat_math_max, 2},
-        {"clamp", nat_math_clamp, 3},
-        {"lerp", nat_math_lerp, 3},
-        {"hermite", nat_math_hermite, 5},
-        {"smooth_step", nat_math_smooth_step, 3},
-        {"ping_pong", nat_math_ping_pong, 2},
-        {"angle_delta", nat_math_angle_delta, 2},
-        {"lerp_angle", nat_math_lerp_angle, 3},
-        {"random", nat_math_random, -1},
-        {"radians", nat_math_radians, 1},
-        {"degrees", nat_math_degrees, 1},
-        {"hypot", nat_math_hypot, 2},
-        {"isnan", nat_math_isnan, 1},
-        {"isinf", nat_math_isinf, 1},
+    /* All of these compute a number into args[0] and allocate nothing, so they
+** are safe to run with the collector live. Without the flag every call is
+** wrapped in gc_pause/gc_resume, which is pure overhead on the hot path a
+** script takes when it drives engine code. */
+static const NativeReg math_functions[] = {
+        {"sin", nat_math_sin, 1, ZEN_NATIVE_GC_SAFE},
+        {"cos", nat_math_cos, 1, ZEN_NATIVE_GC_SAFE},
+        {"tan", nat_math_tan, 1, ZEN_NATIVE_GC_SAFE},
+        {"asin", nat_math_asin, 1, ZEN_NATIVE_GC_SAFE},
+        {"acos", nat_math_acos, 1, ZEN_NATIVE_GC_SAFE},
+        {"atan", nat_math_atan, 1, ZEN_NATIVE_GC_SAFE},
+        {"atan2", nat_math_atan2, 2, ZEN_NATIVE_GC_SAFE},
+        {"sqrt", nat_math_sqrt, 1, ZEN_NATIVE_GC_SAFE},
+        {"cbrt", nat_math_cbrt, 1, ZEN_NATIVE_GC_SAFE},
+        {"exp", nat_math_exp, 1, ZEN_NATIVE_GC_SAFE},
+        {"log", nat_math_log, 1, ZEN_NATIVE_GC_SAFE},
+        {"log2", nat_math_log2, 1, ZEN_NATIVE_GC_SAFE},
+        {"log10", nat_math_log10, 1, ZEN_NATIVE_GC_SAFE},
+        {"ceil", nat_math_ceil, 1, ZEN_NATIVE_GC_SAFE},
+        {"floor", nat_math_floor, 1, ZEN_NATIVE_GC_SAFE},
+        {"round", nat_math_round, 1, ZEN_NATIVE_GC_SAFE},
+        {"pow", nat_math_pow, 2, ZEN_NATIVE_GC_SAFE},
+        {"abs", nat_math_abs, 1, ZEN_NATIVE_GC_SAFE},
+        {"min", nat_math_min, 2, ZEN_NATIVE_GC_SAFE},
+        {"max", nat_math_max, 2, ZEN_NATIVE_GC_SAFE},
+        {"clamp", nat_math_clamp, 3, ZEN_NATIVE_GC_SAFE},
+        {"lerp", nat_math_lerp, 3, ZEN_NATIVE_GC_SAFE},
+        {"hermite", nat_math_hermite, 5, ZEN_NATIVE_GC_SAFE},
+        {"smooth_step", nat_math_smooth_step, 3, ZEN_NATIVE_GC_SAFE},
+        {"ping_pong", nat_math_ping_pong, 2, ZEN_NATIVE_GC_SAFE},
+        {"angle_delta", nat_math_angle_delta, 2, ZEN_NATIVE_GC_SAFE},
+        {"lerp_angle", nat_math_lerp_angle, 3, ZEN_NATIVE_GC_SAFE},
+        {"random", nat_math_random, -1, ZEN_NATIVE_GC_SAFE},
+        {"radians", nat_math_radians, 1, ZEN_NATIVE_GC_SAFE},
+        {"degrees", nat_math_degrees, 1, ZEN_NATIVE_GC_SAFE},
+        {"hypot", nat_math_hypot, 2, ZEN_NATIVE_GC_SAFE},
+        {"isnan", nat_math_isnan, 1, ZEN_NATIVE_GC_SAFE},
+        {"isinf", nat_math_isinf, 1, ZEN_NATIVE_GC_SAFE},
     };
 
     /* ----- constants ----- */
@@ -327,8 +330,8 @@ namespace zen
         math_constants[2] = {"tau", val_float(6.28318530717958647692)};
         /* MSVC rejects a literal 1.0/0.0 outright (C2124) — take inf and nan
         ** from <limits> instead of relying on the GCC/Clang extension. */
-        math_constants[3] = {"inf", val_float(std::numeric_limits<double>::infinity())};
-        math_constants[4] = {"nan", val_float(std::numeric_limits<double>::quiet_NaN())};
+        math_constants[3] = {"inf", val_float(HUGE_VAL)};
+        math_constants[4] = {"nan", val_float((double)NAN)};
         math_constants_inited = true;
     }
 

@@ -79,6 +79,9 @@ namespace zen
     void gc_init(GC *gc)
     {
         gc->objects = nullptr;
+        gc->white_val = GC_WHITE;
+        gc->black_val = GC_BLACK;
+        gc->first_old = nullptr;
         gc->gray_list = nullptr;
         gc->gray_count = 0;
         gc->gray_capacity = 0;
@@ -101,25 +104,6 @@ namespace zen
         gc->bytes_allocated += sizeof(ObjString *) * gc->string_capacity;
     }
 
-    void gc_pause(GC *gc)
-    {
-        if (!gc)
-            return;
-        if (gc->pause_depth++ == 0)
-        {
-            gc->pause_saved_next_gc = gc->next_gc;
-            gc->next_gc = (size_t)-1;
-        }
-    }
-
-    void gc_resume(GC *gc)
-    {
-        if (!gc || gc->pause_depth <= 0)
-            return;
-        if (--gc->pause_depth == 0)
-            gc->next_gc = gc->pause_saved_next_gc;
-    }
-
     /* =========================================================
     ** Alocação de objectos — regista na linked list do GC.
     ** ========================================================= */
@@ -133,7 +117,7 @@ namespace zen
            zen_alloc/zen_realloc call after the object is rooted. */
         Obj *obj = (Obj *)zen_alloc_now(gc, size);
         obj->type = type;
-        obj->color = GC_BLACK; /* born BLACK: survives current GC cycle */
+        obj->color = gc->black_val; /* born black: survives current GC cycle */
         obj->interned = 0;
         /* The arena recycles blocks without zeroing — a stale OBJ_FLAG_SHARED
         ** here would silently pessimize string appends forever. */
@@ -260,18 +244,6 @@ namespace zen
         return intern_string(gc, chars, length, hash);   
     }
 
-    /* EXPERIMENTAL SSO: Create string as Value (small strings stored inline) */
-    Value new_string_sso(GC *gc, const char *chars, int length)
-    {
-        /* Strings 1-7 bytes: store inline (no GC pressure) */
-        if (length > 0 && length <= 7)
-            return val_small_string(chars, length);
-        
-        /* Strings 0 or >= 8 bytes: allocate on heap as usual */
-        ObjString *str = new_string(gc, chars, length);
-        return val_obj((Obj *)str);
-    }
-
     ObjString *create_string(GC *gc, const char *chars, int length)
     {
         uint32_t hash = hash_string(chars, length);
@@ -299,7 +271,7 @@ namespace zen
         
         ObjString *str = (ObjString *)zen_alloc_now(gc, total);
         str->obj.type = OBJ_STRING;
-        str->obj.color = GC_BLACK;
+        str->obj.color = gc->black_val;
         str->obj.interned = 0;
         str->obj.flags = 0;
         str->obj.hash = 0;
@@ -771,7 +743,8 @@ namespace zen
     {
         int32_t n = arr_count(src);
         array_reserve(gc, dst, n);
-        memcpy(dst->data, src->data, (size_t)n * sizeof(Value));
+        if (n > 0 && src->data) /* memcpy(dst, nullptr, 0) is UB */
+            memcpy(dst->data, src->data, (size_t)n * sizeof(Value));
         dst->end = dst->data + n;
     }
 
@@ -846,10 +819,6 @@ namespace zen
             }
             case VAL_OBJ:
                 h = v.as.obj->hash;
-                break;
-            case VAL_SMALL_STRING:
-                /* Hash small string inline */
-                h = hash_string(v.as.sso.chars, v.as.sso.len);
                 break;
             default:
                 h = 0;
@@ -1287,16 +1256,16 @@ namespace zen
         uint8_t *p = buf->data + (size_t)index * buffer_elem_size[buf->btype];
         auto wrap_unsigned = [](double v, double mod) -> uint64_t
         {
-            if (!std::isfinite(v))
+            if (!zen_isfinite(v))
                 return 0;
-            double wrapped = std::fmod(std::trunc(v), mod);
+            double wrapped = fmod(trunc(v), mod);
             if (wrapped < 0)
                 wrapped += mod;
             return (uint64_t)wrapped;
         };
         auto wrap_signed = [&](double v, int bits) -> int64_t
         {
-            double mod = std::ldexp(1.0, bits);
+            double mod = ldexp(1.0, bits);
             uint64_t wrapped = wrap_unsigned(v, mod);
             uint64_t sign_bit = (uint64_t)1 << (bits - 1);
             if (wrapped >= sign_bit)
@@ -1398,7 +1367,7 @@ namespace zen
             ** C++ é dono da memória. Chama vm.destroy_instance() para libertar. */
             inst = (ObjInstance *)zen_alloc_now(gc, total_size);
             inst->obj.type = OBJ_INSTANCE;
-            inst->obj.color = GC_BLACK;
+            inst->obj.color = gc->black_val;
             inst->obj.interned = 0;
             inst->obj.hash = 0;
             inst->obj.gc_next = nullptr; /* not in any list */
@@ -1481,7 +1450,7 @@ namespace zen
     {
         if (obj == nullptr)
             return;
-        if (obj->color != GC_WHITE)
+        if (obj->color != gc->white_val)
             return; /* já visitado */
 
         obj->color = GC_GRAY;
@@ -1500,13 +1469,12 @@ namespace zen
     {
         if (is_obj(v))
             gc_mark_obj(gc, v.as.obj);
-        /* VAL_SMALL_STRING doesn't need marking (inline, not allocated on heap) */
     }
 
     /* Processa um objecto gray → marca os filhos, torna-o black */
     static void gc_blacken(GC *gc, Obj *obj)
     {
-        obj->color = GC_BLACK;
+        obj->color = gc->black_val;
 
         switch (obj->type)
         {
@@ -1661,8 +1629,28 @@ namespace zen
         case OBJ_FIBER:
         {
             ObjFiber *fiber = (ObjFiber *)obj;
-            /* Mark stack values */
-            for (Value *v = fiber->stack; v < fiber->stack_top; v++)
+            /* Mark stack values. stack_top is the top of the CURRENT frame
+            ** (plus any native roots), which can sit below the top of a
+            ** shallower frame: a callee whose window starts inside its
+            ** caller's and is smaller leaves the caller's upper registers
+            ** above stack_top while it runs. Those registers still hold
+            ** (dead) Values; if they were skipped here their objects would
+            ** be freed, and once the callee returned and stack_top rose back
+            ** over them the next collection would mark a dangling pointer.
+            ** So scan up to the highest frame window. Every slot in a live
+            ** frame's window is initialised (cleared on entry), so this only
+            ** keeps a few dead temporaries alive a little longer. */
+            Value *scan_end = fiber->stack_top;
+            for (int i = 0; i < fiber->frame_count; i++)
+            {
+                const CallFrame &f = fiber->frames[i];
+                if (!f.func)
+                    continue;
+                Value *ftop = f.base + f.func->num_regs;
+                if (ftop > scan_end && ftop <= fiber->stack_end)
+                    scan_end = ftop;
+            }
+            for (Value *v = fiber->stack; v < scan_end; v++)
                 gc_mark_value(gc, *v);
             /* Mark call frame closures */
             for (int i = 0; i < fiber->frame_count; i++)
@@ -1920,7 +1908,7 @@ namespace zen
         for (int i = 0; i < old_capacity; i++)
         {
             ObjString *s = old_table[i];
-            if (!s || s->obj.color == GC_WHITE)
+            if (!s || s->obj.color == gc->white_val)
                 continue;
 
             uint32_t idx = s->obj.hash & (uint32_t)(old_capacity - 1);
@@ -1944,7 +1932,7 @@ namespace zen
         Obj **ptr = &gc->objects;
         while (*ptr)
         {
-            if ((*ptr)->color == GC_WHITE)
+            if ((*ptr)->color == gc->white_val)
             {
                 Obj *dead = *ptr;
                 *ptr = dead->gc_next;
@@ -1973,8 +1961,8 @@ namespace zen
             }
             else
             {
-                /* Sobreviveu: repinta WHITE para o próximo ciclo */
-                (*ptr)->color = GC_WHITE;
+                /* Survivor: stays black_val; the epoch flip at the end of
+                ** gc_collect turns it white for the next cycle (no repaint). */
                 ptr = &(*ptr)->gc_next;
             }
         }
@@ -2014,6 +2002,7 @@ namespace zen
             obj = next;
         }
         gc->objects = nullptr;
+        gc->first_old = nullptr;
     }
 
     /* gc_collect — chamado pelo VM quando bytes_allocated > next_gc */
@@ -2033,9 +2022,13 @@ namespace zen
         /* Reset gray list */
         gc->gray_count = 0; 
 
-        /* Full collection: reset all to WHITE, then re-mark reachable. */
-        for (Obj *obj = gc->objects; obj; obj = obj->gc_next)
-            obj->color = GC_WHITE;
+        /* Whiten ONLY the newborn prefix: every object allocated since the
+        ** last collection sits before first_old in the list (allocation
+        ** always prepends) and was born black. It must be whitened so the
+        ** mark phase traces through it. Survivors behind first_old are
+        ** already white thanks to the epoch flip below. */
+        for (Obj *obj = gc->objects; obj && obj != gc->first_old; obj = obj->gc_next)
+            obj->color = gc->white_val;
 
         /* Mark roots */
         vm->gc_mark_roots();
@@ -2047,6 +2040,16 @@ namespace zen
 
         /* Sweep dead objects */
         gc_sweep(gc);
+
+        /* Epoch flip: survivors (black_val) and this cycle's newborns read
+        ** as white next cycle; the next allocations get the new black_val.
+        ** Equivalent to repainting every object white, in O(1). */
+        {
+            GCColor tmp = gc->white_val;
+            gc->white_val = gc->black_val;
+            gc->black_val = tmp;
+        }
+        gc->first_old = gc->objects; /* everything left is now "old" */
 
         /* Adjust next threshold */
         gc->next_gc = (size_t)(gc->bytes_allocated * kGCGrowFactor);
@@ -2090,16 +2093,6 @@ namespace zen
                 return a.as.number == b.as.number;
             case VAL_PTR:
                 return a.as.pointer == b.as.pointer;
-            case VAL_SMALL_STRING:
-            {
-                /* Compare small strings byte-by-byte */
-                if (a.as.sso.len != b.as.sso.len)
-                    return false;
-                for (int i = 0; i < a.as.sso.len; i++)
-                    if (a.as.sso.chars[i] != b.as.sso.chars[i])
-                        return false;
-                return true;
-            }
             case VAL_OBJ:
             {
                 if (a.as.obj == b.as.obj)

@@ -67,4 +67,16 @@ namespace zen
 
 } /* namespace zen */
 
+
+/* Keep a cold path out of its caller's body — used for the rare branches of
+** the interpreter's big handlers, which otherwise inflate execute() and cost
+** every opcode register pressure. */
+#if defined(__GNUC__) || defined(__clang__)
+#define ZEN_NOINLINE __attribute__((noinline))
+#elif defined(_MSC_VER)
+#define ZEN_NOINLINE __declspec(noinline)
+#else
+#define ZEN_NOINLINE
+#endif
+
 #endif /* ZEN_COMMON_H */

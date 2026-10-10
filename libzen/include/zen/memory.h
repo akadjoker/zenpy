@@ -14,7 +14,9 @@ namespace zen
     **   1. MARK — começa nas raízes (stack, globals, open upvalues)
     **              pinta roots de GRAY, depois processa grays→BLACK
     **   2. SWEEP — varre a linked list de objectos:
-    **              WHITE → free; GRAY/BLACK → repinta WHITE para próximo ciclo
+    **              WHITE → free; sobreviventes ficam com black_val e a troca
+    **              de época (white_val <-> black_val) no fim do ciclo torna-os
+    **              brancos para o seguinte, sem repintar (ver GC::first_old)
     **
     ** Tri-color invariant:
     **   "Um objecto BLACK nunca aponta directamente para WHITE"
@@ -41,6 +43,21 @@ namespace zen
         size_t next_gc; /* threshold para próximo ciclo */
         size_t pause_saved_next_gc;
         int pause_depth;
+
+        /* Tri-color epoch flip: the numeric values meaning "white" and
+        ** "black" swap after every collection, so all survivors become
+        ** white for the next cycle with zero repainting work. GRAY is
+        ** fixed. Always paint new objects with black_val (or white_val
+        ** where deliberately white) — never the GC_BLACK/GC_WHITE
+        ** constants directly. */
+        GCColor white_val;
+        GCColor black_val;
+        /* Head of the object list at the end of the last collection.
+        ** Objects prepended since then (the "newborn prefix") are the only
+        ** ones that still carry black and must be whitened before marking.
+        ** Only compared by address before the sweep and refreshed right
+        ** after it, so it can never dangle. */
+        Obj *first_old;
 
         /* String interning table (open addressing) */
         ObjString **strings;
@@ -71,8 +88,6 @@ namespace zen
     ObjString *new_string_concat(GC *gc, ObjString *a, ObjString *b);
     ObjString *string_append_inplace(GC *gc, ObjString *a, ObjString *b);
     
-    /* EXPERIMENTAL SSO: Create string as Value (small strings inline, large on heap) */
-    Value new_string_sso(GC *gc, const char *chars, int length);
     
     ObjFunc *new_func(GC *gc);
     ObjNative *new_native(GC *gc, NativeFn fn, int arity, ObjString *name, int flags = 0);
@@ -128,8 +143,25 @@ namespace zen
     /* GC control */
     void gc_init(GC *gc);
     void gc_collect(VM *vm);
-    void gc_pause(GC *gc);
-    void gc_resume(GC *gc);
+    /* Inline: called around every native call (hot path). */
+    inline void gc_pause(GC *gc)
+    {
+        if (!gc)
+            return;
+        if (gc->pause_depth++ == 0)
+        {
+            gc->pause_saved_next_gc = gc->next_gc;
+            gc->next_gc = (size_t)-1;
+        }
+    }
+
+    inline void gc_resume(GC *gc)
+    {
+        if (!gc || gc->pause_depth <= 0)
+            return;
+        if (--gc->pause_depth == 0)
+            gc->next_gc = gc->pause_saved_next_gc;
+    }
     void gc_sweep_all(GC *gc);
     void gc_mark_value(GC *gc, Value v);
     void gc_mark_obj(GC *gc, Obj *obj);
@@ -158,10 +190,13 @@ namespace zen
         return nullptr;
     }
 
-    /* Write barrier — chamar quando um obj BLACK recebe nova referência */
+    /* Write barrier — chamar quando um obj BLACK recebe nova referência.
+    ** Compares against the CURRENT epoch's colours: white/black swap every
+    ** collection, so the GC_BLACK/GC_WHITE constants would be backwards on
+    ** odd epochs. */
     inline void gc_write_barrier(GC *gc, Obj *parent, Obj *child)
     {
-        if (parent->color == GC_BLACK && child && child->color == GC_WHITE)
+        if (parent->color == gc->black_val && child && child->color == gc->white_val)
         {
             parent->color = GC_GRAY;
             /* adiciona ao gray list para re-scan */

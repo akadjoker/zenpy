@@ -1,13 +1,12 @@
 #ifdef ZEN_OPCODE_PROFILE
 #include "debug.h"
 #include <x86intrin.h>
-#include <algorithm>
 #include <cstdlib>
 #include <cstdio>
 #endif
 #include <cctype>
-#include <vector>
-#include <algorithm>
+#include <ct/vector.hpp>
+#include <ct/sort.hpp>
 #include "vm.h"
 #include "compiler.h"
 #include "debug.h"
@@ -93,8 +92,6 @@ namespace zen
             return "int";
         case VAL_FLOAT:
             return "float";
-        case VAL_SMALL_STRING:
-            return "string";
         case VAL_OBJ:
             switch (v.as.obj->type)
             {
@@ -130,6 +127,15 @@ namespace zen
         default:
             return "unknown";
         }
+    }
+
+    /* Narrow a script integer used as a slice bound/step to int32 without
+    ** wrapping: values beyond +-2^30 are clamped (they are past either end of
+    ** any real container anyway, and the clamp keeps `k += step` in range). */
+    static inline int32_t clamp_slice_i32(int64_t v)
+    {
+        const int64_t lim = (int64_t)1 << 30;
+        return (int32_t)(v > lim ? lim : (v < -lim ? -lim : v));
     }
 
     static inline int int_to_cstr(int64_t n, char *buf)
@@ -442,8 +448,6 @@ namespace zen
             return "float";
         case VAL_PTR:
             return "ptr";
-        case VAL_SMALL_STRING:
-            return "string";
         case VAL_OBJ:
             if (!v.as.obj)
                 return "obj(null)";
@@ -579,7 +583,7 @@ namespace zen
                 total += g_prof_cycles[i];
             }
         }
-        std::sort(order, order + n, [](int a, int b) { return g_prof_cycles[a] > g_prof_cycles[b]; });
+        ct::sort(order, order + n, [](int a, int b) { return g_prof_cycles[a] > g_prof_cycles[b]; });
         fprintf(stderr, "\n%-18s %12s %14s %7s %8s\n", "opcode", "count", "cycles", "%", "avg");
         for (int k = 0; k < n && k < 40; k++)
         {
@@ -607,6 +611,69 @@ namespace zen
         g_prof_t0 = now;
     }
 #endif
+
+
+    /* Struct construction, out of line — see the call sites in OP_CALL.
+    ** Returns false when it raised a runtime error. */
+    ZEN_NOINLINE bool VM::call_make_struct(Value *R, int a, int nargs, Value callee)
+    {
+        ObjStructDef *def = as_struct_def(callee);
+        if (nargs != def->num_fields)
+        {
+            runtime_error("struct '%s' expects %d args but got %d",
+                          def->name->chars, def->num_fields, nargs);
+            return false;
+        }
+        ObjStruct *s = (ObjStruct *)zen_alloc_now(&gc_, sizeof(ObjStruct));
+        s->obj.type = OBJ_STRUCT;
+        s->obj.color = gc_.white_val;
+        s->obj.interned = 0;
+        s->obj.flags = 0;
+        s->obj.hash = 0;
+        s->obj.gc_next = gc_.objects;
+        gc_.objects = (Obj *)s;
+        s->def = def;
+        s->fields = (Value *)zen_alloc_now(&gc_, sizeof(Value) * def->num_fields);
+        for (int fi = 0; fi < def->num_fields; fi++)
+            s->fields[fi] = R[a + 1 + fi];
+        R[a] = val_obj((Obj *)s);
+        return true;
+    }
+
+    ZEN_NOINLINE void VM::call_make_native_struct(Value *R, int a, int nargs, Value callee)
+    {
+        NativeStructDef *def = as_native_struct_def(callee);
+        ObjNativeStruct *ns = (ObjNativeStruct *)zen_alloc_now(&gc_, sizeof(ObjNativeStruct));
+        ns->obj.type = OBJ_NATIVE_STRUCT;
+        ns->obj.color = gc_.white_val;
+        ns->obj.hash = 0;
+        ns->obj.interned = 0;
+        ns->obj.flags = 0;
+        ns->obj.gc_next = gc_.objects;
+        gc_.objects = (Obj *)ns;
+        ns->def = def;
+        ns->data = zen_alloc_now(&gc_, def->struct_size);
+        memset(ns->data, 0, def->struct_size);
+        if (def->ctor)
+            def->ctor(this, ns->data, nargs, &R[a + 1]);
+        R[a] = val_obj((Obj *)ns);
+    }
+
+    /* OP_EVAL compilation, out of line. A Compiler is ~82 KB and eval needs two
+    ** of them; as locals of execute() they inflated its frame to ~170 KB, and
+    ** with stack-clash protection every host->script entry probed all of it.
+    ** Returns nullptr when neither compile attempt succeeded. */
+    ZEN_NOINLINE ObjFunc *VM::compile_eval_source(const char *source)
+    {
+        Compiler comp;
+        ObjFunc *fn = comp.compile_eval(&gc_, this, source, "<eval>", /*silent=*/true);
+        if (!fn)
+        {
+            Compiler comp2;
+            fn = comp2.compile(&gc_, this, source, "<eval>");
+        }
+        return fn;
+    }
 
     void VM::execute(ObjFiber *fiber)
     {
@@ -646,13 +713,18 @@ namespace zen
     K = frame->constants;       \
     UV = frame->upvalues
 
-/* Enter a frame just pushed: everything is still in registers. */
+/* Enter a frame just pushed: everything is still in registers. The frame is
+** fully built (args in place, other registers cleared, stack_top set), which
+** makes this the one place every script-closure call passes through — it
+** doubles as the function-entry GC safe point (see ZEN_GC_SAFEPOINT, defined
+** below; the macro body is only expanded at the use sites). */
 #define ENTER_FRAME(nf_, fn_, cl_, base_) \
     frame = (nf_);                        \
     ip = (fn_)->code;                     \
     R = (base_);                          \
     K = (fn_)->constants;                 \
-    UV = (cl_)->upvalues
+    UV = (cl_)->upvalues;                 \
+    ZEN_GC_SAFEPOINT()
 
 #define SAVE_IP() frame->ip = ip
 
@@ -664,6 +736,36 @@ namespace zen
         runtime_error(__VA_ARGS__); \
         return;                     \
     } while (0)
+
+/* GC safe point: between two instructions every live value sits in a
+** register, a frame or a global, so a collection here can see all of
+** them. alloc_obj deliberately never collects (a newborn is unrooted
+** while it is being filled in), so this is where instance- and
+** string-only workloads get collected at all. Natives run with the GC
+** paused (pause_depth > 0), which also keeps a nested execute() started
+** from inside a native from collecting under that native's C locals. */
+#ifdef ZEN_DEBUG_STRESS_GC
+#define ZEN_GC_SAFEPOINT()                                                     \
+    do                                                                         \
+    {                                                                          \
+        if (gc_.pause_depth == 0)                                              \
+        {                                                                      \
+            SAVE_IP();                                                         \
+            gc_collect(this);                                                  \
+        }                                                                      \
+    } while (0)
+#else
+#define ZEN_GC_SAFEPOINT()                                                     \
+    do                                                                         \
+    {                                                                          \
+        if (__builtin_expect(gc_.bytes_allocated > gc_.next_gc, 0) &&          \
+            gc_.pause_depth == 0)                                              \
+        {                                                                      \
+            SAVE_IP();                                                         \
+            gc_collect(this);                                                  \
+        }                                                                      \
+    } while (0)
+#endif
 
 /* Check that the fiber's data stack has room for a new frame */
 #define CHECK_STACK_SPACE(fiber_, base_, num_regs_)                       \
@@ -823,8 +925,15 @@ namespace zen
             &&lbl_OP_INVOKE_VT_R,
             &&lbl_OP_EQJMPIFNOT,
             &&lbl_OP_NEJMPIFNOT,
+            &&lbl_OP_NEXT,
             &&lbl_OP_RETURNNIL,
         };
+
+        /* Same rule as s_opnames in debug.cpp, and worse when it breaks: a
+        ** missing entry here shifts every later label, so DISPATCH() jumps
+        ** into the wrong handler and the VM misbehaves with a clean build. */
+        static_assert(sizeof(dispatch_table) / sizeof(dispatch_table[0]) == (size_t)OP_RETURNNIL + 1,
+                      "dispatch_table is out of sync with the OpCode enum");
 
 #ifdef ZEN_OPCODE_PROFILE
 /* Per-opcode cycle profile (build with -DZEN_OPCODE_PROFILE). Every
@@ -927,7 +1036,7 @@ namespace zen
             ** it (locals, other frames) — mark it shared so in-place append
             ** never mutates something a register still holds. The AUG pair
             ** below is the one read that legitimately skips this. */
-            if (__builtin_expect(is_string(v) && is_obj(v), 0))
+            if (__builtin_expect(is_obj(v) && is_string(v), 0))
                 v.as.obj->flags |= OBJ_FLAG_SHARED;
             R[ZEN_A(i)] = v;
             NEXT();
@@ -1062,8 +1171,27 @@ namespace zen
                     array_push_n(&gc_, r, xa->data, arr_count(xa));
                 if (arr_count(xb) > 0)
                     array_push_n(&gc_, r, xb->data, arr_count(xb));
-                gc_resume(&gc_);
+                /* Rooted before the resume so the collection below cannot
+                ** take it.
+                **
+                ** `a = a + [i]` in a loop builds a fresh array each time and
+                ** drops the previous one, but every allocation happens inside
+                ** the pause above, so the normal threshold check never sees
+                ** an unpaused moment and nothing is ever collected: 4.7 GB
+                ** resident for a 20k-element list, with 16k munmap calls
+                ** handing pages back one at a time. Checking here, where the
+                ** result is reachable, bounds it. Not in gc_resume() itself —
+                ** the compiler holds a pause across a whole compilation and
+                ** returns an ObjFunc nothing roots yet, so collecting on
+                ** every resume segfaults under stress-GC. */
                 R[ZEN_A(i)] = val_obj((Obj *)r);
+                gc_resume(&gc_);
+                if (gc_.bytes_allocated > gc_.next_gc)
+                {
+                    SAVE_IP();
+                    gc_collect(this);
+                    LOAD_STATE();
+                }
             }
             else if (is_instance(vb) || is_instance(vc))
             {
@@ -1255,8 +1383,27 @@ namespace zen
                 ObjArray *r = new_array(&gc_);
                 for (int64_t k = 0; k < n && cnt > 0; k++)
                     array_push_n(&gc_, r, src->data, cnt);
-                gc_resume(&gc_);
+                /* Rooted before the resume so the collection below cannot
+                ** take it.
+                **
+                ** `a = a + [i]` in a loop builds a fresh array each time and
+                ** drops the previous one, but every allocation happens inside
+                ** the pause above, so the normal threshold check never sees
+                ** an unpaused moment and nothing is ever collected: 4.7 GB
+                ** resident for a 20k-element list, with 16k munmap calls
+                ** handing pages back one at a time. Checking here, where the
+                ** result is reachable, bounds it. Not in gc_resume() itself —
+                ** the compiler holds a pause across a whole compilation and
+                ** returns an ObjFunc nothing roots yet, so collecting on
+                ** every resume segfaults under stress-GC. */
                 R[ZEN_A(i)] = val_obj((Obj *)r);
+                gc_resume(&gc_);
+                if (gc_.bytes_allocated > gc_.next_gc)
+                {
+                    SAVE_IP();
+                    gc_collect(this);
+                    LOAD_STATE();
+                }
             }
             else if (is_instance(vb) || is_instance(vc))
             {
@@ -1340,10 +1487,16 @@ namespace zen
                     {
                         RT_ERROR("floor division by zero");
                     }
-                    int64_t q = b / c;
-                    if ((b ^ c) < 0 && q * c != b)
-                        q--; /* floor toward -inf */
-                    R[ZEN_A(i)] = val_int((int32_t)q);
+                    int64_t q;
+                    if (c == -1)
+                        q = (int64_t)(0 - (uint64_t)b); /* INT64_MIN // -1 would trap (UB); wraps to INT64_MIN (CPython promotes to a big int) */
+                    else
+                    {
+                        q = b / c;
+                        if ((b ^ c) < 0 && q * c != b)
+                            q--; /* floor toward -inf */
+                    }
+                    R[ZEN_A(i)] = val_int(q);
                 }
                 else
                 {
@@ -1352,7 +1505,7 @@ namespace zen
                     {
                         RT_ERROR("floor division by zero");
                     }
-                    R[ZEN_A(i)] = val_float(std::floor(a / b));
+                    R[ZEN_A(i)] = val_float(floor(a / b));
                 }
             }
             else
@@ -1362,7 +1515,7 @@ namespace zen
                 {
                     RT_ERROR("floor division by zero");
                 }
-                R[ZEN_A(i)] = val_float(std::floor(a / b));
+                R[ZEN_A(i)] = val_float(floor(a / b));
             }
             NEXT();
         }
@@ -1374,14 +1527,15 @@ namespace zen
             {
                 if (vb.type == VAL_INT && vc.type == VAL_INT)
                 {
-                    int32_t divisor = vc.as.integer;
+                    int64_t divisor = vc.as.integer;
                     if (divisor == 0)
                         RT_ERROR("modulo by zero");
                     else
                     {
 
-                        int64_t r = vb.as.integer % (int64_t)divisor;
-                        R[ZEN_A(i)] = val_int(r != 0 && (r ^ (int64_t)divisor) < 0 ? r + divisor : r);
+                        /* x % -1 is always 0; INT64_MIN % -1 would trap (UB) */
+                        int64_t r = divisor == -1 ? 0 : vb.as.integer % divisor;
+                        R[ZEN_A(i)] = val_int(r != 0 && (r ^ divisor) < 0 ? r + divisor : r);
                     }
                 }
                 else
@@ -1467,7 +1621,7 @@ namespace zen
                     NEXT();
                 }
             }
-            R[ZEN_A(i)] = val_float(std::pow(to_number(vb), to_number(vc)));
+            R[ZEN_A(i)] = val_float(pow(to_number(vb), to_number(vc)));
             NEXT();
         }
         CASE(OP_NEG)
@@ -1633,11 +1787,11 @@ namespace zen
             LOAD_STATE();
             if (vb.type == VAL_INT && vc.type == VAL_INT)
             {
-                int32_t divisor = vc.as.integer;
+                int64_t divisor = vc.as.integer;
                 if (divisor == 0)
                     RT_ERROR("modulo by zero");
                 else
-                    R[dst] = val_int(vb.as.integer % divisor);
+                    R[dst] = val_int(divisor == -1 ? 0 : vb.as.integer % divisor);
             }
             else
             {
@@ -1736,8 +1890,10 @@ namespace zen
                 R[ZEN_A(i)] = val_int((int64_t)((uint64_t)vb.as.integer + (int64_t)imm));
             else if (vb.type == VAL_BOOL)
                 R[ZEN_A(i)] = val_int((int64_t)(vb.as.boolean ? 1 : 0) + (int64_t)imm);
-            else if (__builtin_expect(!is_obj(vb), 1))
-                R[ZEN_A(i)] = val_float(to_number(vb) + imm);
+            else if (__builtin_expect(vb.type == VAL_FLOAT, 1))
+                R[ZEN_A(i)] = val_float(vb.as.number + imm);
+            else if (!is_obj(vb))
+                RT_ERROR("unsupported operand type(s) for +: %s and int", zen_type_name_of(vb));
             else if (is_instance(vb))
             {
                 Value vc = val_int((int64_t)imm);
@@ -1799,8 +1955,10 @@ namespace zen
                 R[ZEN_A(i)] = val_int((int64_t)((uint64_t)vb.as.integer - (int64_t)imm));
             else if (vb.type == VAL_BOOL)
                 R[ZEN_A(i)] = val_int((int64_t)(vb.as.boolean ? 1 : 0) - (int64_t)imm);
-            else if (__builtin_expect(!is_obj(vb), 1))
-                R[ZEN_A(i)] = val_float(to_number(vb) - imm);
+            else if (__builtin_expect(vb.type == VAL_FLOAT, 1))
+                R[ZEN_A(i)] = val_float(vb.as.number - imm);
+            else if (!is_obj(vb))
+                RT_ERROR("unsupported operand type(s) for -: %s and int", zen_type_name_of(vb));
             else if (is_instance(vb))
             {
                 Value result;
@@ -2086,6 +2244,8 @@ namespace zen
         CASE(OP_JMP)
         {
             uint32_t i = *ip;
+            if (ZEN_SBX(i) < 0) /* back edge: loop iteration */
+                ZEN_GC_SAFEPOINT();
             ip += ZEN_SBX(i);
             NEXT();
         }
@@ -2292,7 +2452,15 @@ namespace zen
                     ctor_src = ctor_src->parent;
                 if (ctor_src && ctor_src->native_ctor)
                 {
+                    /* ip was saved at op_call_shared, so a runtime_error from
+                    ** the ctor reports the right line. Like every other native
+                    ** it runs with the GC paused, and a failure stops here
+                    ** rather than continuing into __init__ with null data. */
+                    gc_pause(&gc_);
                     inst->native_data = ctor_src->native_ctor(this, nargs, &R[a + 1]);
+                    gc_resume(&gc_);
+                    if (had_error_)
+                        return;
                 }
 
                 /* __init__ sits in the vtable at its selector's slot like
@@ -2389,44 +2557,18 @@ namespace zen
                 /* No init and no args (or native_ctor consumed them) — just return the instance */
                 DISPATCH();
             }
+            /* Struct construction: allocate and fill, no frame pushed and no
+            ** re-entry, so it lives outside execute() where it does not add
+            ** to the register pressure every other opcode pays for. */
             if (is_struct_def(callee))
             {
-                ObjStructDef *def = as_struct_def(callee);
-                if (nargs != def->num_fields)
-                    RT_ERROR("struct '%s' expects %d args but got %d",
-                             def->name->chars, def->num_fields, nargs);
-                ObjStruct *s = (ObjStruct *)zen_alloc_now(&gc_, sizeof(ObjStruct));
-                s->obj.type = OBJ_STRUCT;
-                s->obj.color = GC_WHITE;
-                s->obj.interned = 0;
-                s->obj.flags = 0;
-                s->obj.hash = 0;
-                s->obj.gc_next = gc_.objects;
-                gc_.objects = (Obj *)s;
-                s->def = def;
-                s->fields = (Value *)zen_alloc_now(&gc_, sizeof(Value) * def->num_fields);
-                for (int fi = 0; fi < def->num_fields; fi++)
-                    s->fields[fi] = R[a + 1 + fi];
-                R[a] = val_obj((Obj *)s);
+                if (!call_make_struct(R, a, nargs, callee))
+                    return;
                 DISPATCH();
             }
             if (is_native_struct_def(callee))
             {
-                NativeStructDef *def = as_native_struct_def(callee);
-                ObjNativeStruct *ns = (ObjNativeStruct *)zen_alloc_now(&gc_, sizeof(ObjNativeStruct));
-                ns->obj.type = OBJ_NATIVE_STRUCT;
-                ns->obj.color = GC_WHITE;
-                ns->obj.hash = 0;
-                ns->obj.interned = 0;
-                ns->obj.flags = 0;
-                ns->obj.gc_next = gc_.objects;
-                gc_.objects = (Obj *)ns;
-                ns->def = def;
-                ns->data = zen_alloc_now(&gc_, def->struct_size);
-                memset(ns->data, 0, def->struct_size);
-                if (def->ctor)
-                    def->ctor(this, ns->data, nargs, &R[a + 1]);
-                R[a] = val_obj((Obj *)ns);
+                call_make_native_struct(R, a, nargs, callee);
                 DISPATCH();
             }
             RT_ERROR("attempt to call non-function (got %s)", val_type_str(R[a]));
@@ -2550,7 +2692,98 @@ namespace zen
             ++ip;
             R[call_a] = globals_[ZEN_BX(*ip)];
             ++ip;
+            /* Calling a native with plain positional arguments — a script
+            ** driving engine code does this every frame — needs none of the
+            ** general path: no spread to expand, no keyword map, no class or
+            ** struct construction, no frame to push. Those checks are what
+            ** OP_CALL's 400 lines are for, and jumping into them cost the
+            ** whole body's register pressure for a call that just forwards
+            ** its arguments. Everything else still falls through unchanged. */
+            {
+                Value gcallee = R[call_a];
+                if (__builtin_expect(is_native(gcallee) &&
+                                     !(call_nargs & 0xC0), 1))
+                {
+                    ObjNative *nat = as_native(gcallee);
+                    if (__builtin_expect(nat->generic_arity == 0, 1))
+                    {
+                        SAVE_IP();
+                        /* Mark string args shared, as the general path does:
+                        ** a native may hold on to one past the call. */
+                        for (int ai = 0; ai < call_nargs; ai++)
+                        {
+                            Value av = R[call_a + 1 + ai];
+                            if (__builtin_expect(is_obj(av) && is_string(av), 0))
+                                av.as.obj->flags |= OBJ_FLAG_SHARED;
+                        }
+                        int nret = call_native(this, nat, &R[call_a + 1], call_nargs);
+                        if (had_error_)
+                            return;
+                        copy_native_results(&R[call_a], &R[call_a + 1], nret, call_nresults);
+                        DISPATCH();
+                    }
+                }
+            }
             goto op_call_shared;
+        }
+
+        CASE(OP_NEXT)
+        {
+            /* next(gen) — advance a generator one step and yield its value.
+            ** Generators are fibers here, and `for v in gen()` already knows
+            ** how to resume one; this is the same sequence, reached from an
+            ** expression instead of a loop header, so a generator can be
+            ** consumed as a stream. A finished generator raises rather than
+            ** returning nil, so the caller can tell "no more" from a yielded
+            ** nil. */
+            uint32_t i = *ip;
+            Value it = R[ZEN_B(i)];
+            if (!is_fiber(it))
+            {
+                RT_ERROR("next() expects a generator, got %s", val_type_str(it));
+            }
+            ObjFiber *target = as_fiber(it);
+            if (target->state == FIBER_DONE)
+            {
+                RT_ERROR("next() on an exhausted generator");
+            }
+            if (target->state == FIBER_RUNNING)
+            {
+                RT_ERROR("next() on a running generator");
+            }
+
+            target->transfer_value = val_nil();
+            target->caller = fiber;
+            target->state = FIBER_RUNNING;
+            fiber->state = FIBER_SUSPENDED;
+            current_fiber_ = target;
+
+            if (target->yield_dest >= 0)
+            {
+                CallFrame &tf = target->frames[target->frame_count - 1];
+                tf.base[target->yield_dest] = val_nil();
+                target->yield_dest = -1;
+            }
+
+            ++fiber_depth_;
+            SAVE_IP();
+            execute(target);
+            --fiber_depth_;
+
+            fiber->state = FIBER_RUNNING;
+            current_fiber_ = fiber;
+
+            if (had_error_ || target->state == FIBER_ERROR)
+                return;
+
+            LOAD_STATE();
+
+            if (target->state == FIBER_DONE)
+            {
+                RT_ERROR("next() on an exhausted generator");
+            }
+            R[ZEN_A(i)] = target->transfer_value;
+            NEXT();
         }
 
         CASE(OP_RETURNNIL)
@@ -2685,7 +2918,7 @@ namespace zen
             int nuv = fn->upvalue_count;
             ObjClosure *cl = (ObjClosure *)zen_alloc_now(&gc_, sizeof(ObjClosure));
             cl->obj.type = OBJ_CLOSURE;
-            cl->obj.color = GC_BLACK;
+            cl->obj.color = gc_.black_val;
             cl->obj.interned = 0;
             cl->obj.hash = 0;
             cl->obj.gc_next = gc_.objects;
@@ -3033,6 +3266,7 @@ namespace zen
 
         CASE(OP_FOR_NEXT)
         {
+            ZEN_GC_SAFEPOINT(); /* the loop's back edge */
             uint32_t i = *ip;
             int32_t offset = (int32_t)ip[1]; /* word2 = signed jump */
             ip += 2;
@@ -3200,11 +3434,16 @@ namespace zen
             Value arg = R[b];
             if (is_int(arg))
             {
-                int32_t count = arg.as.integer;
-                if (count < 0)
+                int64_t count64 = arg.as.integer; /* not narrowed first: 2**32 must not wrap to 0 */
+                if (count64 < 0)
                 {
                     RT_ERROR("buffer size must be non-negative");
                 }
+                if (count64 > INT32_MAX / 8)
+                {
+                    RT_ERROR("buffer size too large");
+                }
+                int32_t count = (int32_t)count64;
                 ObjBuffer *buf = new_buffer(&gc_, btype, count);
                 R[a] = val_obj((Obj *)buf);
             }
@@ -3471,7 +3710,8 @@ namespace zen
                     if (inst->fields_inline)
                     {
                         Value *detached = (Value *)zen_alloc(&gc_, sizeof(Value) * new_n);
-                        memcpy(detached, inst->fields, sizeof(Value) * old_n);
+                        if (old_n > 0 && inst->fields) /* memcpy(dst, nullptr, 0) is UB */
+                            memcpy(detached, inst->fields, sizeof(Value) * old_n);
                         inst->fields = detached;
                         inst->fields_inline = false;
                     }
@@ -3594,7 +3834,8 @@ namespace zen
                     if (inst->fields_inline)
                     {
                         Value *detached = (Value *)zen_alloc(&gc_, sizeof(Value) * new_n);
-                        memcpy(detached, inst->fields, sizeof(Value) * old_n);
+                        if (old_n > 0 && inst->fields) /* memcpy(dst, nullptr, 0) is UB */
+                            memcpy(detached, inst->fields, sizeof(Value) * old_n);
                         inst->fields = detached;
                         inst->fields_inline = false;
                     }
@@ -3636,11 +3877,11 @@ namespace zen
                 {
                     RT_ERROR("array index must be integer");
                 }
-                int32_t idx = (int32_t)key.as.integer;
+                int64_t idx = key.as.integer; /* stays 64-bit: a 32-bit cast would wrap 2^32 to index 0 */
                 ObjArray *arr = as_array(container);
                 if (idx < 0)
                     idx += arr_count(arr);
-                if ((uint32_t)idx >= (uint32_t)arr_count(arr))
+                if ((uint64_t)idx >= (uint64_t)arr_count(arr))
                 {
                     RT_ERROR("array index out of bounds");
                 }
@@ -3660,14 +3901,14 @@ namespace zen
                     RT_ERROR("buffer index must be integer");
                 }
                 ObjBuffer *buf = as_buffer(container);
-                int32_t idx = (int32_t)key.as.integer;
+                int64_t idx = key.as.integer;
                 if (idx < 0)
                     idx += buf->count;
-                if ((uint32_t)idx >= (uint32_t)buf->count)
+                if ((uint64_t)idx >= (uint64_t)buf->count)
                 {
                     RT_ERROR("buffer index out of bounds");
                 }
-                double v = buffer_get(buf, idx);
+                double v = buffer_get(buf, (int32_t)idx);
                 /* Float types return float, integer types return int64 */
                 if (buf->btype >= BUF_FLOAT32)
                     R[ZEN_A(i)] = val_float(v);
@@ -3681,10 +3922,10 @@ namespace zen
                     RT_ERROR("string index must be integer");
                 }
                 ObjString *s = as_string(container);
-                int32_t idx = (int32_t)key.as.integer;
+                int64_t idx = key.as.integer;
                 if (idx < 0)
                     idx += s->length;
-                if ((uint32_t)idx >= (uint32_t)s->length)
+                if ((uint64_t)idx >= (uint64_t)s->length)
                 {
                     RT_ERROR("string index out of bounds");
                 }
@@ -3802,11 +4043,11 @@ namespace zen
                 {
                     RT_ERROR("array index must be integer");
                 }
-                int32_t idx = key.as.integer;
+                int64_t idx = key.as.integer;
                 ObjArray *arr = as_array(container);
                 if (idx < 0)
                     idx += arr_count(arr);
-                if ((uint32_t)idx < (uint32_t)arr_count(arr))
+                if ((uint64_t)idx < (uint64_t)arr_count(arr))
                 {
                     arr->data[idx] = val;
                 }
@@ -3827,10 +4068,10 @@ namespace zen
                     RT_ERROR("buffer index must be integer");
                 }
                 ObjBuffer *buf = as_buffer(container);
-                int32_t idx = key.as.integer;
+                int64_t idx = key.as.integer;
                 if (idx < 0)
                     idx += buf->count;
-                if ((uint32_t)idx >= (uint32_t)buf->count)
+                if ((uint64_t)idx >= (uint64_t)buf->count)
                 {
                     RT_ERROR("buffer index out of bounds");
                 }
@@ -3843,7 +4084,7 @@ namespace zen
                 {
                     RT_ERROR("buffer only accepts numbers");
                 }
-                buffer_set(buf, idx, v);
+                buffer_set(buf, (int32_t)idx, v);
             }
             else
             {
@@ -3864,14 +4105,14 @@ namespace zen
                     RT_ERROR("array index must be integer");
                 }
                 ObjArray *arr = as_array(container);
-                int32_t idx = (int32_t)key.as.integer;
+                int64_t idx = key.as.integer;
                 if (idx < 0)
                     idx += arr_count(arr);
-                if ((uint32_t)idx >= (uint32_t)arr_count(arr))
+                if ((uint64_t)idx >= (uint64_t)arr_count(arr))
                 {
                     RT_ERROR("del: index out of bounds");
                 }
-                array_remove(arr, idx);
+                array_remove(arr, (int32_t)idx);
             }
             else if (is_map(container))
             {
@@ -3896,18 +4137,19 @@ namespace zen
             Value vstop = R[base + 1];
             Value vstep = R[base + 2];
 
-            int32_t step = is_int(vstep) ? (int32_t)vstep.as.integer : 1;
-            if (step == 0)
+            if (is_int(vstep) && vstep.as.integer == 0)
             {
                 RT_ERROR("slice step cannot be zero");
             }
+            /* bounds/step are clamped, not wrapped: s[:2**32] is the whole string, not empty */
+            int32_t step = is_int(vstep) ? clamp_slice_i32(vstep.as.integer) : 1;
 
             if (is_array(container))
             {
                 ObjArray *src = as_array(container);
                 int32_t len = arr_count(src);
-                int32_t start = is_int(vstart) ? (int32_t)vstart.as.integer : (step > 0 ? 0 : len - 1);
-                int32_t stop = is_int(vstop) ? (int32_t)vstop.as.integer : (step > 0 ? len : -len - 1);
+                int32_t start = is_int(vstart) ? clamp_slice_i32(vstart.as.integer) : (step > 0 ? 0 : len - 1);
+                int32_t stop = is_int(vstop) ? clamp_slice_i32(vstop.as.integer) : (step > 0 ? len : -len - 1);
                 /* Normalize negative indices */
                 if (start < 0)
                     start += len;
@@ -3945,8 +4187,8 @@ namespace zen
             {
                 ObjString *src = as_string(container);
                 int32_t len = src->length;
-                int32_t start = is_int(vstart) ? (int32_t)vstart.as.integer : (step > 0 ? 0 : len - 1);
-                int32_t stop = is_int(vstop) ? (int32_t)vstop.as.integer : (step > 0 ? len : -len - 1);
+                int32_t start = is_int(vstart) ? clamp_slice_i32(vstart.as.integer) : (step > 0 ? 0 : len - 1);
+                int32_t stop = is_int(vstop) ? clamp_slice_i32(vstop.as.integer) : (step > 0 ? len : -len - 1);
                 if (start < 0)
                     start += len;
                 if (stop < 0)
@@ -5599,6 +5841,7 @@ namespace zen
             int64_t left = R[a + 1].as.integer - 1;
             if (left > 0)
             {
+                ZEN_GC_SAFEPOINT();
                 R[a + 1].as.integer = left;
                 int64_t next = (int64_t)((uint64_t)R[a].as.integer + (uint64_t)R[a + 2].as.integer);
                 R[a].as.integer = next;
@@ -5710,13 +5953,7 @@ namespace zen
 
             /* Compile: try EVAL_MODE (single expression) first, silently.
             ** Fall back to full script mode (statements) if parse fails. */
-            Compiler comp;
-            ObjFunc *fn = comp.compile_eval(&gc_, this, code_str->chars, "<eval>", /*silent=*/true);
-            if (!fn)
-            {
-                Compiler comp2;
-                fn = comp2.compile(&gc_, this, code_str->chars, "<eval>");
-            }
+            ObjFunc *fn = compile_eval_source(code_str->chars);
             if (!fn)
             {
                 RT_ERROR("eval: compile error");
@@ -5728,7 +5965,7 @@ namespace zen
             /* Wrap fn in a no-upvalue closure */
             ObjClosure *cl = (ObjClosure *)zen_alloc_now(&gc_, sizeof(ObjClosure));
             cl->obj.type = OBJ_CLOSURE;
-            cl->obj.color = GC_BLACK;
+            cl->obj.color = gc_.black_val;
             cl->obj.interned = 0;
             cl->obj.hash = 0;
             cl->obj.gc_next = gc_.objects;

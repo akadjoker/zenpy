@@ -556,6 +556,99 @@ generators em `list()/sum()`; iter/next/hash/id/slice/frozenset;
 str.format/encode; atributos novos em instâncias (classes seladas);
 `Base.who(obj)` (método sem bind); `counts.get` como valor.
 
+### Ronda 6 (2026-09-07, noite: port std → ct::containers, branch port/containers)
+
+Pedido: retirar todo o `std::` do libzen e usar https://github.com/akadjoker/containers
+(header-only, `ct::`). Antes: `tools/speed_report.sh <label>` grava em
+`tests/manual/baseline/<label>.md` tempos de build limpo (release e debug),
+tamanhos, tempo da suite, cross_lang, microbench, algo_bench e tempo de
+compilação de scripts (`zen --check`, novo). Baseline: `baseline-1aaa13b.md`;
+binários originais em `zenpy_backups/baseline-1aaa13b/`.
+
+Âmbito real do `std::` no libzen: pequeno e quase todo da ronda 5
+(`std::vector`/`std::string`/`std::pair`/`stable_sort` em builtin_base.cpp e
+invoke_array.inl), mais `std::string` no bytecode.cpp, um `std::vector` no
+vm.cpp (`call_args`), `numeric_limits` em bytecode/math, e prefixos `std::`
+em funções C (cctype/cstdio/cmath). Os headers `ct` usados (vector, string,
+sort, span, detail/utils) estão vendorizados em `libzen/third_party/ct` com
+o commit de origem em VERSION; `third_party` entrou no include path privado
+do zen_static. `ct::sort` não é estável: a ordenação Python (sorted, list.sort)
+usa uma struct `{key, val, index}` e desempata pelo índice original.
+`isnan/isinf/isfinite` viraram `zen_isnan/...` em value.h (os de <cmath> só
+existem como `std::`). `grep std:: libzen/src libzen/include` → 0.
+
+Resultado (mesma janela, best of 3): tempos de execução iguais dentro do
+ruído (fib 0,131/0,131, dijkstra 0,187/0,188, suite 2,1 s); build limpo
+igual (9,5→9,8 s release, 8,7→8,9 s debug: o std nunca esteve no caminho
+quente da compilação); tamanho: `zen` 653 128 → 628 792 bytes (−3,7 %),
+libzen.a release 978 → 958 KB, libzen.a debug 18,9 → 17,7 MB (−6 %).
+Conclusão: o port limpa dependências e encolhe o binário; não muda
+velocidade, porque as estruturas quentes da VM (arrays, maps, strings do
+GC) já eram próprias.
+
+- (cont. ronda 6) `ct::stable_sort` adicionado ao `containers` (merge sort,
+  buffer n/2, runs por insertion sort; 13 testes contra std::stable_sort,
+  paridade no bench) e usado nos sorts Python do zenpy sem desempate por
+  índice. `builtin_json.cpp`: StrBuf → `ct::String`. Módulo `xml` novo
+  (`builtin_xml.cpp`) em cima do `ct::Xml`: `parse` → dicts/listas
+  (`tag/attrs/text/children`), `stringify(node[, indent])`; tests/66_xml.py,
+  docs/zenpy_xml.md. Decisão: o json continua a converter directo para
+  objectos Zen (sem árvore `ct::Json` intermédia), porque é o caminho mais
+  rápido e já não tem dependências.
+
+### Ronda 7 (2026-09-07, noite: docs internos + testes de cobertura)
+
+- `docs/internals/` (README, dispatch-and-frames, calling-convention,
+  natives-and-embedding, compiler-conditions-and-peepholes, gc-and-roots,
+  testing): uma página por subsistema, em PT, com os nomes reais do código.
+  Regra: quem muda o código muda a página no mesmo commit.
+- `run_tests.sh`: `--bytecode` (cada script via `--dump` + `.zbc`, saída
+  igual), `--switch-dispatch` (rebuild com `-DZEN_DISPATCH_MODE=1`, o
+  caminho do MSVC), e `tests/errors/*.py` (`# expect: <substring>` na 1.ª
+  linha; exit != 0 e a substring no stderr). 10 casos de erro.
+- `tools/speed_gate.sh <baseline.md> [%]`: falha se um benchmark regredir
+  mais do que o limiar.
+- test_embedding: kwargs em nativos via `vm->kwargs()` (incl. `sorted(key=,
+  reverse=)`), e `ClassBuilder::method(..., ZEN_NATIVE_GC_SAFE)` com receptor
+  tipado sob 200k chamadas com lixo pelo meio, dtor no fim.
+- Bugs apanhados pelos modos novos: (1) o carregador de `.zbc` chamava
+  `resolve_native_globals()` (re-importa módulos, cujas classes internam
+  selectores) ANTES de `read_selectors`, logo qualquer script que usasse um
+  método cujo selector caísse num slot já ocupado (`xml.parse`, `d.update`)
+  carregava com "selector mismatch"; ordem trocada no loader, formato igual.
+  (2) `None + 1` (e qualquer não-número) via `ADDI`/`SUBI` dava float em vez
+  de erro; agora erro como no `OP_ADD`. (3) `record` e `enum` não eram
+  serializados no `.zbc` (as globais ficavam nil): bytecode 2.8 escreve
+  `BC_STRUCT_DEF` (nome + campos) e `BC_ENUM_MAP` (mapa de módulo só com
+  escalares; um módulo importado, que tem nativos, continua a ser
+  re-importado pelo loader). `--bytecode` 79/79.
+
+### Ronda 8 (2026-09-07, noite: zen_bind.hpp + caça a bugs)
+
+- `libzen/include/zen/zen_bind.hpp`: bindings gerados a partir da assinatura
+  C++ (header-only, C++17, sem STL). `bind::def_fn<&f>(vm, "nome")` e
+  `bind::def_class<T>(vm, "Cls").ctor<A...>()|.ctor<&factory>().dtor()
+  .method<&T::m>("m", flags).end()`. Converte bool/inteiros/float/double/
+  `const char *`/`Value`/`T *`/`T &`, injecta um `VM *` inicial, tira a
+  aridade da assinatura e produz o erro com o nome e o índice do argumento
+  (`twice: argument 1 must be an int`). Uma função livre cujo 1.º parâmetro
+  é `T *`/`T &` regista-se como método (o receptor entra nesse slot).
+  A API crua (`def_native`, `ClassBuilder`) fica igual e é o que o header usa
+  por baixo: varargs, kwargs e retornos múltiplos continuam à mão.
+  Cobertura: teste 18 do test_embedding (98 checks); `tex_zen.cpp` e
+  `glue_zen.cpp` portados como prova (números iguais: glue native 6,70
+  ms/frame contra 3,38 do C++; texmark 55 400 sprites a 60 fps).
+- Caça a bugs (ASan/UBSan + libFuzzer + fuzzer de mutação): `fuzz_zen`
+  804 k execuções e `fuzz_embedding` 167 k sem uma única falha; a suite
+  passa 79/79 nos quatro modos. O fuzzer de mutação encontrou um caso real
+  de UB: `memcpy(dst, nullptr, 0)` ao crescer os campos de uma instância sem
+  campos nenhuns (dois sítios no `vm_dispatch.cpp`) e a mesma forma em
+  `array_copy`. Corrigido com guarda `n > 0 && src`.
+- O critério do fuzzer de mutação estava errado: contava `[zen runtime
+  error]` (erro de script, que é o comportamento certo) como crash, o que
+  enterrava o achado real em 70 falsos positivos. Agora só sinais e relatórios
+  do sanitizer contam.
+
 ### Plano para a próxima sessão (por ordem)
 
 1. Validar: `cd build_release && ninja`, suite normal + `--stress-gc`, bench
@@ -651,3 +744,105 @@ str.format/encode; atributos novos em instâncias (classes seladas);
     embedding: `def_native` + `call_global`; padrão de script recomendado:
     `typed: Array[Bunny] = lista` + loop por índice, parâmetros anotados
     (`p: P`) para campos/métodos O(1).
+
+## Round 9 — edge cases contra CPython (2026-09-08)
+
+Encontrados a testar limites numéricos e strings contra o CPython. Nenhum
+está corrigido.
+
+### 1. Ternário avalia sempre os dois ramos (GRAVE)
+
+```python
+def boom():
+    print("BOOM")
+    return 1
+x = boom() if False else 2     # imprime BOOM; CPython não
+```
+
+Python garante avaliação preguiçosa, e código real depende disso:
+`x[0] if x else default`, `n // d if d else 0` — o segundo rebenta com
+divisão por zero no zenpy.
+
+Causa: em `a if c else b` o parser chega ao `if` com `a` **já emitido** —
+`ternary_expr()` recebe `left` como registo pronto. Corrigir implica
+descartar o código de `a` (`shrink_to`) e re-emitir dentro do ramo
+verdadeiro, o que precisa da posição do lexer **antes** de `a`, não a que
+está guardada (que é depois do `if`). Tentado e revertido: a posição errada
+faz o ramo verdadeiro reavaliar a condição.
+
+O zenvm está correcto aqui (`x != 0 ? 10 / x : "safe"` não rebenta).
+
+### 2. `-9223372036854775808` parseado como `-9223372036854775807`
+
+O literal do mínimo de int64 perde uma unidade. O lexer lê o valor absoluto
+(9223372036854775808, que não cabe em int64 com sinal) antes de aplicar o
+menos unário. O zenvm acerta.
+
+### 3. Overflow de int silencioso, e diferente do CPython
+
+`9223372036854775807 + 1` dá `-9223372036854775808` (wrap). O CPython
+promove a inteiro arbitrário. Decisão de desenho legítima — o zen não tem
+bignums — mas não está documentada e não há aviso.
+
+### 4. Strings são bytes, não caracteres
+
+`len("héllo")` dá 6 (CPython: 5), e `"héllo"[1]` devolve meio byte UTF-8.
+O zenvm tem o mesmo comportamento, portanto é consistente entre os dois,
+mas diverge do Python. Há um módulo `utf8`; o que falta é `len`/indexação
+serem conscientes de UTF-8, ou a divergência ficar documentada.
+
+Testes usados: tmp/ (não commitado) — reproduzir com
+`print(len("héllo"))` e o exemplo do ternário acima.
+
+## Round 10 — o que passou e o que falta (2026-09-08)
+
+Continuação do round 9, a varrer áreas que ainda não tinham sido testadas
+contra o CPython lado a lado.
+
+### Passou tudo (nenhuma divergência)
+
+- **Colecções**: índices negativos, fatias fora de limites (`a[5:]`, `a[-10:]`),
+  cópia por fatia, igualdade, chaves de tipos diferentes no mesmo dict
+  (`d[1]` e `d["1"]` distintos), `get` com default, `sorted`/`reversed`/
+  `min`/`max`/`sum`/`any`/`all` incluindo os casos vazios.
+- **Closures e funções**: captura por chamada num ciclo, closures aninhadas
+  três níveis, defaults, `*args`, recursão a 100 níveis.
+- **Classes**: herança a três níveis, `super().__init__`, `super().method()`,
+  despacho virtual através de um método da base, `isinstance` em toda a
+  cadeia, `__eq__`/`__lt__`/`__add__`/`__str__`, e `sorted` a usar `__lt__`.
+- **Aliasing de strings**: o `OBJ_FLAG_SHARED` aguenta os casos que o podiam
+  furar — string guardada numa lista antes de ser estendida, usada como
+  chave e depois reatribuída, num campo de instância, e alias local dentro
+  de uma função. Todos batem certo com o CPython.
+- **Stress**: recursão infinita dá "stack overflow" limpo, não crash;
+  100k estruturas cíclicas não incomodam o GC; 2M elementos numa lista em
+  0.09s/51MB; 500k entradas num dict em 37MB.
+
+### 5. `next()` não existe
+
+```python
+g = gen()
+print(next(g))     # attempt to call non-function (got nil)
+```
+
+Geradores funcionam em `for`, em comprehensions e em generator expressions
+(`sum(v for v in gen())`) — só falta o builtin que os consome um a um. É a
+forma de usar um gerador como stream, que é metade da razão para os ter.
+
+### 6. `list(generator)` falha
+
+```python
+print(list(gen()))    # list: object is not iterable
+```
+
+`list()` aceita array, map e set (builtin_base.cpp: a verificação é
+`is_array`/`is_map`/`is_set`), e um gerador não é nenhum deles. `[v for v in
+gen()]` funciona e produz o mesmo, portanto é só a conversão directa que
+falta.
+
+### 7. Tuplos são listas
+
+`(1, 2)` produz um array, `type()` diz "list", e `(1,2) == [1,2]` é True
+(CPython: False). Decisão de desenho defensável — um tipo a menos — mas
+divergente, e código Python que usa tuplos como chaves de dict ou que
+distingue os dois tipos vai comportar-se de outra forma.

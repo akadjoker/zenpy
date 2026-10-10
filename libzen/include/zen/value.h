@@ -1,6 +1,7 @@
 #ifndef ZEN_VALUE_H
 #define ZEN_VALUE_H
 
+#include <cmath>
 #include "common.h"
 
 namespace zen
@@ -25,7 +26,6 @@ namespace zen
         VAL_FLOAT,
         VAL_OBJ, /* qualquer objecto no heap (string, func, array...) */
         VAL_PTR, /* raw pointer (não gerido pelo GC) */
-        VAL_SMALL_STRING, /* EXPERIMENTAL: string <= 7 bytes, stored inline (no GC) */
     };
 
     struct Value
@@ -38,13 +38,6 @@ namespace zen
             double number;
             Obj *obj;
             void *pointer;
-            /* EXPERIMENTAL SSO: small string optimization (1-7 bytes inline) */
-            struct
-            {
-                uint8_t len;               /* 1-7 bytes */
-                char chars[7];             /* string data */
-                uint8_t _pad;              /* padding */
-            } sso;
         } as;
     };
 
@@ -91,28 +84,6 @@ namespace zen
         return v;
     }
 
-    /* EXPERIMENTAL SSO: small string creation (1-7 bytes inline, no GC) */
-    inline Value val_small_string(const char *chars, int len)
-    {
-        Value v;
-        v.type = VAL_SMALL_STRING;
-        v.as.sso.len = len;
-        for (int i = 0; i < len; i++)
-            v.as.sso.chars[i] = chars[i];
-        return v;
-    }
-
-    /* EXPERIMENTAL SSO: safely get small string data */
-    inline bool is_small_string(const Value &v) { return v.type == VAL_SMALL_STRING; }
-    inline int small_string_len(const Value &v)
-    {
-        return is_small_string(v) ? v.as.sso.len : 0;
-    }
-    inline const char *small_string_chars(const Value &v)
-    {
-        return is_small_string(v) ? v.as.sso.chars : nullptr;
-    }
-
     /* Type checks */
     inline bool is_nil(Value v) { return v.type == VAL_NIL; }
     inline bool is_bool(Value v) { return v.type == VAL_BOOL; }
@@ -133,7 +104,6 @@ namespace zen
         case VAL_BOOL:  return v.as.boolean;
         case VAL_INT:   return v.as.integer != 0;
         case VAL_FLOAT: return v.as.number != 0.0;
-        case VAL_SMALL_STRING: return v.as.sso.len != 0;
         default:        return true; /* objects: refined in is_truthy_full() */
         }
     }
@@ -149,6 +119,11 @@ namespace zen
             return v.as.boolean ? 1.0 : 0.0; /* bool is a number, as in Python */
         return 0.0;
     }
+
+    /* NaN/inf tests without <cmath>'s std:: overloads. */
+    inline bool zen_isnan(double d) { return d != d; }
+    inline bool zen_isinf(double d) { return d == HUGE_VAL || d == -HUGE_VAL; }
+    inline bool zen_isfinite(double d) { return d == d && d != HUGE_VAL && d != -HUGE_VAL; }
 
     /* int, float or bool: the operands arithmetic and == accept as numbers. */
     inline bool is_numeric_like(Value v)
@@ -194,15 +169,6 @@ namespace zen
                 return objects_equal(a.as.obj, b.as.obj);
             case VAL_PTR:
                 return a.as.pointer == b.as.pointer;
-            case VAL_SMALL_STRING:
-            {
-                if (a.as.sso.len != b.as.sso.len)
-                    return false;
-                for (int i = 0; i < a.as.sso.len; i++)
-                    if (a.as.sso.chars[i] != b.as.sso.chars[i])
-                        return false;
-                return true;
-            }
             }
         }
         /* Mixed numbers: int/float by value, bool as 0/1 (True == 1 in Python) */

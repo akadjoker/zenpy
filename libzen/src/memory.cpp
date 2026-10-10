@@ -820,6 +820,21 @@ namespace zen
             case VAL_OBJ:
                 h = v.as.obj->hash;
                 break;
+            case VAL_VEC2:
+            case VAL_VEC3:
+            {
+                /* Bitwise over the components. + 0.0f folds -0.0 into +0.0
+                ** so vectors that compare equal hash equal. */
+                uint32_t bx, by, bz;
+                float fx = v.vx + 0.0f, fy = v.as.v.y + 0.0f, fz = v.as.v.z + 0.0f;
+                memcpy(&bx, &fx, sizeof bx);
+                memcpy(&by, &fy, sizeof by);
+                memcpy(&bz, &fz, sizeof bz);
+                h = (bx * 2654435761u) ^ (by * 2246822519u) ^ (bz * 3266489917u)
+                    ^ (v.type == VAL_VEC3 ? 0x85ebca6bu : 0xc2b2ae35u);
+                h ^= h >> 15;
+                break;
+            }
             default:
                 h = 0;
                 break;
@@ -1415,6 +1430,14 @@ namespace zen
         return r;
     }
 
+    ObjBoundMethod *new_bound_method(GC *gc, Value receiver, Value method)
+    {
+        ObjBoundMethod *bm = (ObjBoundMethod *)alloc_obj(gc, sizeof(ObjBoundMethod), OBJ_BOUND_METHOD);
+        bm->receiver = receiver;
+        bm->method = method;
+        return bm;
+    }
+
     /* Destroy a persistent instance — C++ owns lifetime, calls this explicitly */
     void destroy_instance(GC *gc, ObjInstance *inst)
     {
@@ -1677,6 +1700,14 @@ namespace zen
         case OBJ_RANGE:
             /* ObjRange has no GC references (plain integers) */
             break;
+
+        case OBJ_BOUND_METHOD:
+        {
+            ObjBoundMethod *bm = (ObjBoundMethod *)obj;
+            gc_mark_value(gc, bm->receiver);
+            gc_mark_value(gc, bm->method);
+            break;
+        }
         }
     }
 
@@ -1736,6 +1767,8 @@ namespace zen
         }
         case OBJ_RANGE:
             return sizeof(ObjRange);
+        case OBJ_BOUND_METHOD:
+            return sizeof(ObjBoundMethod);
         }
         return 0;
     }
@@ -1871,6 +1904,9 @@ namespace zen
         }
         case OBJ_RANGE:
             /* No extra allocations to free */
+            break;
+        case OBJ_BOUND_METHOD:
+            /* receiver/method are plain Values — nothing owned */
             break;
         case OBJ_CLOSURE:
         {
@@ -2093,6 +2129,9 @@ namespace zen
                 return a.as.number == b.as.number;
             case VAL_PTR:
                 return a.as.pointer == b.as.pointer;
+            case VAL_VEC2:
+            case VAL_VEC3:
+                return values_equal(a, b);
             case VAL_OBJ:
             {
                 if (a.as.obj == b.as.obj)
@@ -2230,7 +2269,9 @@ namespace zen
         return 0;
     }
 
-    int format_float_py(double d, char *buf, size_t cap)
+    /* f32: shortest digits that read back to the same float (the value is
+    ** a float widened to double), instead of the same double. */
+    static int format_float_impl(double d, bool f32, char *buf, size_t cap)
     {
         if (d != d)
             return snprintf(buf, cap, "nan");
@@ -2241,10 +2282,11 @@ namespace zen
         /* Shortest precision that round-trips. */
         char sci[40];
         int prec = 1;
-        for (; prec <= 17; prec++)
+        const int max_prec = f32 ? 9 : 17;
+        for (; prec <= max_prec; prec++)
         {
             snprintf(sci, sizeof sci, "%.*e", prec - 1, d);
-            if (strtod(sci, nullptr) == d)
+            if (f32 ? strtof(sci, nullptr) == (float)d : strtod(sci, nullptr) == d)
                 break;
         }
         /* sci = [-]D.DDDDe[+-]XX : split digits and exponent */
@@ -2296,5 +2338,39 @@ namespace zen
         }
         *o = '\0';
         return (int)(o - buf);
+    }
+
+    int format_float_py(double d, char *buf, size_t cap)
+    {
+        return format_float_impl(d, false, buf, cap);
+    }
+
+    int format_float32_py(float f, char *buf, size_t cap)
+    {
+        return format_float_impl((double)f, true, buf, cap);
+    }
+
+    int format_vec_py(Value v, char *buf, size_t cap)
+    {
+        const bool v3 = v.type == VAL_VEC3;
+        float c[3] = {v.vx, v.as.v.y, v.as.v.z};
+        size_t n = 0;
+        auto put = [&](const char *s, size_t len) {
+            for (size_t i = 0; i < len && n + 1 < cap; i++)
+                buf[n++] = s[i];
+        };
+        put(v3 ? "Vec3(" : "Vec2(", 5);
+        for (int k = 0; k < (v3 ? 3 : 2); k++)
+        {
+            if (k)
+                put(", ", 2);
+            char tmp[48];
+            int len = format_float32_py(c[k], tmp, sizeof tmp);
+            put(tmp, (size_t)len);
+        }
+        put(")", 1);
+        if (cap)
+            buf[n] = '\0';
+        return (int)n;
     }
 }

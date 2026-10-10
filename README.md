@@ -265,6 +265,38 @@ See **[docs/README.md](docs/README.md)** for:
 - 📁 File & database handling
 - 🎨 Graphics & animation
 
+### Vectors
+
+`Vec2(x, y)` and `Vec3(x, y, z)` are value types: the floats live inside the
+16-byte `Value`, so a vector never allocates and the GC never sees it.
+
+```python
+p = Vec3(1, 2, 3)                      # Vec3() is the zero vector; ints become floats
+p = p + Vec3(0, 1, 0) * 0.5            # vec +- vec, vec * scalar, scalar * vec, vec / scalar, vec * vec (per component), -vec
+p == Vec3(1, 2.5, 3)                   # == and != compare components; < <= > >= are errors
+print(p.x, p.y, p.z)                   # fields; Vec2 has no .z
+p.x = 9                                # rewrites a local; p.y += 1 works too
+p.length(), p.length_sq(), p.normalized(), p.dot(q), p.cross(q), p.distance(q),
+p.distance_sq(q), p.lerp(q, t), p.abs(), p.with_x(f) / with_y / with_z, p.to_list()
+```
+
+Components are `float32`; scalars come back as Python floats. `Vec2.cross` is the
+2D scalar cross product, `Vec3.cross` the vector product, `normalized()` of a zero
+vector is zero. A vector is falsy only when all components are 0, can be a dict key
+or set member, prints as `Vec3(1.0, 2.0, 3.0)` and serialises with `json.stringify`
+as `[x, y, z]`. Value semantics: `w = v` copies. A field write goes through to
+whatever the vector was read from: a local (`v.x = 1`), a field (`self.pos.x += dx`,
+`a.b.pos.y = 2`), a global (`g.x = 1`), a list or dict element (`pts[i].x += 1`,
+`d["a"].y = 5`) or a captured variable -- the compiler stores the modified copy
+back after the write. What is *not* written back is a vector a call returns
+(`get_body().pos.x = 1` changes a temporary, as in any value-type language) and
+a receiver whose index register was already recycled. `len(v)`, `v[0]` and
+`for c in v` are not supported yet.
+
+A callable stored in a field is called like a method: `self.cb(x)` / `obj.cb(x)`
+call the lambda, function, native or bound method the field holds (no implicit
+`self`); a method of that name still wins, and a non-callable field is an error.
+
 ## Performance
 
 Zen is **fast and lightweight**:
@@ -437,8 +469,10 @@ vm.def_global("hero", bind::wrap<Body>(vm, &host_hero));   // host-owned, never 
 
 - **Conversions.** `bool`, every integer width (out-of-range is an error, not a
   truncation), enums, `float`/`double` (ints promote), `const char*` (valid only
-  during the call, copy it to keep it), `zen::Value`, and `T*`/`T&` for bound
-  classes. A leading `VM*` is injected and is not a script argument.
+  during the call, copy it to keep it), `zen::Value`, `Vec2f`/`Vec3f` (also
+  `const &`; script `Vec2`/`Vec3` values, a wrong type is `must be Vec3`), and
+  `T*`/`T&` for bound classes. A leading `VM*` is injected and is not a script
+  argument.
 - **Property and wrap.** `property<&T::x>` registers a getter `x()` and a setter
   `set_x(v)` (`getter`/`setter` do one each). `wrap<T>(vm, ptr)` makes a script
   instance over memory the host owns (`nullptr` becomes `None`); a bound
@@ -661,7 +695,7 @@ expression, `a, *b = ...`, `**kwargs` parameters, keyword-only `*`, lambda
 defaults, `f(**d)`, `[*a]`, f-string `!r`, raw strings, `for/while ... else`.
 See bugs.md "Ronda 5" for the full list.
 
-### Bytecode format (`.zenbc`, version 2.8)
+### Bytecode format (`.zenbc`, version 2.9)
 
 ```
 Header:  ZENBC(5) | major(u16) | minor(u16) | flags(u32)
@@ -673,7 +707,7 @@ Functions: recursive tree of function bodies
 ## Builtin Modules
 
 ### Base (always available)
-`str`, `int`, `float`, `char`, `ord`, `type`, `isinstance`, `len`, `range`, `print`, `input`, `assert`, `error`, `format`, `enumerate`, `zip`, `map`, `filter`, `collect`, `mem_used`, `mem_info`, `clock`
+`str`, `int`, `float`, `Vec2`, `Vec3`, `char`, `ord`, `type`, `isinstance`, `len`, `range`, `print`, `input`, `assert`, `error`, `format`, `enumerate`, `zip`, `map`, `filter`, `collect`, `mem_used`, `mem_info`, `clock`
 
 ### `math`
 `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sqrt`, `cbrt`, `exp`, `log`, `log2`, `log10`, `ceil`, `floor`, `round`, `pow`, `abs`, `min`, `max`, `clamp`, `random`, `hypot`, `isnan`, `isinf` — plus constants `pi`, `e`, `tau`, `inf`, `nan`

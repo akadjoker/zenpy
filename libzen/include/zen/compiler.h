@@ -314,6 +314,21 @@ namespace zen
         int call_expr(int callee, int dest);
         int generic_call_expr(int callee, int dest);
         int dot_expr(int obj, int dest, bool can_assign);
+        /* Where a field-assignment receiver was read from, so a store into a
+        ** value-type receiver (Vec2/Vec3 live in the register, not on the
+        ** heap) can be written back: `a.b.x = v` is `t = a.b; t.x = v;
+        ** a.b = t`. See capture_receiver_origin(). */
+        struct ReceiverOrigin
+        {
+            enum Kind : uint8_t { NONE, FIELD, FIELD_IDX, FIELD_IDXC, GLOBAL, UPVAL, INDEX };
+            Kind kind = NONE;
+            int parent = 0;  /* register the receiver was read from       */
+            int c = 0;       /* name constant / field index / index reg   */
+            int name_ki = 0; /* FIELD_IDXC: by-name fallback constant     */
+            int bx = 0;      /* GLOBAL: slot, UPVAL: upvalue index        */
+        };
+        void capture_receiver_origin(int obj, ReceiverOrigin &o) const;
+        void emit_receiver_writeback(const ReceiverOrigin &o, int obj, int line);
         int safe_dot_expr(int obj, int dest);
         int null_coalesce(int left, int dest);
         int subscript_expr(int obj, int dest, bool can_assign);

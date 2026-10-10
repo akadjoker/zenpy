@@ -44,6 +44,41 @@ CallFrame
 `LOAD_STATE_FROM(caller_frame)` lê tudo do frame com loads independentes,
 sem passar por `frame->func->constants` (dois loads dependentes).
 
+## O `Value`: 16 bytes, com Vec2/Vec3 lá dentro
+
+```
+offset 0   ValueType type   (1 byte)
+offset 4   float vx         (o antigo padding: x de um Vec2/Vec3)
+offset 8   union as         (bool, int64, double, Obj*, void*, ou {float y, z})
+```
+
+`VAL_VEC2` / `VAL_VEC3` (a seguir a `VAL_PTR`) guardam as componentes no
+próprio `Value`: `x` em `vx`, `y`/`z` em `as.v`. Não há heap, não há `Obj`,
+o GC nunca os vê (`gc_mark_value` só segue `VAL_OBJ`), e `a + b` não aloca.
+Um `Vec2` tem sempre `z == 0` (`val_vec2` zera-o), por isso igualdade e hash
+podem ler as três componentes sem distinguir o tipo. A cópia de um `Value`
+copia as 16 bytes, logo atribuir um vector é copiar o valor (`w = v` não
+partilha nada); `v.x = f` reescreve o registo do receptor no sítio
+(`OP_SETFIELD`). `static_assert` em `value.h` fixa `sizeof == 16`,
+`offsetof(as) == 8`, `offsetof(vx) == 4`.
+
+Os tipos numéricos são o intervalo contíguo `VAL_NIL..VAL_FLOAT`. Os fast
+paths aritméticos (`ADD/SUB/MUL/DIV/IDIV/MOD`, `GETFIELD_MUL`,
+`FIELD_MULADD`, `NEG`) testam `is_numeric_type(v)`, isto é `v.type <=
+VAL_FLOAT`, uma comparação por operando como o antigo `!is_obj`. Quem não é
+numérico (objecto, ponteiro, vector) cai no ramo lento, onde estão os casos
+de strings, instâncias com operadores e `vec_arith` (`vec ± vec`, `vec *
+escalar`, `escalar * vec`, `vec * vec`, `vec / escalar`). Regra para código
+novo: se um caminho chama `to_number()`, tem de ter já garantido que o
+operando é numérico (ou recusar um vector com `is_vec`), senão lê lixo como
+número. As comparações `<` `<=` recusam vectores (`VEC_CMP_GUARD`);
+`==`/`!=` comparam componente a componente (`values_equal`).
+
+Limitação conhecida: sendo um valor, `obj.pos.x = 1` actua sobre uma cópia
+temporária de `obj.pos` e perde-se, e o mesmo para um vector numa global
+(`g.x = 1` ao nível do módulo). Só um local (registo) é reescrito. O
+compilador terá de gerar o write-back (`obj.pos = obj.pos.with_x(1)`).
+
 ## Entrar num frame: `ENTER_FRAME`
 
 Depois de escrever o frame novo, o estado local passa a ser o do callee.

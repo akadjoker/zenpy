@@ -247,12 +247,23 @@ namespace zen
             case OBJ_NATIVE_STRUCT:
                 printf("<native_struct>");
                 break;
+            case OBJ_BOUND_METHOD:
+                printf("<bound method>");
+                break;
             }
             break;
         }
         case VAL_PTR:
             printf("<ptr %p>", val.as.pointer);
             break;
+        case VAL_VEC2:
+        case VAL_VEC3:
+        {
+            char vbuf[160];
+            format_vec_py(val, vbuf, sizeof vbuf);
+            printf("%s", vbuf);
+            break;
+        }
         }
     }
 

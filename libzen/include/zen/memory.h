@@ -97,6 +97,7 @@ namespace zen
     ObjClass *new_class(GC *gc, ObjString *name, ObjClass *parent);
     ObjInstance *new_instance(GC *gc, ObjClass *klass);
     ObjRange *new_range(GC *gc, int64_t start, int64_t stop, int64_t step);
+    ObjBoundMethod *new_bound_method(GC *gc, Value receiver, Value method);
     void destroy_instance(GC *gc, ObjInstance *inst); /* free persistent instance (C++ owned) */
 
     /* Array operations */

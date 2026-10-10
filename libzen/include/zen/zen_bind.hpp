@@ -19,11 +19,12 @@
 **
 ** Parameter types understood: bool, any integer type (out-of-range script
 ** ints are an error, never truncated), enums (as ints), float/double,
-** const char *, Value, and C * / C & for a native class registered with
+** const char *, Value, Vec2f / Vec3f (also as const &; script Vec2 / Vec3
+** values, a wrong type is an error naming Vec2 / Vec3), and C * / C & for a native class registered with
 ** def_class<C> (the argument must be an instance of C or of a script
 ** subclass of it; None is an error, take a Value if it may be absent).
 ** A first parameter of type VM * receives the VM. Results: void, the same
-** scalar types, const char * (copied), Value, and C * / C & of a bound class
+** scalar types, const char * (copied), Value, Vec2f / Vec3f, and C * / C & of a bound class
 ** (wrapped, nullptr -> None). Everything else stays available through the raw
 ** NativeFn API.
 **
@@ -110,7 +111,8 @@ namespace bind
         {
             static constexpr bool value = is_same<T, bool>::value || is_integral<T>::value ||
                                           is_floating<T>::value || is_enum<T>::value ||
-                                          is_same<T, Value>::value || is_same<T, const char *>::value;
+                                          is_same<T, Value>::value || is_same<T, const char *>::value ||
+                                          is_same<T, Vec2f>::value || is_same<T, Vec3f>::value;
         };
 
         template <unsigned... I> struct Seq {};
@@ -127,6 +129,8 @@ namespace bind
             if (is_int(v)) return "int";
             if (is_float(v)) return "float";
             if (is_string(v)) return "string";
+            if (is_vec2(v)) return "Vec2";
+            if (is_vec3(v)) return "Vec3";
             if (is_instance(v))
             {
                 ObjClass *k = as_instance(v)->klass;
@@ -173,7 +177,7 @@ namespace bind
     template <typename T, typename Enable = void> struct Arg
     {
         static_assert(detail::always_false<T>::value,
-                      "zen_bind: unsupported parameter type (use a scalar, const char *, Value, or a bound C * / C &)");
+                      "zen_bind: unsupported parameter type (use a scalar, const char *, Value, Vec2f / Vec3f, or a bound C * / C &)");
     };
 
     template <> struct Arg<bool>
@@ -216,6 +220,21 @@ namespace bind
         static bool check(Value) { return true; }
         static Value get(VM *, Value v) { return v; }
         static const char *what() { return "a value"; }
+    };
+    /* Vec2 / Vec3 are value types inside Value (no heap object): they travel
+    ** by value as the plain Vec2f / Vec3f structs; `const Vec2f &` etc. reach
+    ** these through the is_scalar rule below, never the bound-class Arg<C &>. */
+    template <> struct Arg<Vec2f>
+    {
+        static bool check(Value v) { return is_vec2(v); }
+        static Vec2f get(VM *, Value v) { return as_vec2(v); }
+        static const char *what() { return "Vec2"; }
+    };
+    template <> struct Arg<Vec3f>
+    {
+        static bool check(Value v) { return is_vec3(v); }
+        static Vec3f get(VM *, Value v) { return as_vec3(v); }
+        static const char *what() { return "Vec3"; }
     };
     /* C * : an instance of the class registered with def_class<C> (or of a
     ** script subclass of it) that carries native data. */
@@ -273,7 +292,7 @@ namespace bind
     template <typename R, typename Enable = void> struct Ret
     {
         static_assert(detail::always_false<R>::value,
-                      "zen_bind: unsupported return type (return a scalar, const char *, Value, or a bound C * / C &)");
+                      "zen_bind: unsupported return type (return a scalar, const char *, Value, Vec2f / Vec3f, or a bound C * / C &)");
     };
     template <> struct Ret<bool> { static void put(VM *, Value *s, bool r) { *s = val_bool(r); } };
     template <typename T> struct Ret<T, typename detail::enable_if<detail::is_integral<T>::value>::type>
@@ -293,6 +312,8 @@ namespace bind
         static void put(VM *vm, Value *s, const char *r) { *s = val_obj((Obj *)vm->make_string(r ? r : "", r ? (int)strlen(r) : 0)); }
     };
     template <> struct Ret<Value> { static void put(VM *, Value *s, Value r) { *s = r; } };
+    template <> struct Ret<Vec2f> { static void put(VM *, Value *s, Vec2f r) { *s = val_vec2(r); } };
+    template <> struct Ret<Vec3f> { static void put(VM *, Value *s, Vec3f r) { *s = val_vec3(r); } };
     /* C * : the object of a bound class, wrapped (nullptr -> None). The GC
     ** does not own it; see wrap(). */
     template <typename C> struct Ret<C *, typename detail::enable_if<!detail::is_same<C, const char>::value && !detail::is_same<C, char>::value>::type>

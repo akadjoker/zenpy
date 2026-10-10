@@ -87,7 +87,29 @@ namespace zen
     ** Construtor / Destrutor
     ** ========================================================= */
 
-    VM::VM() : globals_(nullptr), global_names_(nullptr), num_globals_(0), globals_capacity_(0), main_fiber_(nullptr), current_fiber_(nullptr), fiber_depth_(0), run_depth_(0), external_call_stop_depth_(-1), had_error_(false), num_search_paths_(0), num_libs_(0), num_plugins_(0), selectors_(nullptr), num_selectors_(0), selectors_capacity_(0)
+    /* Host reference table: slots + a free list of released slot indices.
+    ** A released slot holds a VAL_PTR pointing at kFreeSlot (an address no
+    ** host Value can carry), which is how a second unref() of the same
+    ** handle is recognised and ignored instead of pushing the index onto
+    ** the free list twice. */
+    static const char kFreeSlot = 0;
+    struct VM::HostRefs
+    {
+        ct::Vector<Value> slots;
+        ct::Vector<int> free_list;
+        int live = 0;
+
+        static bool is_free(const Value &v)
+        {
+            return v.type == VAL_PTR && v.as.pointer == (void *)&kFreeSlot;
+        }
+        bool valid(int h) const
+        {
+            return h >= 0 && (size_t)h < slots.size() && !is_free(slots[(size_t)h]);
+        }
+    };
+
+    VM::VM() : host_refs_(new HostRefs()), globals_(nullptr), global_names_(nullptr), num_globals_(0), globals_capacity_(0), main_fiber_(nullptr), current_fiber_(nullptr), fiber_depth_(0), run_depth_(0), external_call_stop_depth_(-1), had_error_(false), num_search_paths_(0), num_libs_(0), num_plugins_(0), selectors_(nullptr), num_selectors_(0), selectors_capacity_(0)
     {
         gc_init(&gc_);
         gc_.vm = this;
@@ -118,6 +140,9 @@ namespace zen
 
     VM::~VM()
     {
+        delete host_refs_;
+        host_refs_ = nullptr;
+
         /* Close loaded plugins */
 #if defined(__linux__) || defined(__APPLE__)
         for (int i = 0; i < num_plugins_; i++)
@@ -149,6 +174,7 @@ namespace zen
         free(map_method_); map_method_ = nullptr;
         free(set_method_); set_method_ = nullptr;
         free(buf_method_); buf_method_ = nullptr;
+        free(vec_method_); vec_method_ = nullptr;
         num_builtin_selectors_ = 0;
 
         /* Free all objects via GC sweep */
@@ -350,7 +376,8 @@ namespace zen
     }
 
     Value VM::call_native_from_cpp(ObjNative *nat, Value receiver,
-                                   Value *args, int nargs, bool has_receiver)
+                                   Value *args, int nargs, bool has_receiver,
+                                   bool check_arity)
     {
         if (nargs < 0 || (nargs > 0 && !args))
         {
@@ -367,7 +394,7 @@ namespace zen
         /* ClassBuilder native methods count self in their registered arity,
         ** while NativeFn receives it at args[-1]. */
         const int expected = has_receiver ? nat->arity - 1 : nat->arity;
-        if (nat->arity >= 0 && nargs != expected)
+        if (check_arity && nat->arity >= 0 && nargs != expected)
         {
             runtime_error("'%s' expected %d args but got %d",
                           nat->name ? nat->name->chars : "?", expected, nargs);
@@ -405,9 +432,12 @@ namespace zen
     ** call_closure(): that helper intentionally assumes an active caller
     ** frame in order to calculate ret_reg. A native called directly by C++
     ** may call back into Zen while main_fiber_ has no frames at all. */
-    Value VM::call_closure_from_cpp(ObjClosure *cl, Value *args, int nargs)
+    Value VM::call_closure_from_cpp(ObjClosure *cl, Value *args, int nargs, const Value *self)
     {
         ObjFunc *func = cl->func;
+        /* A bound method call: the receiver is parameter 0, ahead of the
+        ** caller's arguments. Everything below works on the full count. */
+        const int so = self ? 1 : 0;
         if (func->arity >= 0)
         {
             int required = func->arity - func->default_count;
@@ -428,21 +458,23 @@ namespace zen
 
         ObjFiber *fiber = main_fiber_;
         Value *base = fiber->stack;
-        if (nargs > fiber->stack_capacity || func->num_regs > fiber->stack_capacity)
+        if (nargs + so > fiber->stack_capacity || func->num_regs > fiber->stack_capacity)
         {
             runtime_error("stack overflow (data)");
             return val_nil();
         }
+        if (self)
+            base[0] = *self;
         for (int i = 0; i < nargs; i++)
-            base[i] = args[i];
-        for (int i = nargs; i < func->num_regs; i++)
+            base[so + i] = args[i];
+        for (int i = so + nargs; i < func->num_regs; i++)
             base[i] = val_nil();
 
         if (func->arity >= 0 && nargs < func->arity)
         {
             int required = func->arity - func->default_count;
             for (int i = nargs; i < func->arity; i++)
-                base[i] = func->defaults[i - required];
+                base[so + i] = func->defaults[i - required];
         }
         else if (func->arity < 0)
         {
@@ -450,8 +482,8 @@ namespace zen
             gc_pause(&gc_);
             ObjArray *packed = new_array(&gc_);
             if (nargs > min_args)
-                array_push_n(&gc_, packed, base + min_args, nargs - min_args);
-            base[min_args] = val_obj((Obj *)packed);
+                array_push_n(&gc_, packed, base + so + min_args, nargs - min_args);
+            base[so + min_args] = val_obj((Obj *)packed);
             gc_resume(&gc_);
         }
 
@@ -533,10 +565,24 @@ namespace zen
             runtime_error("call_fn received invalid arguments");
             return val_nil();
         }
+        /* A bound method (`obj.method` read as a value) is its method with
+        ** the receiver prepended as parameter 0 (native: args[-1]). */
+        Value bound_self = val_nil();
+        const bool bound = is_bound_method(callee);
+        if (bound)
+        {
+            ObjBoundMethod *bm = as_bound_method(callee);
+            bound_self = bm->receiver;
+            callee = bm->method;
+        }
         if (is_native(callee))
         {
             ObjNative *nat = as_native(callee);
-            return call_native_from_cpp(nat, val_nil(), args, nargs, false);
+            /* A bound native method behaves as it does from script (OP_INVOKE
+            ** does not enforce a ClassBuilder method's registered arity, and
+            ** those are not registered consistently about counting self), so
+            ** do not enforce it here either. */
+            return call_native_from_cpp(nat, bound_self, args, nargs, bound, !bound);
         }
         if (is_closure(callee))
         {
@@ -549,21 +595,24 @@ namespace zen
             }
             ObjFiber *fiber = current_fiber_;
             if (fiber->frame_count == 0)
-                return call_closure_from_cpp(cl, args, nargs);
+                return call_closure_from_cpp(cl, args, nargs, bound ? &bound_self : nullptr);
+            const int so = bound ? 1 : 0;
             Value *base = fiber->stack_top;
-            int required_slots = nargs > cl->func->num_regs ? nargs : cl->func->num_regs;
+            int required_slots = nargs + so > cl->func->num_regs ? nargs + so : cl->func->num_regs;
             if (fiber->frame_count >= fiber->frame_capacity ||
                 base + required_slots > fiber->stack + fiber->stack_capacity)
             {
                 runtime_error("stack overflow while calling function from native");
                 return val_nil();
             }
+            if (bound)
+                base[0] = bound_self;
             for (int i = 0; i < nargs; i++)
-                base[i] = args[i];
+                base[so + i] = args[i];
             /* call_closure owns the common script-call contract: arity,
             ** defaults, *args packing and clearing unused registers. */
-            fiber->stack_top = base + nargs;
-            if (!call_closure(fiber, cl, nargs, 1))
+            fiber->stack_top = base + so + nargs;
+            if (!call_closure(fiber, cl, nargs, 1, so))
             {
                 fiber->stack_top = base;
                 return val_nil();
@@ -834,6 +883,20 @@ namespace zen
         SEL(buf_copy, "copy");
         SEL(buf_slice, "slice");
         SEL(buf_type_name, "type_name");
+
+        SEL(vec_length, "length");
+        SEL(vec_length_sq, "length_sq");
+        SEL(vec_normalized, "normalized");
+        SEL(vec_dot, "dot");
+        SEL(vec_cross, "cross");
+        SEL(vec_distance, "distance");
+        SEL(vec_distance_sq, "distance_sq");
+        SEL(vec_lerp, "lerp");
+        SEL(vec_abs, "abs");
+        SEL(vec_with_x, "with_x");
+        SEL(vec_with_y, "with_y");
+        SEL(vec_with_z, "with_z");
+        SEL(vec_to_list, "to_list");
 #undef SEL
 
         init_builtin_method_tables();
@@ -857,7 +920,8 @@ namespace zen
         map_method_ = (uint8_t *)calloc(n, 1);
         set_method_ = (uint8_t *)calloc(n, 1);
         buf_method_ = (uint8_t *)calloc(n, 1);
-        if (!str_method_ || !arr_method_ || !map_method_ || !set_method_ || !buf_method_)
+        vec_method_ = (uint8_t *)calloc(n, 1);
+        if (!str_method_ || !arr_method_ || !map_method_ || !set_method_ || !buf_method_ || !vec_method_)
         {
             /* Leave the bound at zero so every *_method() lookup returns
             ** *_NONE instead of indexing a table that was never allocated —
@@ -871,6 +935,7 @@ namespace zen
             free(map_method_); map_method_ = nullptr;
             free(set_method_); set_method_ = nullptr;
             free(buf_method_); buf_method_ = nullptr;
+            free(vec_method_); vec_method_ = nullptr;
             runtime_error("out of memory building builtin method tables");
             return;
         }
@@ -889,6 +954,7 @@ namespace zen
         static_assert(MAP_COPY == 14, "map method enum changed: update init_builtin_method_tables()");
         static_assert(SET_COPY == 17, "set method enum changed: update init_builtin_method_tables()");
         static_assert(BUF_TYPE_NAME == 7, "buffer method enum changed: update init_builtin_method_tables()");
+        static_assert(VEC_TO_LIST == 13, "vec method enum changed: update init_builtin_method_tables()");
 
 #define MAP_METHOD(table, field, id) table[bsel_.field] = (uint8_t)(id)
         MAP_METHOD(str_method_, str_len, STR_LEN);
@@ -995,6 +1061,20 @@ namespace zen
         MAP_METHOD(buf_method_, buf_copy, BUF_COPY);
         MAP_METHOD(buf_method_, buf_slice, BUF_SLICE);
         MAP_METHOD(buf_method_, buf_type_name, BUF_TYPE_NAME);
+
+        MAP_METHOD(vec_method_, vec_length, VEC_LENGTH);
+        MAP_METHOD(vec_method_, vec_length_sq, VEC_LENGTH_SQ);
+        MAP_METHOD(vec_method_, vec_normalized, VEC_NORMALIZED);
+        MAP_METHOD(vec_method_, vec_dot, VEC_DOT);
+        MAP_METHOD(vec_method_, vec_cross, VEC_CROSS);
+        MAP_METHOD(vec_method_, vec_distance, VEC_DISTANCE);
+        MAP_METHOD(vec_method_, vec_distance_sq, VEC_DISTANCE_SQ);
+        MAP_METHOD(vec_method_, vec_lerp, VEC_LERP);
+        MAP_METHOD(vec_method_, vec_abs, VEC_ABS);
+        MAP_METHOD(vec_method_, vec_with_x, VEC_WITH_X);
+        MAP_METHOD(vec_method_, vec_with_y, VEC_WITH_Y);
+        MAP_METHOD(vec_method_, vec_with_z, VEC_WITH_Z);
+        MAP_METHOD(vec_method_, vec_to_list, VEC_TO_LIST);
 #undef MAP_METHOD
     }
 
@@ -1332,9 +1412,49 @@ namespace zen
         gc_collect(this);
     }
 
+    int VM::ref(Value v)
+    {
+        HostRefs &r = *host_refs_;
+        r.live++;
+        if (r.free_list.size() > 0)
+        {
+            int h = r.free_list[r.free_list.size() - 1];
+            r.free_list.pop_back();
+            r.slots[(size_t)h] = v;
+            return h;
+        }
+        r.slots.push_back(v);
+        return (int)r.slots.size() - 1;
+    }
+
+    Value VM::deref(int h) const
+    {
+        return host_refs_->valid(h) ? host_refs_->slots[(size_t)h] : val_nil();
+    }
+
+    void VM::unref(int h)
+    {
+        HostRefs &r = *host_refs_;
+        if (!r.valid(h))
+            return; /* already released or never issued: ignore */
+        r.slots[(size_t)h] = val_ptr((void *)&kFreeSlot);
+        r.free_list.push_back(h);
+        r.live--;
+    }
+
+    int VM::ref_count() const
+    {
+        return host_refs_->live;
+    }
+
     void VM::gc_mark_roots()
     {
         GC *gc = &gc_;
+
+        /* 0. Host references (vm.ref). Freed slots hold a VAL_PTR, which
+        ** gc_mark_value ignores. */
+        for (size_t i = 0; i < host_refs_->slots.size(); i++)
+            gc_mark_value(gc, host_refs_->slots[i]);
 
         /* 1. Mark globals (values and names) */
         for (int i = 0; i < num_globals_; i++)
@@ -1418,7 +1538,7 @@ namespace zen
     ** Call helpers
     ** ========================================================= */
 
-    bool VM::call_closure(ObjFiber *fiber, ObjClosure *closure, int nargs, int nresults)
+    bool VM::call_closure(ObjFiber *fiber, ObjClosure *closure, int nargs, int nresults, int so)
     {
         if (fiber->frame_count >= fiber->frame_capacity)
         {
@@ -1458,7 +1578,7 @@ namespace zen
         frame->func = func;
         frame->ip = func->code;
         /* Args já estão no stack — base aponta para o início */
-        frame->base = fiber->stack_top - nargs;
+        frame->base = fiber->stack_top - nargs - so;
         frame->ret_reg = (int)(frame->base - fiber->frames[fiber->frame_count - 2].base);
         frame->ret_count = nresults;
 
@@ -1470,7 +1590,7 @@ namespace zen
         {
             int required = func->arity - func->default_count;
             for (int di = nargs; di < func->arity; di++)
-                frame->base[di] = func->defaults[di - required];
+                frame->base[so + di] = func->defaults[di - required];
         }
 
         /* Pack *args: collect excess args into ObjArray at last param slot */
@@ -1481,14 +1601,14 @@ namespace zen
             gc_pause(&gc_);
             ObjArray *arr = new_array(&gc_);
             if (extra > 0)
-                array_push_n(&gc_, arr, frame->base + min_args, extra);
-            frame->base[min_args] = val_obj((Obj *)arr);
+                array_push_n(&gc_, arr, frame->base + so + min_args, extra);
+            frame->base[so + min_args] = val_obj((Obj *)arr);
             gc_resume(&gc_);
         }
 
         /* Clear unused regs so GC never sees stale Values */
         {
-            int used = func->arity < 0 ? ((-func->arity - 1) + 1) : func->arity;
+            int used = so + (func->arity < 0 ? ((-func->arity - 1) + 1) : func->arity);
             for (int i = used; i < func->num_regs; i++)
                 frame->base[i] = val_nil();
         }

@@ -14,6 +14,7 @@ namespace zen
         func_->source = source ? intern_string(gc_, source, (int)strlen(source)) : nullptr;
         last_op_start_ = -1;
         jump_count_ = 0;
+        last_label_ = -1;
     }
 
     /* --- Grow buffers --- */
@@ -366,6 +367,7 @@ namespace zen
     {
         /* Calcula distância: de (offset+1) até current */
         int jump = func_->code_count - (offset + 1);
+        note_label(func_->code_count);
         uint32_t instr = func_->code[offset];
         uint8_t op = ZEN_OP(instr);
         uint8_t a = ZEN_A(instr);
@@ -375,6 +377,7 @@ namespace zen
     void Emitter::patch_jump_to(int offset, int target)
     {
         int jump = target - (offset + 1);
+        note_label(target);
         uint32_t instr = func_->code[offset];
         uint8_t op = ZEN_OP(instr);
         uint8_t a = ZEN_A(instr);
@@ -413,6 +416,7 @@ namespace zen
     {
         /* The sBx word is at sbx_offset. Jump distance = from (sbx_offset+1) to current. */
         int jump = func_->code_count - (sbx_offset + 1);
+        note_label(func_->code_count);
         func_->code[sbx_offset] = ZEN_ENCODE_SBX(OP_JMP, 0, jump);
     }
 
@@ -437,6 +441,7 @@ namespace zen
     {
         /* Jump from (word2_offset+1) to current offset */
         int jump = func_->code_count - (word2_offset + 1);
+        note_label(func_->code_count);
         func_->code[word2_offset] = (uint32_t)jump;
     }
 

@@ -63,6 +63,25 @@ namespace zen
         return ret;
     }
 
+    /* Method by name in a class or an ancestor (`methods` holds only a
+       class's own definitions; `name` is interned, so the map probe is a
+       pointer compare). Used to turn `obj.method` read as a value into a
+       bound method. */
+    static inline bool find_method_in_chain(ObjClass *k, ObjString *name, Value *out)
+    {
+        for (; k != nullptr; k = k->parent)
+        {
+            bool found;
+            Value m = map_get(k->methods, val_obj((Obj *)name), &found);
+            if (found)
+            {
+                *out = m;
+                return true;
+            }
+        }
+        return false;
+    }
+
     /* Clear unused registers in a new call frame so GC never sees stale Values.
        Call AFTER setting stack_top = base + num_regs. */
     static inline void clear_new_regs(Value *base, int first_used, int num_regs)
@@ -124,6 +143,10 @@ namespace zen
             default:
                 return "object";
             }
+        case VAL_VEC2:
+            return "Vec2";
+        case VAL_VEC3:
+            return "Vec3";
         default:
             return "unknown";
         }
@@ -172,7 +195,76 @@ namespace zen
         if (is_instance(v)) return as_instance(v)->klass->name->chars;
         if (is_closure(v) || is_native(v)) return "function";
         if (is_class(v)) return "type";
+        if (is_vec2(v)) return "Vec2";
+        if (is_vec3(v)) return "Vec3";
         return "object";
+    }
+
+    /* `obj.name(...)` with no method `name`: is there a FIELD of that name?
+    ** 0 = no such field, 1 = it holds something callable (closure, native,
+    ** bound method; *out), -1 = it holds a non-callable value (*out). Kept
+    ** out of line: it is the rare path of OP_INVOKE and must not change how
+    ** the dispatch loop is compiled. */
+    static ZEN_NOINLINE int instance_field_callee(ObjInstance *inst, ObjString *name, Value *out)
+    {
+        ObjClass *klass = inst->klass;
+        for (int32_t fi = 0; fi < inst->num_fields && fi < klass->num_fields; fi++)
+        {
+            if (klass->field_names[fi] != name)
+                continue;
+            *out = inst->fields[fi];
+            return (is_closure(*out) || is_native(*out) || is_bound_method(*out)) ? 1 : -1;
+        }
+        return 0;
+    }
+
+
+    /* Vec2/Vec3 arithmetic, shared by every opcode that can see a vector
+    ** operand. Returns 0 and fills *out, 1 for an unsupported operand pair
+    ** (the caller raises the error), 2 for division by zero.
+    **   vec +- vec (same kind)    vec * vec (component-wise, same kind)
+    **   vec * scalar, scalar * vec    vec / scalar
+    ** Only reached from the slow branch of the arithmetic opcodes. */
+    enum VecOp { VOP_ADD, VOP_SUB, VOP_MUL, VOP_DIV };
+    static int vec_arith(VecOp op, Value a, Value b, Value *out)
+    {
+        const bool av = is_vec(a), bv = is_vec(b);
+        if (av && bv)
+        {
+            if (a.type != b.type || op == VOP_DIV)
+                return 1;
+            float x, y, z;
+            switch (op)
+            {
+            case VOP_ADD: x = a.vx + b.vx; y = a.as.v.y + b.as.v.y; z = a.as.v.z + b.as.v.z; break;
+            case VOP_SUB: x = a.vx - b.vx; y = a.as.v.y - b.as.v.y; z = a.as.v.z - b.as.v.z; break;
+            default:      x = a.vx * b.vx; y = a.as.v.y * b.as.v.y; z = a.as.v.z * b.as.v.z; break;
+            }
+            *out = a.type == VAL_VEC3 ? val_vec3(x, y, z) : val_vec2(x, y);
+            return 0;
+        }
+        if (op == VOP_ADD || op == VOP_SUB)
+            return 1;
+        if (av && (b.type == VAL_INT || b.type == VAL_FLOAT || b.type == VAL_BOOL))
+        {
+            double d = to_number(b);
+            if (op == VOP_DIV && d == 0.0)
+                return 2;
+            float s = (float)d;
+            float x, y, z;
+            if (op == VOP_MUL) { x = a.vx * s; y = a.as.v.y * s; z = a.as.v.z * s; }
+            else               { x = a.vx / s; y = a.as.v.y / s; z = a.as.v.z / s; }
+            *out = a.type == VAL_VEC3 ? val_vec3(x, y, z) : val_vec2(x, y);
+            return 0;
+        }
+        if (bv && op == VOP_MUL && (a.type == VAL_INT || a.type == VAL_FLOAT || a.type == VAL_BOOL))
+        {
+            float s = (float)to_number(a);
+            float x = s * b.vx, y = s * b.as.v.y, z = s * b.as.v.z;
+            *out = b.type == VAL_VEC3 ? val_vec3(x, y, z) : val_vec2(x, y);
+            return 0;
+        }
+        return 1;
     }
 
 
@@ -198,6 +290,21 @@ namespace zen
         return out;
     }
 
+    /* "<bound method Class.name>" -- what print()/str() show for obj.method. */
+    static int bound_method_label(Value v, char *buf, size_t cap)
+    {
+        ObjBoundMethod *bm = as_bound_method(v);
+        ObjString *mn = is_closure(bm->method) ? as_closure(bm->method)->func->name
+                      : is_native(bm->method) ? as_native(bm->method)->name : nullptr;
+        const char *cn = is_instance(bm->receiver) ? as_instance(bm->receiver)->klass->name->chars : nullptr;
+        /* Script methods are already named "Class.name" (the defining
+        ** class, as in Python); natives carry the bare name. */
+        if (mn && strchr(mn->chars, '.'))
+            cn = nullptr;
+        return snprintf(buf, cap, "<bound method %s%s%s>", cn ? cn : "", cn ? "." : "",
+                        mn ? mn->chars : "?");
+    }
+
     static void print_value_py(Value v, bool repr)
     {
         if (is_nil(v))
@@ -218,6 +325,12 @@ namespace zen
         {
             char buf[40];
             int len = format_float_py(v.as.number, buf, sizeof buf);
+            zen_write(buf, (size_t)len);
+        }
+        else if (is_vec(v))
+        {
+            char buf[160];
+            int len = format_vec_py(v, buf, sizeof buf);
             zen_write(buf, (size_t)len);
         }
         else if (is_string(v))
@@ -288,6 +401,12 @@ namespace zen
             snprintf(buf, sizeof(buf), "<%s instance>", inst->klass->name->chars);
             zen_writes(buf);
         }
+        else if (is_bound_method(v))
+        {
+            char buf[256];
+            bound_method_label(v, buf, sizeof buf);
+            zen_writes(buf);
+        }
         else
         {
             zen_writes("<object>");
@@ -318,6 +437,12 @@ namespace zen
         else if (is_float(v))
         {
             printf("%g", v.as.number);
+        }
+        else if (is_vec(v))
+        {
+            char vbuf[160];
+            format_vec_py(v, vbuf, sizeof vbuf);
+            printf("%s", vbuf);
         }
         else if (is_string(v))
         {
@@ -408,6 +533,9 @@ namespace zen
             case OBJ_CLOSURE:
                 printf("<function>");
                 break;
+            case OBJ_BOUND_METHOD:
+                printf("<bound method>");
+                break;
             case OBJ_NATIVE:
                 printf("<native %s>", ((ObjNative *)obj)->name->chars);
                 break;
@@ -448,6 +576,10 @@ namespace zen
             return "float";
         case VAL_PTR:
             return "ptr";
+        case VAL_VEC2:
+            return "Vec2";
+        case VAL_VEC3:
+            return "Vec3";
         case VAL_OBJ:
             if (!v.as.obj)
                 return "obj(null)";
@@ -488,6 +620,8 @@ namespace zen
                 return "native_struct";
             case OBJ_RANGE:
                 return "range";
+            case OBJ_BOUND_METHOD:
+                return "function";
             }
             return "obj(unknown)";
         }
@@ -557,6 +691,16 @@ namespace zen
             len = int_to_cstr(v.as.integer, buf);
         else if (is_float(v))
             len = snprintf(buf, sizeof(buf), "%g", v.as.number);
+        else if (is_vec(v))
+            len = format_vec_py(v, buf, sizeof(buf));
+        else if (is_bound_method(v))
+        {
+            char big[256];
+            len = bound_method_label(v, big, sizeof big);
+            if (len >= (int)sizeof big)
+                len = (int)sizeof big - 1;
+            return val_obj((Obj *)new_string(gc, big, len));
+        }
         else
             len = snprintf(buf, sizeof(buf), "<object>");
 
@@ -799,6 +943,29 @@ namespace zen
             RT_ERROR("unsupported operand type(s) for " #op ": %s and %s",    \
                      zen_type_name_of(vb), zen_type_name_of(vc));             \
     } while (0)
+
+/* A vector operand reached the slow branch of an arithmetic opcode:
+** R[A] = vb <op> vc, or the error. */
+#define VEC_BINOP(VOP, OPSTR)                                                 \
+    do                                                                        \
+    {                                                                         \
+        Value vr_;                                                            \
+        int vst_ = vec_arith(VOP, vb, vc, &vr_);                              \
+        if (__builtin_expect(vst_ == 0, 1))                                   \
+            R[ZEN_A(i)] = vr_;                                                \
+        else if (vst_ == 2)                                                   \
+            RT_ERROR("division by zero");                                     \
+        else                                                                  \
+            RT_ERROR("unsupported operand type(s) for " OPSTR ": %s and %s",  \
+                     zen_type_name_of(vb), zen_type_name_of(vc));             \
+    } while (0)
+
+/* Ordering is not defined for vectors; the comparison opcodes' last
+** branch coerces with to_number, so refuse a vector before it gets there. */
+#define VEC_CMP_GUARD(OPSTR)                                                  \
+    if (__builtin_expect(is_vec(vb) || is_vec(vc), 0))                        \
+    RT_ERROR("unsupported operand type(s) for %s: %s and %s", OPSTR,          \
+             zen_type_name_of(vb), zen_type_name_of(vc))
 
         /* =================================================================
         **  DISPATCH SETUP
@@ -1075,7 +1242,7 @@ namespace zen
         {
             uint32_t i = *ip;
             Value vb = R[ZEN_B(i)], vc = R[ZEN_C(i)];
-            if (__builtin_expect(!is_obj(vb) && !is_obj(vc), 1))
+            if (__builtin_expect(is_numeric_type(vb) && is_numeric_type(vc), 1))
             {
                 NUM_BINOP(+);
             }
@@ -1256,6 +1423,11 @@ namespace zen
                     sa = vb.as.boolean ? "true" : "false";
                     la = vb.as.boolean ? 4 : 5;
                 }
+                else if (is_vec(vb))
+                {
+                    la = format_vec_py(vb, buf, sizeof(buf));
+                    sa = buf;
+                }
                 else
                 {
                     sa = "nil";
@@ -1282,6 +1454,11 @@ namespace zen
                     sb = vc.as.boolean ? "true" : "false";
                     lb = vc.as.boolean ? 4 : 5;
                 }
+                else if (is_vec(vc))
+                {
+                    lb = format_vec_py(vc, buf2, sizeof(buf2));
+                    sb = buf2;
+                }
                 else
                 {
                     sb = "nil";
@@ -1295,6 +1472,10 @@ namespace zen
                 result->obj.hash = hash_string(result->chars, la + lb);
                 R[ZEN_A(i)] = val_obj((Obj *)result);
             }
+            else if (is_vec(vb) || is_vec(vc))
+            {
+                VEC_BINOP(VOP_ADD, "+");
+            }
             else
             {
                 NUM_BINOP(+);
@@ -1305,7 +1486,7 @@ namespace zen
         {
             uint32_t i = *ip;
             Value vb = R[ZEN_B(i)], vc = R[ZEN_C(i)];
-            if (__builtin_expect(!is_obj(vb) && !is_obj(vc), 1))
+            if (__builtin_expect(is_numeric_type(vb) && is_numeric_type(vc), 1))
             {
                 NUM_BINOP(-);
             }
@@ -1332,6 +1513,10 @@ namespace zen
                     NUM_BINOP(-);
                 }
             }
+            else if (is_vec(vb) || is_vec(vc))
+            {
+                VEC_BINOP(VOP_SUB, "-");
+            }
             else
             {
                 NUM_BINOP(-);
@@ -1342,7 +1527,7 @@ namespace zen
         {
             uint32_t i = *ip;
             Value vb = R[ZEN_B(i)], vc = R[ZEN_C(i)];
-            if (__builtin_expect(!is_obj(vb) && !is_obj(vc), 1))
+            if (__builtin_expect(is_numeric_type(vb) && is_numeric_type(vc), 1))
             {
                 NUM_BINOP(*);
             }
@@ -1422,6 +1607,10 @@ namespace zen
                     NUM_BINOP(*);
                 }
             }
+            else if (is_vec(vb) || is_vec(vc))
+            {
+                VEC_BINOP(VOP_MUL, "*");
+            }
             else
             {
                 NUM_BINOP(*);
@@ -1432,7 +1621,7 @@ namespace zen
         {
             uint32_t i = *ip;
             Value vb = R[ZEN_B(i)], vc = R[ZEN_C(i)];
-            if (__builtin_expect(!is_obj(vb) && !is_obj(vc), 1))
+            if (__builtin_expect(is_numeric_type(vb) && is_numeric_type(vc), 1))
             {
                 double divisor = to_number(vc);
                 if (divisor == 0.0)
@@ -1463,6 +1652,10 @@ namespace zen
                     R[ZEN_A(i)] = val_float(to_number(vb) / divisor);
                 }
             }
+            else if (is_vec(vb) || is_vec(vc))
+            {
+                VEC_BINOP(VOP_DIV, "/");
+            }
             else
             {
                 double divisor = to_number(vc);
@@ -1478,7 +1671,7 @@ namespace zen
         {
             uint32_t i = *ip;
             Value vb = R[ZEN_B(i)], vc = R[ZEN_C(i)];
-            if (__builtin_expect(!is_obj(vb) && !is_obj(vc), 1))
+            if (__builtin_expect(is_numeric_type(vb) && is_numeric_type(vc), 1))
             {
                 if (vb.type == VAL_INT && vc.type == VAL_INT)
                 {
@@ -1510,6 +1703,9 @@ namespace zen
             }
             else
             {
+                if (is_vec(vb) || is_vec(vc))
+                    RT_ERROR("unsupported operand type(s) for //: %s and %s",
+                             zen_type_name_of(vb), zen_type_name_of(vc));
                 double a = to_number(vb), b = to_number(vc);
                 if (b == 0.0)
                 {
@@ -1523,7 +1719,7 @@ namespace zen
         {
             uint32_t i = *ip;
             Value vb = R[ZEN_B(i)], vc = R[ZEN_C(i)];
-            if (__builtin_expect(!is_obj(vb) && !is_obj(vc), 1))
+            if (__builtin_expect(is_numeric_type(vb) && is_numeric_type(vc), 1))
             {
                 if (vb.type == VAL_INT && vc.type == VAL_INT)
                 {
@@ -1621,6 +1817,9 @@ namespace zen
                     NEXT();
                 }
             }
+            if (__builtin_expect(is_vec(vb) || is_vec(vc), 0))
+                RT_ERROR("unsupported operand type(s) for **: %s and %s",
+                         zen_type_name_of(vb), zen_type_name_of(vc));
             R[ZEN_A(i)] = val_float(pow(to_number(vb), to_number(vc)));
             NEXT();
         }
@@ -1628,12 +1827,17 @@ namespace zen
         {
             uint32_t i = *ip;
             Value v = R[ZEN_B(i)];
-            if (__builtin_expect(!is_obj(v), 1))
+            if (__builtin_expect(is_numeric_type(v), 1))
             {
                 if (v.type == VAL_INT)
                     R[ZEN_A(i)] = val_int((int64_t)(-(uint64_t)v.as.integer));
                 else
                     R[ZEN_A(i)] = val_float(-to_number(v));
+            }
+            else if (is_vec(v))
+            {
+                R[ZEN_A(i)] = v.type == VAL_VEC3 ? val_vec3(-v.vx, -v.as.v.y, -v.as.v.z)
+                                                 : val_vec2(-v.vx, -v.as.v.y);
             }
             else if (is_instance(v))
             {
@@ -1761,6 +1965,9 @@ namespace zen
                 NEXT();
             }
             LOAD_STATE();
+            if (is_vec(vb) || is_vec(vc))
+                RT_ERROR("unsupported operand type(s) for /: %s and %s",
+                         zen_type_name_of(vb), zen_type_name_of(vc));
             double divisor = to_number(vc);
             if (divisor == 0.0)
             {
@@ -1785,6 +1992,9 @@ namespace zen
                 NEXT();
             }
             LOAD_STATE();
+            if (is_vec(vb) || is_vec(vc))
+                RT_ERROR("unsupported operand type(s) for %%: %s and %s",
+                         zen_type_name_of(vb), zen_type_name_of(vc));
             if (vb.type == VAL_INT && vc.type == VAL_INT)
             {
                 int64_t divisor = vc.as.integer;
@@ -2101,6 +2311,7 @@ namespace zen
                 else
                 {
                     LOAD_STATE();
+                    VEC_CMP_GUARD("<");
                     R[ZEN_A(i)] = val_bool(to_number(vb) < to_number(vc));
                 }
             }
@@ -2111,7 +2322,10 @@ namespace zen
             else if (vb.type == VAL_INT && vc.type == VAL_INT)
                 R[ZEN_A(i)] = val_bool(vb.as.integer < vc.as.integer);
             else
+            {
+                VEC_CMP_GUARD("<");
                 R[ZEN_A(i)] = val_bool(to_number(vb) < to_number(vc));
+            }
             NEXT();
         }
         CASE(OP_LE)
@@ -2132,6 +2346,7 @@ namespace zen
                 else
                 {
                     LOAD_STATE();
+                    VEC_CMP_GUARD("<=");
                     R[ZEN_A(i)] = val_bool(to_number(vb) <= to_number(vc));
                 }
             }
@@ -2142,7 +2357,10 @@ namespace zen
             else if (vb.type == VAL_INT && vc.type == VAL_INT)
                 R[ZEN_A(i)] = val_bool(vb.as.integer <= vc.as.integer);
             else
+            {
+                VEC_CMP_GUARD("<=");
                 R[ZEN_A(i)] = val_bool(to_number(vb) <= to_number(vc));
+            }
             NEXT();
         }
         CASE(OP_NOT)
@@ -2230,6 +2448,11 @@ namespace zen
                     /* Objects: true only if same pointer (reference equality) */
                     is_identical = (vb.as.obj == vc.as.obj);
                     break;
+                case VAL_VEC2:
+                case VAL_VEC3:
+                    /* Value types: identical when every component matches */
+                    is_identical = values_equal(vb, vc);
+                    break;
                 default:
                     is_identical = false;
                     break;
@@ -2315,6 +2538,36 @@ namespace zen
                 if (__builtin_expect(is_string(av), 0))
                     av.as.obj->flags |= OBJ_FLAG_SHARED;
             }
+            /* Bound method (`f = obj.m; f(x)`): lay the call out exactly as
+            ** OP_INVOKE does -- receiver in the callee's slot, arguments
+            ** after it, frame base at the receiver, result back in R[a].
+            ** The closure path below is shared: cbase is where it puts the
+            ** frame base (R[a+1] for a plain call, R[a] for a bound method)
+            ** and so is the number of leading self slots in front of the
+            ** declared parameters (a method's arity does not count self,
+            ** its parameters start at base[1]). */
+            Value *cbase = &R[a + 1];
+            int so = 0;
+            if (__builtin_expect(is_bound_method(callee), 0))
+            {
+                ObjBoundMethod *bm = as_bound_method(callee);
+                R[a] = bm->receiver;
+                callee = bm->method;
+                cbase = &R[a];
+                so = 1;
+                if (is_native(callee))
+                {
+                    /* ClassBuilder convention: args[-1] = self. */
+                    ObjNative *nat = as_native(callee);
+                    int nret = call_native(this, nat, &R[a + 1], nargs);
+                    if (had_error_)
+                        return;
+                    copy_native_results(&R[a], &R[a + 1], nret, nresults);
+                    DISPATCH();
+                }
+                /* kwmap != nullptr never gets here: the check above already
+                ** rejected it, a bound method is not a native. */
+            }
             if (is_closure(callee))
             {
                 /* Script closure — hot path */
@@ -2329,19 +2582,19 @@ namespace zen
                 {
                     if (fiber->frame_count >= kMaxFrames)
                         RT_ERROR("stack overflow");
-                    CHECK_STACK_SPACE(fiber, &R[a + 1], fn->num_regs);
+                    CHECK_STACK_SPACE(fiber, cbase, fn->num_regs);
                     CallFrame *new_frame = &fiber->frames[fiber->frame_count++];
                     new_frame->closure = cl;
                     new_frame->constants = cl->func->constants;
                     new_frame->upvalues = cl->upvalues;
                     new_frame->func = fn;
                     new_frame->ip = fn->code;
-                    new_frame->base = &R[a + 1];
+                    new_frame->base = cbase;
                     new_frame->ret_reg = a;
                     new_frame->ret_count = nresults;
                     fiber->stack_top = new_frame->base + fn->num_regs;
-                    clear_new_regs(new_frame->base, nargs, fn->num_regs);
-                    ENTER_FRAME(new_frame, fn, cl, &R[a + 1]);
+                    clear_new_regs(new_frame->base, nargs + so, fn->num_regs);
+                    ENTER_FRAME(new_frame, fn, cl, cbase);
                     DISPATCH();
                 }
 
@@ -2362,8 +2615,8 @@ namespace zen
                     ObjFiber *gen = new_fiber(cl, gen_stack);
                     /* Copy arguments into the fiber's first frame base */
                     CallFrame *gf = &gen->frames[0];
-                    for (int ai = 0; ai < nargs; ai++)
-                        gf->base[ai] = R[a + 1 + ai];
+                    for (int ai = 0; ai < nargs + so; ai++)
+                        gf->base[ai] = cbase[ai];
                     gen->state = FIBER_SUSPENDED;
                     R[a] = val_obj((Obj *)gen);
                     DISPATCH();
@@ -2373,14 +2626,14 @@ namespace zen
                 {
                     RT_ERROR("stack overflow");
                 }
-                CHECK_STACK_SPACE(fiber, &R[a + 1], fn->num_regs);
+                CHECK_STACK_SPACE(fiber, cbase, fn->num_regs);
                 CallFrame *new_frame = &fiber->frames[fiber->frame_count++];
                 new_frame->closure = cl;
                 new_frame->constants = cl->func->constants;
                 new_frame->upvalues = cl->upvalues;
                 new_frame->func = fn;
                 new_frame->ip = fn->code;
-                new_frame->base = &R[a + 1];
+                new_frame->base = cbase;
                 new_frame->ret_reg = a;
                 new_frame->ret_count = nresults;
 
@@ -2394,8 +2647,8 @@ namespace zen
                     gc_pause(&gc_);
                     ObjArray *arr = new_array(&gc_);
                     if (extra > 0)
-                        array_push_n(&gc_, arr, new_frame->base + min_args, extra);
-                    new_frame->base[min_args] = val_obj((Obj *)arr);
+                        array_push_n(&gc_, arr, new_frame->base + so + min_args, extra);
+                    new_frame->base[so + min_args] = val_obj((Obj *)arr);
                     gc_resume(&gc_);
                 }
                 else
@@ -2409,15 +2662,15 @@ namespace zen
                     /* Extend stack first so writes are within bounds */
                     fiber->stack_top = new_frame->base + fn->num_regs;
                     for (int di = nargs; di < fn->arity; di++)
-                        new_frame->base[di] = fn->defaults[di - required];
+                        new_frame->base[so + di] = fn->defaults[di - required];
                 }
 
                 fiber->stack_top = new_frame->base + fn->num_regs;
                 {
-                    int used = fn->arity < 0 ? ((-fn->arity - 1) + 1) : fn->arity;
+                    int used = so + (fn->arity < 0 ? ((-fn->arity - 1) + 1) : fn->arity);
                     clear_new_regs(new_frame->base, used, fn->num_regs);
                 }
-                ENTER_FRAME(new_frame, fn, cl, &R[a + 1]);
+                ENTER_FRAME(new_frame, fn, cl, cbase);
                 DISPATCH();
             }
             if (is_native(callee))
@@ -3550,8 +3803,30 @@ namespace zen
                         goto getfield_done;
                     }
                 }
-                /* Field not found */
+                /* Not a field: a method read as a value becomes a bound
+                ** method {receiver, method} (`f = obj.m; f(x)`). */
+                {
+                    Value method;
+                    if (find_method_in_chain(klass, name, &method) &&
+                        (is_closure(method) || is_native(method)))
+                    {
+                        R[ZEN_A(i)] = val_obj((Obj *)new_bound_method(&gc_, receiver, method));
+                        goto getfield_done;
+                    }
+                }
                 RT_ERROR("instance of '%s' has no field '%s'", klass->name->chars, name->chars);
+            }
+            if (is_vec(receiver))
+            {
+                /* Vec2/Vec3 components: one-letter names x, y and (Vec3) z */
+                if (name->length == 1)
+                {
+                    char c = name->chars[0];
+                    if (c == 'x') { R[ZEN_A(i)] = val_float((double)receiver.vx); goto getfield_done; }
+                    if (c == 'y') { R[ZEN_A(i)] = val_float((double)receiver.as.v.y); goto getfield_done; }
+                    if (c == 'z' && receiver.type == VAL_VEC3) { R[ZEN_A(i)] = val_float((double)receiver.as.v.z); goto getfield_done; }
+                }
+                RT_ERROR("%s has no field '%s'", zen_type_name_of(receiver), name->chars);
             }
             if (is_map(receiver))
             {
@@ -3729,6 +4004,28 @@ namespace zen
                     inst->num_fields = new_n;
                     goto setfield_done;
                 }
+            }
+            if (is_vec(receiver))
+            {
+                /* v.x = f rewrites the vector held in the receiver register
+                ** (a value type: there is no shared object to mutate). */
+                if (name->length == 1)
+                {
+                    char c = name->chars[0];
+                    if (c == 'x' || c == 'y' || (c == 'z' && receiver.type == VAL_VEC3))
+                    {
+                        if (!is_numeric_like(val))
+                            RT_ERROR("%s.%s must be a number, got %s", zen_type_name_of(receiver),
+                                     name->chars, zen_type_name_of(val));
+                        float f = (float)to_number(val);
+                        Value &dst = R[ZEN_A(i)];
+                        if (c == 'x') dst.vx = f;
+                        else if (c == 'y') dst.as.v.y = f;
+                        else dst.as.v.z = f;
+                        goto setfield_done;
+                    }
+                }
+                RT_ERROR("%s has no field '%s'", zen_type_name_of(receiver), name->chars);
             }
             RT_ERROR("cannot set field '%s' on this type", name->chars);
         setfield_done:
@@ -4331,6 +4628,29 @@ namespace zen
 
                 if (is_nil(mval))
                 {
+                    /* No method of that name. `obj.cb(x)` where `cb` is a
+                    ** FIELD holding a callable calls the field's value, as
+                    ** in Python: no implicit self (a bound method brings
+                    ** its own receiver). Same pointer compare on the
+                    ** interned name GETFIELD uses. The call is handed to
+                    ** op_call_shared with the callee in the receiver slot
+                    ** and the arguments already after it. */
+                    Value fval;
+                    int fk = instance_field_callee(inst, method, &fval);
+                    if (fk < 0)
+                        RT_ERROR("'%s.%s' is not callable (it holds %s)", klass->name->chars, mname,
+                                 zen_type_name_of(fval));
+                    if (fk > 0)
+                    {
+                        R[base] = fval;
+                        call_a = base;
+                        /* the keyword map still sits in args[arg_count]; only
+                        ** a native callee accepts it, op_call_shared checks */
+                        call_nargs = kwmap ? ((arg_count + 1) | 0x40) : arg_count;
+                        call_nresults = nresults;
+                        ++ip;
+                        goto op_call_shared;
+                    }
                     RT_ERROR("'%s' has no method '%s'", klass->name->chars, mname);
                 }
 
@@ -4475,6 +4795,10 @@ namespace zen
             else if (is_buffer(receiver))
             {
 #include "invoke_buffer.inl"
+            }
+            else if (is_vec(receiver))
+            {
+#include "invoke_vec.inl"
             }
             else
             {
@@ -5029,11 +5353,13 @@ namespace zen
             {
                 ObjInstance *inst = as_instance(receiver);
                 ObjClass *klass = inst->klass;
-                bool found;
-                Value method = map_get(klass->methods, val_obj((Obj *)name), &found);
-                if (found)
+                Value method;
+                if (find_method_in_chain(klass, name, &method))
                 {
-                    R[ZEN_A(i)] = method;
+                    /* Same value OP_GETFIELD produces for a method name. */
+                    R[ZEN_A(i)] = (is_closure(method) || is_native(method))
+                                      ? val_obj((Obj *)new_bound_method(&gc_, receiver, method))
+                                      : method;
                     NEXT();
                 }
             }
@@ -5542,6 +5868,7 @@ namespace zen
                 else
                 {
                     LOAD_STATE();
+                    VEC_CMP_GUARD("<");
                     less = to_number(vb) < to_number(vc);
                 }
             }
@@ -5552,7 +5879,10 @@ namespace zen
             else if (vb.type == VAL_INT && vc.type == VAL_INT)
                 less = vb.as.integer < vc.as.integer;
             else
+            {
+                VEC_CMP_GUARD("<");
                 less = to_number(vb) < to_number(vc);
+            }
             if (!at_jump_offset)
                 ++ip; /* normal path: advance to the sBx word */
             if (!less)
@@ -5623,6 +5953,7 @@ namespace zen
                 else
                 {
                     LOAD_STATE();
+                    VEC_CMP_GUARD("<=");
                     le = to_number(vb) <= to_number(vc);
                 }
             }
@@ -5631,7 +5962,10 @@ namespace zen
             else if (vb.type == VAL_INT && vc.type == VAL_INT)
                 le = vb.as.integer <= vc.as.integer;
             else
+            {
+                VEC_CMP_GUARD("<=");
                 le = to_number(vb) <= to_number(vc);
+            }
             if (!at_jump_offset)
                 ++ip;
             if (!le)
@@ -5680,7 +6014,10 @@ namespace zen
                     }                                                                            \
                 }                                                                                \
                 else                                                                             \
+                {                                                                                \
+                    VEC_CMP_GUARD((LE) ? "<=" : "<");                                            \
                     hold = (LE) ? to_number(vb) <= to_number(vc) : to_number(vb) < to_number(vc); \
+                }                                                                                \
             }                                                                                    \
             if (!at_jump_offset)                                                                 \
                 ++ip;                                                                            \
@@ -5866,7 +6203,7 @@ namespace zen
             ++ip;
             uint32_t i2 = *ip;
             Value vb = R[ZEN_B(i2)], vc = R[ZEN_C(i2)];
-            if (__builtin_expect(!is_obj(vb) && !is_obj(vc), 1))
+            if (__builtin_expect(is_numeric_type(vb) && is_numeric_type(vc), 1))
             {
                 if (vb.type == VAL_INT && vc.type == VAL_INT)
                     R[ZEN_A(i2)] = val_int((int64_t)((uint64_t)vb.as.integer * (uint64_t)vc.as.integer));
@@ -5891,9 +6228,11 @@ namespace zen
             uint32_t i2 = *ip;
             Value vb = R[ZEN_B(i2)], vc = R[ZEN_C(i2)];
             if (vb.type == VAL_INT && vc.type == VAL_INT)
-                R[ZEN_A(i2)] = val_int(vb.as.integer - vc.as.integer);
-            else
+                R[ZEN_A(i2)] = val_int((int64_t)((uint64_t)vb.as.integer - (uint64_t)vc.as.integer));
+            else if (__builtin_expect(is_numeric_type(vb) && is_numeric_type(vc), 1))
                 R[ZEN_A(i2)] = val_float(to_number(vb) - to_number(vc));
+            else
+                DISPATCH(); /* vectors, strings, overloaded __sub__: the plain SUB word */
             NEXT();
         }
 
@@ -5912,7 +6251,7 @@ namespace zen
             Value x = inst->fields[ZEN_C(load_x)];
             Value v = inst->fields[ZEN_C(load_v)];
             Value dt = R[ZEN_C(mul)];
-            if (__builtin_expect(!is_obj(x) && !is_obj(v) && !is_obj(dt), 1))
+            if (__builtin_expect(is_numeric_type(x) && is_numeric_type(v) && is_numeric_type(dt), 1))
             {
                 Value product;
                 if (v.type == VAL_INT && dt.type == VAL_INT)

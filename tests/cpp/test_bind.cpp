@@ -68,6 +68,7 @@ static int g_body_ctors = 0, g_body_dtors = 0;
 struct Body
 {
     float x, y;
+    float z = 0;
     int hits = 0;
     Body(float x_, float y_) : x(x_), y(y_) { g_body_ctors++; }
     ~Body() { g_body_dtors++; }
@@ -78,6 +79,10 @@ struct Body
     int tag(VM *vm, int k) { (void)vm; return k * 10 + hits; }
     float dist_to(const Body &o) const { return std::hypot(x - o.x, y - o.y); }
     bool same(Body *o) const { return o == this; }
+    void move_by(Vec3f d) { x += d.x; y += d.y; z += d.z; }
+    Vec3f position() const { return Vec3f{x, y, z}; }
+    float dot_xy(const Vec2f &v) const { return x * v.x + y * v.y; }
+    Vec2f flat() const { return Vec2f{x, y}; }
 };
 
 struct World
@@ -101,6 +106,10 @@ static void bind_all(VM &vm)
         .method<&Body::tag>("tag")
         .method<&Body::dist_to>("dist_to")
         .method<&Body::same>("same")
+        .method<&Body::move_by>("move_by")
+        .method<&Body::position>("position")
+        .method<&Body::dot_xy>("dot_xy")
+        .method<&Body::flat>("flat")
         .property<&Body::hits>("hits")
         .end();
 }
@@ -307,6 +316,45 @@ int main()
         CHECK(!ok && strstr(g_err, "set_hits: argument 1") && strstr(g_err, "int in range"),
               "5000000000 was silently narrowed to int");
         printf("      msg: %.*s\n", (int)strcspn(g_err, "\n"), g_err);
+    }
+
+    {
+        VM vm;
+        setup(vm);
+        bind_all(vm);
+        TEST("Vec3 / Vec2 arguments and results (value types, no heap)");
+        bool ok = run_source(vm,
+            "b = Body(1, 1)\n"
+            "b.move_by(Vec3(1, 2, 3))\n"
+            "p = b.position()\n"
+            "d = b.dot_xy(Vec2(2, 3))\n"
+            "f = b.flat()\n");
+        Value p = vm.get_global("p"), f = vm.get_global("f");
+        CHECK(ok && is_vec3(p) && p.vx == 2.0f && p.as.v.y == 3.0f && p.as.v.z == 3.0f,
+              "position() should be Vec3(2, 3, 3) after move_by(Vec3(1, 2, 3))");
+        CHECK(is_vec2(f) && as_vec2(f).x == 2.0f && as_vec2(f).y == 3.0f,
+              "flat() should be Vec2(2, 3)");
+        CHECK(near_to(vm.get_global("d"), 13.0), "dot_xy(Vec2(2, 3)) on (2, 3) should be 13.0");
+    }
+
+    {
+        VM vm;
+        setup(vm);
+        bind_all(vm);
+        TEST("wrong vector type is an error naming Vec3 / Vec2");
+        bool ok = run_source(vm, "b = Body(1, 1)\nb.move_by(1)\n");
+        CHECK(!ok && strstr(g_err, "move_by: argument 1") && strstr(g_err, "must be Vec3") &&
+                  strstr(g_err, "got int"),
+              "move_by(1) should report argument 1 must be Vec3");
+        printf("      msg: %.*s\n", (int)strcspn(g_err, "\n"), g_err);
+        g_err[0] = 0;
+        ok = run_source(vm, "b2 = Body(1, 1)\nb2.move_by(Vec2(1, 2))\n");
+        CHECK(!ok && strstr(g_err, "must be Vec3") && strstr(g_err, "got Vec2"),
+              "a Vec2 must not pass for a Vec3");
+        g_err[0] = 0;
+        ok = run_source(vm, "b3 = Body(1, 1)\nb3.dot_xy(Vec3(1, 2, 3))\n");
+        CHECK(!ok && strstr(g_err, "must be Vec2") && strstr(g_err, "got Vec3"),
+              "a Vec3 must not pass for a const Vec2 &");
     }
 
     printf("\n  passed: %d  failed: %d\n", g_tests_passed, g_tests_failed);

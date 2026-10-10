@@ -412,6 +412,10 @@ namespace zen
         /* Index of `fname` in the field layout of an already-compiled class
         ** of this file (class_registry_), or -1. */
         int registry_field_index(const char *cls, int32_t cls_len, ObjString *fname) const;
+        /* Is `fname` a native property (ClassBuilder::property) of class
+        ** `cls` or of an ancestor? Walks this file's script classes up to the
+        ** first class the VM already knows (an engine class) and asks it. */
+        bool native_property_of(const char *cls, int32_t cls_len, ObjString *fname) const;
         /* `self.field = <expr>` in the class body: fold the expression's
         ** class (a constructor call, None, or anything else) into the
         ** field's guessed class. */

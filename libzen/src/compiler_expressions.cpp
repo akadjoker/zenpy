@@ -1798,8 +1798,19 @@ namespace zen
             self_method_use = !assign_ahead;
         }
 
+        /* `self.name` where name is a native property of an engine ancestor
+        ** (ClassBuilder::property, e.g. Node3D.position) -- read, written,
+        ** augmented or called -- is not a field of this class either. The
+        ** field fast path would register `name` as a class field, and the
+        ** runtime looks fields up before properties, so that phantom slot
+        ** would shadow the C++ member. Stay on the by-name GETFIELD /
+        ** SETFIELD, whose slow path finds the property. */
+        const bool self_property_use =
+            is_current_class_instance(obj) && in_class_ &&
+            native_property_of(current_class_.start, current_class_.length, token_string(field));
+
         /* --- Fast path: self.field inside a method → OP_GETFIELD_IDX / OP_SETFIELD_IDX --- */
-        if (is_current_class_instance(obj) && !self_method_use)
+        if (is_current_class_instance(obj) && !self_method_use && !self_property_use)
         {
             ObjString *fname = token_string(field);
             int fidx = add_class_field(fname);

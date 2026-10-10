@@ -159,6 +159,15 @@ namespace zen
             ** arguments. Variadic value arity (-1, like plain method()) is
             ** not supported for generics yet — arity must be >= 0. */
             ClassBuilder &generic_method(const char *name, GenericNativeFn fn, int generic_arity, int arity);
+            /* Native property: `obj.name` calls getter, `obj.name = v` calls setter
+            ** (nullptr = read-only: assigning is a runtime error; a null getter
+            ** makes it write-only). Registering a name again completes or
+            ** replaces it. Same native
+            ** convention as method(): self at args[-1]; getter takes no
+            ** arguments, leaves the value in args[0] and returns 1; setter gets
+            ** the value in args[0] and returns 0. A script subclass inherits it.
+            ** Lookup order for `inst.name`: instance field, property, method. */
+            ClassBuilder &property(const char *name, NativeFn getter, NativeFn setter = nullptr, int flags = 0);
             ClassBuilder &ctor(NativeClassCtor fn);       /* native constructor (returns void*) */
             ClassBuilder &dtor(NativeClassDtor fn);       /* native destructor */
             ClassBuilder &persistent(bool p = true);      /* instances NOT managed by GC */
@@ -215,6 +224,11 @@ namespace zen
         /* --- Instance API (for C++ embedding) --- */
         Value make_instance(ObjClass *klass);                    /* creates instance, no init */
         Value make_instance(ObjClass *klass, Value *args, int nargs); /* creates + calls init */
+        /* Wraps a host-owned object: new instance of `klass` (or of a script
+        ** subclass) with native_data = ptr, WITHOUT running the native
+        ** constructor or init. The instance is marked borrowed: neither the GC
+        ** nor destroy_instance() ever calls the class's native_dtor on ptr. */
+        Value make_instance_borrowed(ObjClass *klass, void *native_data);
         void destroy_instance(Value instance);                   /* destroy persistent instance */
         /* Create a native struct instance from C++ (e.g. inside a NativeFn). */
         Value invoke(Value instance, const char *method, Value *args, int nargs);

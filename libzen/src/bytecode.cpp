@@ -254,7 +254,7 @@ namespace
        contain C++ callbacks, which cannot be serialized. */
     static bool can_write_global_class(ObjClass *klass)
     {
-        if (!klass || klass->native_ctor || klass->native_dtor)
+        if (!klass || klass->native_ctor || klass->native_dtor || klass->num_props > 0)
             return false;
         if (klass->parent && !can_write_global_class(klass->parent))
             return false;
@@ -595,7 +595,7 @@ namespace
             set_error(err, err_len, "invalid class");
             return false;
         }
-        if (klass->native_ctor || klass->native_dtor)
+        if (klass->native_ctor || klass->native_dtor || klass->num_props > 0)
         {
             set_error(err, err_len, "cannot dump native-backed class '%s'", klass->name->chars);
             return false;

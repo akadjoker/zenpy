@@ -3,6 +3,14 @@ class BMove(Node3D):
     def _process(self, dt):
         self.set_position(self.position() + Vec3(dt, 0, 0))
 
+class BAttr(Node3D):
+    def _process(self, dt):
+        self.position = self.position + Vec3(dt, 0, 0)
+
+class BAugX(Node3D):
+    def _process(self, dt):
+        self.position.x += dt
+
 class BNone(Node3D):
     speed = 1.0
 

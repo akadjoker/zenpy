@@ -569,6 +569,17 @@ namespace zen
     typedef void *(*NativeClassCtor)(VM *vm, int argc, Value *args);
     typedef void (*NativeClassDtor)(VM *vm, void *data);
 
+    /* A native property: `obj.name` / `obj.name = v` reach the host through a
+    ** getter and a setter instead of an instance field (ClassBuilder::property).
+    ** `name` is interned (pointer compare, like field_names). setter == NULL
+    ** makes the property read-only. */
+    struct NativeProperty
+    {
+        ObjString *name;
+        ObjNative *getter;
+        ObjNative *setter;
+    };
+
     struct ObjClass
     {
         Obj obj;
@@ -589,6 +600,11 @@ namespace zen
         /* Native class binding */
         NativeClassCtor native_ctor; /* returns void* userdata (NULL = no native ctor) */
         NativeClassDtor native_dtor; /* called on GC free or explicit destroy (NULL = nop) */
+        /* Native properties (this class's own; class_find_property() walks the
+        ** parent chain). Lookup order for `inst.name`: field, then property,
+        ** then method (bound method). */
+        NativeProperty *props;
+        int32_t num_props;
         bool persistent;             /* true = instances never collected by GC */
         bool constructable;          /* false = script cannot call ClassName(), only C++ can */
         /* A class becomes immutable once its declaration/builder finishes.
@@ -609,7 +625,21 @@ namespace zen
         ** A dynamic field addition detaches to a separate array safely. */
         int32_t inline_field_count;
         bool fields_inline;
+        /* true = native_data belongs to the host (VM::make_instance_borrowed):
+        ** the class's native_dtor is never called for it, neither by the GC
+        ** nor by destroy_instance(). */
+        bool borrowed;
     };
+
+    /* The native property `name` of `k` or of an ancestor, or NULL. */
+    inline const NativeProperty *class_find_property(const ObjClass *k, const ObjString *name)
+    {
+        for (; k != nullptr; k = k->parent)
+            for (int32_t i = 0; i < k->num_props; i++)
+                if (k->props[i].name == name)
+                    return &k->props[i];
+        return nullptr;
+    }
 
     inline bool is_class(Value v) { return is_obj_type(v, OBJ_CLASS); }
     inline bool is_instance(Value v) { return is_obj_type(v, OBJ_INSTANCE); }

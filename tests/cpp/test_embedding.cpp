@@ -12,6 +12,7 @@
 **   8. Script class inherits from C++ class
 **   9. StructBuilder — C++ defines record, script uses it
 **  10. ClassBuilder with native ctor/dtor + native_data
+**  11. ClassBuilder::property (native properties), make_instance_borrowed
 */
 
 #include "vm.h"
@@ -2287,6 +2288,249 @@ s1 = gc_stats()
     CHECK(ok, "expected script gc_tune to reach the VM");
 }
 
+/* =========================================================
+** Native properties (ClassBuilder::property) and borrowed instances
+** ========================================================= */
+struct PropThing
+{
+    double hp = 100;
+    double armor = 7;
+    double secret = 0;
+};
+static int g_thing_ctors = 0, g_thing_dtors = 0;
+
+static void *thing_ctor(VM *, int, Value *)
+{
+    g_thing_ctors++;
+    return new PropThing();
+}
+static void thing_dtor(VM *, void *d)
+{
+    g_thing_dtors++;
+    delete (PropThing *)d;
+}
+/* property natives follow the method convention: self at args[-1] */
+static int thing_get_hp(VM *vm, Value *args, int)
+{
+    PropThing *t = zen_instance_data<PropThing>(args[-1]);
+    if (!t) { vm->runtime_error("hp: receiver is not a Thing"); return -1; }
+    args[0] = val_float(t->hp);
+    return 1;
+}
+static int thing_set_hp(VM *vm, Value *args, int)
+{
+    PropThing *t = zen_instance_data<PropThing>(args[-1]);
+    if (!t) { vm->runtime_error("hp: receiver is not a Thing"); return -1; }
+    if (!is_numeric_like(args[0])) { vm->runtime_error("hp must be a number"); return -1; }
+    t->hp = to_number(args[0]);
+    return 0;
+}
+static int thing_get_armor(VM *, Value *args, int)
+{
+    args[0] = val_float(zen_instance_data<PropThing>(args[-1])->armor);
+    return 1;
+}
+static int thing_set_secret(VM *, Value *args, int)
+{
+    zen_instance_data<PropThing>(args[-1])->secret = to_number(args[0]);
+    return 0;
+}
+static int thing_get_name(VM *vm, Value *args, int)
+{
+    args[0] = val_obj((Obj *)vm->make_string("thing-name", 10)); /* allocates: GC must be paused */
+    return 1;
+}
+static int thing_get_boom(VM *vm, Value *, int)
+{
+    vm->runtime_error("boom from getter");
+    return -1;
+}
+static int thing_method_armor(VM *, Value *args, int)
+{
+    args[0] = val_int(1234); /* the METHOD armor(): same name as the property */
+    return 1;
+}
+
+static ObjClass *build_thing(VM &vm)
+{
+    return vm.def_class("Thing")
+        .ctor(thing_ctor)
+        .dtor(thing_dtor)
+        .property("hp", thing_get_hp, thing_set_hp)
+        .property("armor", thing_get_armor) /* read-only */
+        .property("secret", nullptr, thing_set_secret) /* write-only */
+        .property("name", thing_get_name)
+        .property("boom", thing_get_boom)
+        .method("armor", thing_method_armor, 0)
+        .end();
+}
+
+static void test_native_properties()
+{
+    printf("\n--- native properties / borrowed instances ---\n");
+    ObjClass *thing = nullptr;
+    {
+        VM vm;
+        vm.open_lib_globals(&zen_lib_base);
+        thing = build_thing(vm);
+        TEST("get / set / augmented set from script reach the native code");
+        bool ok = run_source(vm, "t = Thing()\nr0 = t.hp\nt.hp = 40\nt.hp += 2\nt.hp -= 1\nr1 = t.hp\n");
+        PropThing *host = zen_instance_data<PropThing>(vm.get_global("t"));
+        Value r0 = vm.get_global("r0"), r1 = vm.get_global("r1");
+        CHECK(ok && !vm.had_error() && host && host->hp == 41 && is_float(r0) && r0.as.number == 100 && is_float(r1) &&
+                  r1.as.number == 41,
+              "hp get/set wrong");
+
+        TEST("the property never became a script field of the class");
+        bool shadow = false;
+        for (int i = 0; i < thing->num_fields; i++)
+            shadow |= thing->field_names[i] && (strcmp(thing->field_names[i]->chars, "hp") == 0 ||
+                                                strcmp(thing->field_names[i]->chars, "armor") == 0);
+        CHECK(!shadow && thing->num_props == 5, "field registered / wrong property count");
+
+        TEST("allocating getter (GC paused for the call) and repeated access across collections");
+        ok = run_source(vm, "s = t.name\nn = 0\nfor i in range(2000):\n    if t.name == s:\n        n += 1\n");
+        vm.collect();
+        vm.collect();
+        ok = ok && run_source(vm, "s2 = t.name\nr_hp = t.hp\n");
+        Value s2 = vm.get_global("s2");
+        CHECK(ok && vm.get_global("n").as.integer == 2000 && is_string(s2) && strcmp(as_string(s2)->chars, "thing-name") == 0 &&
+                  vm.get_global("r_hp").as.number == 41,
+              "getter result / property table lost across a collection");
+
+        TEST("read-only property: assignment is a runtime error, value unchanged");
+        run_source(vm, "t.armor = 99\n");
+        CHECK(vm.had_error() && host->armor == 7, "write to a read-only property accepted");
+        run_source(vm, "ro_ok = t.armor\n"); /* run() clears the error on entry */
+        CHECK(!vm.had_error() && vm.get_global("ro_ok").as.number == 7, "read of a read-only property failed");
+
+        TEST("write-only property: write works, read is a runtime error");
+        run_source(vm, "t.secret = 3.5\n");
+        bool wrote = !vm.had_error() && host->secret == 3.5;
+        run_source(vm, "x = t.secret\n");
+        CHECK(wrote && vm.had_error(), "write-only property wrong");
+
+        TEST("an error inside the setter / getter surfaces as a script error");
+        run_source(vm, "t.hp = \"high\"\n");
+        bool e1 = vm.had_error() && host->hp == 41;
+        run_source(vm, "y = t.boom\n");
+        CHECK(e1 && vm.had_error(), "native errors lost");
+
+        TEST("a property and a method of the same name: attribute -> property, call -> method");
+        run_source(vm, "a1 = t.armor\na2 = t.armor()\n");
+        Value a1 = vm.get_global("a1"), a2 = vm.get_global("a2");
+        CHECK(!vm.had_error() && is_float(a1) && a1.as.number == 7 && is_int(a2) && a2.as.integer == 1234,
+              "property/method precedence wrong");
+
+        TEST("a script field wins over a property (field -> property -> method)");
+        ok = run_source(vm, "class Wide(Thing):\n    hp = 5.0\n    def get(self):\n        return self.hp\n\nw = Wide()\nr_w = w.get()\n");
+        PropThing *wh = zen_instance_data<PropThing>(vm.get_global("w"));
+        CHECK(ok && !vm.had_error() && vm.get_global("r_w").as.number == 5.0 && wh && wh->hp == 100,
+              "the class-body field did not shadow the property");
+
+        TEST("inherited by a script subclass (and a sub-subclass), self.hp += ... reaches the native side");
+        ok = run_source(vm,
+            "class Orc(Thing):\n"
+            "    def hit(self, d):\n"
+            "        self.hp -= d\n"
+            "        return self.hp\n"
+            "\n"
+            "class Chief(Orc):\n"
+            "    def rally(self):\n"
+            "        self.hp = self.hp * 2\n"
+            "\n"
+            "o = Orc()\n"
+            "r_o = o.hit(30)\n"
+            "c = Chief()\n"
+            "c.hit(50)\n"
+            "c.rally()\n"
+            "o.hp = 1\n");
+        PropThing *oh = zen_instance_data<PropThing>(vm.get_global("o"));
+        PropThing *ch = zen_instance_data<PropThing>(vm.get_global("c"));
+        bool nophantom = true;
+        for (const char *nm : {"Orc", "Chief"})
+        {
+            ObjClass *k = as_class(vm.get_global(nm));
+            for (int i = 0; i < k->num_fields; i++)
+                nophantom &= strcmp(k->field_names[i]->chars, "hp") != 0;
+        }
+        CHECK(ok && !vm.had_error() && oh && ch && vm.get_global("r_o").as.number == 70 && oh->hp == 1 && ch->hp == 100 &&
+                  nophantom,
+              "subclass property access wrong");
+
+        TEST("class_find_property walks the parent chain");
+        ObjClass *orc = as_class(vm.get_global("Orc"));
+        ObjString *hp_name = intern_string(&vm.get_gc(), "hp", 2, hash_string("hp", 2));
+        CHECK(orc->num_props == 0 && class_find_property(orc, hp_name) == class_find_property(thing, hp_name) &&
+                  class_find_property(orc, hp_name) != nullptr,
+              "inherited lookup failed");
+    }
+    {
+        TEST("registering the same property name twice completes it (getter then setter)");
+        VM vm;
+        vm.open_lib_globals(&zen_lib_base);
+        vm.def_class("Half")
+            .ctor(thing_ctor)
+            .dtor(thing_dtor)
+            .property("hp", thing_get_hp)
+            .property("hp", nullptr, thing_set_hp)
+            .end();
+        bool ok = run_source(vm, "h = Half()\nh.hp = 12\nr = h.hp\n");
+        ObjClass *half = as_class(vm.get_global("Half"));
+        CHECK(ok && !vm.had_error() && half->num_props == 1 && vm.get_global("r").as.number == 12, "merge failed");
+    }
+    {
+        VM vm;
+        vm.open_lib_globals(&zen_lib_base);
+        thing = build_thing(vm);
+        run_source(vm, "class Orc(Thing):\n    def hit(self, d):\n        self.hp -= d\n        return self.hp\n");
+        ObjClass *orc = as_class(vm.get_global("Orc"));
+
+        TEST("make_instance_borrowed: no native ctor, borrowed flag, native_data set");
+        PropThing mine;
+        mine.hp = 9;
+        int c0 = g_thing_ctors, d0 = g_thing_dtors;
+        Value b = vm.make_instance_borrowed(orc, &mine);
+        CHECK(is_instance(b) && g_thing_ctors == c0 && as_instance(b)->native_data == &mine && as_instance(b)->borrowed &&
+                  as_instance(b)->klass == orc,
+              "borrowed instance not set up");
+        TEST("a borrowed instance works through properties and methods");
+        vm.def_global("bb", b);
+        run_source(vm, "rb = bb.hit(4)\nbb.hp += 100\n");
+        CHECK(!vm.had_error() && vm.get_global("rb").as.number == 5 && mine.hp == 105, "borrowed instance not usable");
+        TEST("the dtor is never called for a borrowed instance (GC, twice)");
+        vm.set_global("bb", val_nil());
+        b = val_nil();
+        vm.collect();
+        vm.collect();
+        CHECK(g_thing_dtors == d0, "dtor ran on host memory");
+
+        TEST("an owned instance (make_instance) runs the ctor and, once collected, the dtor");
+        {
+            Value o = vm.make_instance(orc);
+            CHECK(is_instance(o) && g_thing_ctors == c0 + 1 && !as_instance(o)->borrowed && as_instance(o)->native_data != nullptr,
+                  "owned instance wrong");
+        }
+        vm.collect();
+        vm.collect();
+        TEST("   ... and its dtor ran exactly once");
+        CHECK(g_thing_dtors == d0 + 1, "owned dtor count wrong");
+
+        TEST("destroy_instance on a borrowed (persistent) instance does not call the dtor");
+        VM vm2;
+        vm2.open_lib_globals(&zen_lib_base);
+        vm2.def_class("PThing").ctor(thing_ctor).dtor(thing_dtor).persistent(true).end();
+        PropThing mine2;
+        int d1 = g_thing_dtors;
+        Value pb = vm2.make_instance_borrowed(as_class(vm2.get_global("PThing")), &mine2);
+        bool flagged = as_instance(pb)->borrowed;
+        vm2.destroy_instance(pb);
+        Value po = vm2.make_instance(as_class(vm2.get_global("PThing")));
+        vm2.destroy_instance(po);
+        CHECK(flagged && g_thing_dtors == d1 + 1, "destroy_instance: borrowed must skip the dtor, owned must run it");
+    }
+}
+
 int main()
 {
     printf("=== Zen Embedding Tests (C++ <-> Script) ===\n");
@@ -2316,6 +2560,7 @@ int main()
     test_vec_values();
     test_host_refs_and_bound_methods();
     test_gc_tuning();
+    test_native_properties();
 
     printf("\n========================================\n");
     printf("Results: %d passed, %d failed\n", g_tests_passed, g_tests_failed);

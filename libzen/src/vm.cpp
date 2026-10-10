@@ -1901,6 +1901,43 @@ namespace zen
         return *this;
     }
 
+    VM::ClassBuilder &VM::ClassBuilder::property(const char *name, NativeFn getter, NativeFn setter, int flags)
+    {
+        if (!getter && !setter)
+            return *this;
+        const int len = (int)strlen(name);
+        ObjString *s = intern_string(&vm_->gc_, name, len, hash_string(name, len));
+        /* Registering the same name again completes it (getter first, then
+        ** setter, as zen_bind's getter<>/setter<> do) or replaces a half. */
+        int32_t idx = -1;
+        for (int32_t i = 0; i < klass_->num_props; i++)
+            if (klass_->props[i].name == s)
+                idx = i;
+        if (idx < 0)
+        {
+            idx = klass_->num_props;
+            klass_->props = (NativeProperty *)zen_realloc(&vm_->gc_, klass_->props,
+                                                          sizeof(NativeProperty) * idx,
+                                                          sizeof(NativeProperty) * (idx + 1));
+            klass_->props[idx].name = s;
+            klass_->props[idx].getter = nullptr;
+            klass_->props[idx].setter = nullptr;
+            klass_->num_props = idx + 1; /* marked through the class from here on */
+        }
+        NativeProperty &p = klass_->props[idx];
+        if (getter)
+        {
+            p.getter = new_native(&vm_->gc_, getter, 0, s);
+            p.getter->flags = flags;
+        }
+        if (setter)
+        {
+            p.setter = new_native(&vm_->gc_, setter, 1, s);
+            p.setter->flags = flags;
+        }
+        return *this;
+    }
+
     VM::ClassBuilder &VM::ClassBuilder::ctor(NativeClassCtor fn)
     {
         klass_->native_ctor = fn;
@@ -2098,6 +2135,16 @@ namespace zen
             }
         }
         gc_resume(&gc_);
+        return val_obj((Obj *)inst);
+    }
+
+    Value VM::make_instance_borrowed(ObjClass *klass, void *native_data)
+    {
+        if (!klass)
+            return val_nil();
+        ObjInstance *inst = new_instance(&gc_, klass);
+        inst->native_data = native_data;
+        inst->borrowed = true;
         return val_obj((Obj *)inst);
     }
 

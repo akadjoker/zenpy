@@ -1926,6 +1926,30 @@ namespace zen
         return -1;
     }
 
+    bool Compiler::native_property_of(const char *cls, int32_t cls_len, ObjString *fname) const
+    {
+        if (!vm_)
+            return false;
+        for (int hop = 0; hop < 8 /* = kMaxSigInherit */ && cls; hop++)
+        {
+            const SigClass *c = find_sig_class(cls, cls_len);
+            if (!c)
+                break; /* not declared in this file: an engine class (or unknown) */
+            cls = c->parent;
+            cls_len = c->parent_len;
+        }
+        if (!cls)
+            return false;
+        char buf[256];
+        int n = cls_len < 255 ? cls_len : 255;
+        memcpy(buf, cls, n);
+        buf[n] = '\0';
+        int gidx = vm_->find_global(buf);
+        if (gidx < 0 || !is_class(vm_->get_global(gidx)))
+            return false;
+        return class_find_property(as_class(vm_->get_global(gidx)), fname) != nullptr;
+    }
+
     void Compiler::note_field_class(int fidx, bool rhs_is_none)
     {
         if (fidx < 0 || fidx >= kMaxClassFields)

@@ -228,7 +228,7 @@ if have_gcnative; then
     fi
 fi
 
-# --- C++ binding layer (zen/bind.h) ---
+# --- C++ binding layer (zen_bind.hpp) ---
 BINDTEST="${BINDTEST:-$ROOT/bin/test_bind}"
 if [[ -n "$ZEN_RUNNER" ]]; then have_bindtest() { [[ -f "$BINDTEST" ]]; }
 else have_bindtest() { [[ -x "$BINDTEST" ]]; }; fi

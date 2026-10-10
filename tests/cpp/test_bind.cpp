@@ -1,23 +1,27 @@
 /*
-** test_bind.cpp — zen/bind.h: member-function pointers become script methods.
+** test_bind.cpp — zen_bind.hpp: member-function pointers become script methods.
 **
 ** Covers constructor/method/property generation, a leading VM* parameter,
 ** wrapping host-owned objects (and proving the GC never deletes them),
-** type errors that report instead of casting, script subclasses of a bound
-** class, and free functions.
+** type errors that report instead of casting, the class check on C* / C&
+** parameters, integer range checks, script subclasses of a bound class, and
+** free functions.
 */
 
 #include "vm.h"
 #include "compiler.h"
 #include "module.h"
 #include "memory.h"
-#include "bind.h"
+#include "zen_bind.hpp"
 
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 
 using namespace zen;
+using zen::bind::def_class;
+using zen::bind::def_fn;
+using zen::bind::wrap;
 
 static int g_tests_passed = 0;
 static int g_tests_failed = 0;
@@ -87,8 +91,9 @@ static int add_ints(VM *, int a, int b) { return a + b; }
 
 static void bind_all(VM &vm)
 {
-    bind_class<Body>(vm, "Body")
-        .constructor<float, float>()
+    def_class<Body>(vm, "Body")
+        .ctor<float, float>()
+        .dtor()
         .method<&Body::move>("move")
         .method<&Body::speed>("speed")
         .method<&Body::alive>("alive")
@@ -107,7 +112,7 @@ static bool near_to(Value v, double want)
 
 int main()
 {
-    printf("=== zen/bind.h ===\n");
+    printf("=== zen_bind.hpp ===\n");
 
     {
         VM vm;
@@ -154,7 +159,7 @@ int main()
         setup(vm);
         bind_all(vm);
         World world;
-        bind_class<World>(vm, "World").method<&World::find>("find").constructable(false).end();
+        def_class<World>(vm, "World").method<&World::find>("find").constructable(false).end();
         vm.def_global("world", wrap<World>(vm, &world));
 
         TEST("host-owned: find returns a wrapped Body");
@@ -168,7 +173,7 @@ int main()
         TEST("World cannot be constructed from script");
         VM vm2;
         setup(vm2);
-        bind_class<World>(vm2, "World").method<&World::find>("find").constructable(false).end();
+        def_class<World>(vm2, "World").method<&World::find>("find").constructable(false).end();
         CHECK(!run_source(vm2, "World()\n"), "constructable(false) ignored");
 
         TEST("GC never deletes a wrapped host object");
@@ -206,9 +211,9 @@ int main()
         bind_all(vm);
         TEST("wrong argument type: error, no crash");
         bool ok = run_source(vm, "b = Body(3, 4)\nb.move(\"x\", 1)\n");
-        CHECK(!ok && vm.had_error() && strstr(g_err, "parameter 0") &&
-              strstr(g_err, "expected float") && strstr(g_err, "got string"),
-              "type error not reported with parameter index");
+        CHECK(!ok && vm.had_error() && strstr(g_err, "move: argument 1") &&
+              strstr(g_err, "must be a number") && strstr(g_err, "got string"),
+              "type error not reported with function name and argument index");
         printf("      msg: %.*s\n", (int)strcspn(g_err, "\n"), g_err);
     }
 
@@ -218,9 +223,22 @@ int main()
         bind_all(vm);
         TEST("instance argument of the wrong class is rejected");
         bool ok = run_source(vm, "b = Body(3, 4)\nb.dist_to(5)\n");
-        CHECK(!ok && strstr(g_err, "parameter 0") && strstr(g_err, "expected Body"),
-              "dist_to(5) should report expected Body");
+        CHECK(!ok && strstr(g_err, "dist_to: argument 1") && strstr(g_err, "must be Body") &&
+              strstr(g_err, "got int"),
+              "dist_to(5) should report argument 1 must be Body");
         printf("      msg: %.*s\n", (int)strcspn(g_err, "\n"), g_err);
+
+        TEST("None and a foreign native class are rejected too");
+        World world;
+        def_class<World>(vm, "World").method<&World::find>("find").constructable(false).end();
+        vm.def_global("world", wrap<World>(vm, &world));
+        g_err[0] = 0;
+        bool none_rejected = !run_source(vm, "b = Body(3, 4)\nb.dist_to(None)\n") &&
+                             strstr(g_err, "must be Body") && strstr(g_err, "got None");
+        g_err[0] = 0;
+        bool world_rejected = !run_source(vm, "b2 = Body(3, 4)\nb2.dist_to(world)\n") &&
+                              strstr(g_err, "must be Body") && strstr(g_err, "got World");
+        CHECK(none_rejected && world_rejected, "dist_to(None) / dist_to(world) must not reach the cast");
     }
 
     {
@@ -229,7 +247,8 @@ int main()
         bind_all(vm);
         TEST("constructor type error is reported");
         bool ok = run_source(vm, "b = Body(\"a\", 2)\n");
-        CHECK(!ok && strstr(g_err, "parameter 0"), "ctor accepted a string for float");
+        CHECK(!ok && strstr(g_err, "Body: argument 1") && strstr(g_err, "got string"),
+              "ctor accepted a string for float");
         printf("      msg: %.*s\n", (int)strcspn(g_err, "\n"), g_err);
     }
 
@@ -263,9 +282,9 @@ int main()
     {
         VM vm;
         setup(vm);
-        bind_function<&dist>(vm, "dist");
-        bind_function<&add_ints>(vm, "add_ints");
-        TEST("bind_function: free functions");
+        def_fn<&dist>(vm, "dist");
+        def_fn<&add_ints>(vm, "add_ints");
+        TEST("def_fn: free functions");
         bool ok = run_source(vm, "r = dist(3, 4)\nr2 = add_ints(2, 3)\n");
         CHECK(ok && near_to(vm.get_global("r"), 5.0) && vm.get_global("r2").as.integer == 5,
               "dist(3, 4) should be 5.0, add_ints(2, 3) 5");
@@ -273,9 +292,21 @@ int main()
         TEST("free function type error");
         VM vm2;
         setup(vm2);
-        bind_function<&dist>(vm2, "dist");
-        CHECK(!run_source(vm2, "dist(3, None)\n") && strstr(g_err, "parameter 1"),
+        def_fn<&dist>(vm2, "dist");
+        CHECK(!run_source(vm2, "dist(3, None)\n") && strstr(g_err, "dist: argument 2") &&
+                  strstr(g_err, "got None"),
               "None accepted as double");
+    }
+
+    {
+        VM vm;
+        setup(vm);
+        bind_all(vm);
+        TEST("integer out of range is an error, not a truncation");
+        bool ok = run_source(vm, "b = Body(1, 1)\nb.set_hits(5000000000)\n");
+        CHECK(!ok && strstr(g_err, "set_hits: argument 1") && strstr(g_err, "int in range"),
+              "5000000000 was silently narrowed to int");
+        printf("      msg: %.*s\n", (int)strcspn(g_err, "\n"), g_err);
     }
 
     printf("\n  passed: %d  failed: %d\n", g_tests_passed, g_tests_failed);

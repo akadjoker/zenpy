@@ -64,7 +64,7 @@ using namespace zen;
 static double host_rand(double lo, double hi);
 bind::def_fn<&host_rand>(vm, "rand", ZEN_NATIVE_GC_SAFE);   /* aridade 2 */
 
-struct Texture { int id; void draw(double x, double y); int width() const; ~Texture(); };
+struct Texture { int id; int hits; void draw(double x, double y); int width() const; ~Texture(); };
 static Texture *tex_load(VM *vm, const char *path);         /* nullptr = erro já reportado */
 
 bind::def_class<Texture>(vm, "Texture")
@@ -72,22 +72,53 @@ bind::def_class<Texture>(vm, "Texture")
     .dtor()                            /* delete (T *) quando a instância morre */
     .method<&Texture::draw>("draw", ZEN_NATIVE_GC_SAFE)
     .method<&Texture::width>("width")
+    .property<&Texture::hits>("hits")  /* hits() e set_hits(v) */
     .end();
 ```
 
-Tipos aceites nos parâmetros: `bool` (truthiness do Python), qualquer inteiro,
-`float`/`double` (int é aceite), `const char *`, `Value` (passa tudo), e
-`T *` / `T &` para uma classe registada com `def_class<T>` (vem de
-`native_data`). Um primeiro parâmetro `VM *` recebe a VM e não conta como
-argumento do script. Resultados: `void` (→ nil), os mesmos escalares,
-`const char *` (copiado para uma ObjString) e `Value`.
+Tipos aceites nos parâmetros: `bool` (truthiness do Python), qualquer inteiro
+(um int do script fora do intervalo do tipo C++ é erro, nunca truncamento),
+enums (como int), `float`/`double` (int é aceite), `const char *`, `Value`
+(passa tudo), e `T *` / `T &` para uma classe registada com `def_class<T>`
+(vem de `native_data`). Um primeiro parâmetro `VM *` recebe a VM e não conta
+como argumento do script. Resultados: `void` (→ nil), os mesmos escalares,
+`const char *` (copiado para uma ObjString), `Value`, e `T *` / `T &` de uma
+classe registada (embrulhado, `nullptr` → `None`).
+
+**Verificação de classe.** `ClassDef<T>::end()` guarda o `ObjClass *` em
+`ClassOf<T>::klass`. Um argumento `T *` / `T &` só passa se a instância for
+dessa classe ou tiver-a na cadeia de `parent` (uma subclasse de script serve),
+e tiver `native_data`; senão é o erro `f: argument 2 must be Texture, got int`
+e a função C++ nem corre. `None` também é rejeitado: quem aceita um objecto
+opcional recebe um `Value`. O registo é um slot por tipo C++, não por VM: com
+várias VMs vivas ganha a que fez `end()` por último.
+
+**`wrap<T>(vm, ptr)`: objectos do host.** Devolve uma instância de script da
+classe de `T` que guarda `ptr` em `native_data` e que o GC **nunca apaga**
+(`nullptr` → `None`). Os métodos que devolvem `T *` / `T &` de uma classe
+registada fazem isto automaticamente. Constrói com `new_instance`, não com
+`make_instance` (que correria o ctor nativo com zero argumentos). Numa classe
+sem `.dtor()` não há nada a apagar e a instância é da própria classe; numa
+classe com `.dtor()` a instância é de uma subclasse escondida `Nome$ref`
+(criada em `end()`, `constructable(false)`, destrutor vazio): o GC sobe a
+cadeia de `parent` só até encontrar um destrutor, e o vazio pára-o antes do
+verdadeiro. Regra: `.dtor()` = a classe é dona das instâncias que o script
+cria; `wrap` = o host é dono.
+
+**`getter` / `setter` / `property`.** `.getter<&T::x>("x")` regista `x()`,
+`.setter<&T::x>("x")` regista `set_x(v)` e `.property<&T::x>("x")` os dois. O
+setter converte e verifica como qualquer argumento (intervalo dos inteiros,
+tipo). Um membro `const char *` só pode ter getter (a string do script não
+pertence ao objecto).
 
 Uma função livre cujo primeiro parâmetro é `T *`/`T &` pode ser registada como
 método: o receptor entra nesse parâmetro e a aridade visível ao script desce
 um (`.method<&gauge_level>("level")` com `double gauge_level(Gauge &)`).
 
-Erros são automáticos e nomeiam o argumento:
-`twice: argument 1 must be an int`, `small: expected 2 argument(s), got 1`.
+Erros são automáticos, nomeiam a função, o argumento e o tipo recebido:
+`twice: argument 1 must be an int in range, got string`,
+`small: expected 2 argument(s), got 1`. Um `ctor<A...>()` com `VM *` em
+primeiro lugar passa a VM a `new T(vm, ...)`.
 O que a assinatura não cobrir (varargs, kwargs, tuplos de retorno) continua a
 escrever-se como `NativeFn` à mão. Cobertura: teste 18 de
 `tests/cpp/test_embedding.cpp`; usos reais em

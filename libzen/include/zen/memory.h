@@ -14,7 +14,9 @@ namespace zen
     **   1. MARK — começa nas raízes (stack, globals, open upvalues)
     **              pinta roots de GRAY, depois processa grays→BLACK
     **   2. SWEEP — varre a linked list de objectos:
-    **              WHITE → free; GRAY/BLACK → repinta WHITE para próximo ciclo
+    **              WHITE → free; sobreviventes ficam com black_val e a troca
+    **              de época (white_val <-> black_val) no fim do ciclo torna-os
+    **              brancos para o seguinte, sem repintar (ver GC::first_old)
     **
     ** Tri-color invariant:
     **   "Um objecto BLACK nunca aponta directamente para WHITE"

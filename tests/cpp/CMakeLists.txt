@@ -28,7 +28,7 @@ foreach(cfg DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
 endforeach()
 target_link_libraries(test_gc_native zen_static)
 
-# --- C++ binding layer (zen/bind.h) ---
+# --- C++ binding layer (zen_bind.hpp) ---
 add_executable(test_bind test_bind.cpp)
 set_target_properties(test_bind PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${ZEN_BIN_DIR})
 foreach(cfg DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)

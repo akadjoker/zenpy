@@ -403,50 +403,55 @@ you declared them.
 
 Script classes can inherit from C++ classes — the VM handles the vtable dispatch.
 
-### bind.h — one-line bindings
+### zen_bind.hpp — typed bindings
 
 Writing one `static int f(VM*, Value*, int)` per method gets old fast.
-`<zen/bind.h>` (header-only, no runtime cost beyond the ClassBuilder calls it
-makes) generates those wrappers from member-function pointers at compile time:
+`<zen_bind.hpp>` (header-only, C++17, no STL) generates those wrappers from
+function and member-function pointers at compile time, on top of the
+`ClassBuilder` calls above:
 
 ```cpp
-#include <zen/bind.h>
+#include "zen_bind.hpp"
+using namespace zen;
 
 struct Body {
     float x, y; int hits = 0;
     Body(float x, float y);
     void move(float dx, float dy);
     float speed() const;
-    int tag(zen::VM *vm, int k);          // leading VM* is injected, not a script arg
+    Body *nearest(Body &other);
 };
+static double dist(double a, double b);
 
-zen::bind_class<Body>(vm, "Body")
-    .constructor<float, float>()          // Body(3, 4) in script -> new Body(3, 4)
+bind::def_class<Body>(vm, "Body")
+    .ctor<float, float>().dtor()          // Body(3, 4) -> new Body(3, 4); delete on collect
     .method<&Body::move>("move")          // arity deduced from the signature
     .method<&Body::speed>("speed")
-    .method<&Body::tag>("tag")            // arity 1
+    .method<&Body::nearest>("nearest")    // returns a wrapped Body* (None for nullptr)
     .property<&Body::hits>("hits")        // hits() and set_hits(v)
     .end();
-zen::bind_function<&dist>(vm, "dist");    // free functions too
+bind::def_fn<&dist>(vm, "dist");          // free functions too
 // script:  b = Body(3, 4); b.move(1, 1); print(b.speed()); b.set_hits(7)
+vm.def_global("hero", bind::wrap<Body>(vm, &host_hero));   // host-owned, never deleted
 ```
 
-- **Self and ownership.** `self` is the instance's `native_data`. A class with
-  `constructor<...>()` owns its instances: `new T(...)` on construction,
-  `delete` when the GC frees them, and script subclasses inherit it. A class
-  without one is a view over host memory: expose objects with
-  `zen::wrap<T>(vm, ptr)` (`nullptr` becomes `None`), also returned
-  automatically from any bound method that returns `T*` or `T&`. The GC never
-  deletes a wrapped pointer, even for classes that do own their script-made
-  instances.
 - **Conversions.** `bool`, every integer width (out-of-range is an error, not a
-  truncation), `float`/`double` (ints promote), enums, `const char*` (valid only
-  during the call, copy it to keep it), `zen::Value`, and `T*`/`T&`/`const T&`
-  for bound classes. Pointer-to-bound-class results become wrapped instances.
-- **Errors.** A wrong-typed argument raises a runtime error naming the
-  parameter and the expected type (`parameter 0: expected float, got string`)
-  and the call returns without touching the C++ function. Nothing is ever cast
-  blindly.
+  truncation), enums, `float`/`double` (ints promote), `const char*` (valid only
+  during the call, copy it to keep it), `zen::Value`, and `T*`/`T&` for bound
+  classes. A leading `VM*` is injected and is not a script argument.
+- **Property and wrap.** `property<&T::x>` registers a getter `x()` and a setter
+  `set_x(v)` (`getter`/`setter` do one each). `wrap<T>(vm, ptr)` makes a script
+  instance over memory the host owns (`nullptr` becomes `None`); a bound
+  method returning `T*` or `T&` does the same. The GC deletes only what a class
+  with `.dtor()` created from script, never a wrapped pointer.
+- **Errors.** A wrong-typed argument raises a runtime error naming the function,
+  the argument and what it got (`move: argument 1 must be a number, got
+  string`), and the C++ function is not called. A `T*`/`T&` parameter checks the
+  instance's class (or a script subclass of it) before touching `native_data`,
+  and `None` is rejected, so nothing is ever cast blindly.
+
+Details, the class check and the ownership rules are in
+[docs/internals/natives-and-embedding.md](docs/internals/natives-and-embedding.md).
 
 ### Trimming modules
 

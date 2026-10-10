@@ -71,3 +71,30 @@ aritmética para o registo destino (mata o `MOVE`), e imediatos
 `ADDI`/`SUBI`. Ciclo `while` de 5M: 0.110 → 0.034.
 
 Nada disso se aplica ao zenpy, que já tinha as três.
+
+## Resolvido (2026-10-10)
+
+O primeiro candidato da lista (tamanho do `Value`) estava certo, mas não era
+tudo. Eram três coisas:
+
+- **`sizeof(Value)` era 24 bytes** (zenvm: 16) por causa de um membro de union
+  morto, a string pequena inline, que nunca era usado. Removido por inteiro:
+  agora 16 bytes, como no zenvm.
+- **`execute()` tinha um frame de 171 KB**: dois locais `Compiler` no `OP_EVAL`
+  entravam na reserva de stack da função inteira, e com protecção contra stack
+  clash cada entrada host->script custava ~450 ns. Agora 5,9 KB e ~20-36 ns.
+- **O GC só corria dentro da alocação de buffers**, por isso programas que só
+  criam instâncias nunca recolhiam. Agora há safe points no dispatch (ver
+  `docs/internals/gc-and-roots.md`).
+
+Números finais, intercalados, Release -O3, melhor de 3, zenpy contra zenvm (s):
+
+| teste             | zenpy | zenvm |
+|-------------------|------:|------:|
+| fib               | 0.099 | 0.123 |
+| for_loop (locais) | 0.034 | 0.039 |
+| method_call       | 0.094 | 0.117 |
+| binary_trees      | 0.267 | 0.235 |
+
+O zenpy ganha em três. Em binary_trees perde 14% porque passou a recolher de
+facto: 13 MB de RSS contra 170 MB.

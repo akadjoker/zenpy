@@ -561,8 +561,9 @@ namespace zen
                 fn_state.is_generator = false;
                 fn_state.global_count = 0;
 
-                char fn_name[192];
-                snprintf(fn_name, sizeof(fn_name), "%s.%.*s", name_buf, method_name.length, method_name.start);
+                char fn_name[512];
+                int method_len = method_name.length < 255 ? method_name.length : 255;
+                snprintf(fn_name, sizeof(fn_name), "%s.%.*s", name_buf, method_len, method_name.start);
 
                 fn_state.emitter.begin(fn_name, 0, current_file_);
 

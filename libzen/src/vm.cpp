@@ -2659,7 +2659,9 @@ namespace zen
 
         /* Try "modname.py" first, then "modname/__init__.py" */
         char filepath[512];
-        snprintf(filepath, sizeof(filepath), "%s.py", filename);
+        int written = snprintf(filepath, sizeof(filepath), "%s.py", filename);
+        if (written < 0 || written >= (int)sizeof(filepath))
+            return nullptr;
 
         char resolved[1024];
         long src_size = 0;
@@ -2677,8 +2679,9 @@ namespace zen
         if (!source)
         {
             /* Try __init__.py (package) */
-            snprintf(filepath, sizeof(filepath), "%s/__init__.py", filename);
-            source = read_file(filepath, relative_to, &src_size, resolved, sizeof(resolved));
+            written = snprintf(filepath, sizeof(filepath), "%s/__init__.py", filename);
+            if (written >= 0 && written < (int)sizeof(filepath))
+                source = read_file(filepath, relative_to, &src_size, resolved, sizeof(resolved));
         }
         if (!source)
             return nullptr;

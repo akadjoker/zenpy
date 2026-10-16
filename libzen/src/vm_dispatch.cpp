@@ -4727,7 +4727,7 @@ namespace zen
                     ObjFunc *fn = cl->func;
                     if (__builtin_expect(kwmap != nullptr, 0))
                         RT_ERROR("keyword arguments need a method the compiler can see (or a native method)");
-                    /* Common case first: exact arity, no defaults/*args, not
+                    /* Common case first: exact arity, no defaults or *args, not
                     ** generic, not a generator — see OP_CALL. */
                     if (__builtin_expect((fn->generic_arity | fn->default_count | (int32_t)fn->is_generator) == 0 &&
                                              fn->arity == arg_count, 1))

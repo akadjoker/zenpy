@@ -535,7 +535,7 @@ namespace zen
         /* Class field index table — built as we see self.field = ... in methods.
         ** Enables OP_GETFIELD_IDX / OP_SETFIELD_IDX (O(1) field access).
         ** Also used for params annotated with the current class type. */
-        static const int kMaxClassFields = 64;
+        static const int kMaxClassFields = 128;
         static const int kMaxClasses = 32;
 
         ObjString *class_field_table_[kMaxClassFields]; /* indexed by field order */

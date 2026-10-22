@@ -42,6 +42,9 @@ namespace zen
     **                     the index as a 16-bit Bx field). */
     constexpr int kInitGlobalCapacity = 1024;
     constexpr int kMaxGlobalsHard = 65536;
+    /* Ceiling on the selector table a bytecode file may carry: an engine VM
+    ** registers thousands of method names before any script loads. */
+    constexpr int kMaxSelectorsHard = 65536;
     /* Backwards-compat alias: previously this was the hard cap. Kept so
     ** external code that referenced it still compiles. New code should use
     ** kMaxGlobalsHard for the ceiling, kInitGlobalCapacity for sizing. */

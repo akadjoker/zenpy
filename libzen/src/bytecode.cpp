@@ -702,7 +702,7 @@ namespace
             set_error(err, err_len, "truncated selector table");
             return false;
         }
-        if (count > 256)
+        if (count > (uint32_t)kMaxSelectorsHard)
         {
             set_error(err, err_len, "too many selectors in bytecode");
             return false;
@@ -811,7 +811,11 @@ namespace
                 Value value = val_nil();
                 if (!read_value(vm, r, minor, &value, err, err_len))
                     return false;
-                vm->set_global((int)i, value);
+                /* A global the VM already holds (a host struct def, a class from
+                ** an earlier file) keeps its live object: code loaded later must
+                ** see the same identity the host and the earlier code hold. */
+                if (is_nil(vm->get_global((int)i)))
+                    vm->set_global((int)i, value);
             }
             else if (has_value != 0)
             {

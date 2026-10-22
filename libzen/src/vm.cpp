@@ -2756,9 +2756,10 @@ namespace zen
         /* Build ObjMap with module exports.
         ** Export any global that was:
         **   1. Newly created by the module compile (index >= saved_globals), OR
-        **   2. Existed before but was MODIFIED by the module execution
-        **      (was nil in snapshot, now has a value — i.e. the module wrote to
-        **       a slot that was pre-allocated by the caller's compiler) */
+        **   2. Existed before but was MODIFIED by the module execution: the
+        **      slot was pre-allocated by the caller's compiler, or the module
+        **      had already run once and defines its functions again (a second
+        **      import, or a host that compiled the file before). */
         ObjMap *mod = new_map(&gc_);
         mod->is_module = true;
         for (int gi = 0; gi < num_globals_; gi++)
@@ -2772,7 +2773,7 @@ namespace zen
 
             bool is_new = (gi >= saved_globals);
             bool was_modified = (gi < post_compile_globals &&
-                                 is_nil(snapshot[gi]) && !is_nil(globals_[gi]));
+                                 !values_equal(snapshot[gi], globals_[gi]));
 
             if (!is_new && !was_modified)
                 continue;

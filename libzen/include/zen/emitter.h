@@ -46,6 +46,7 @@ namespace zen
         int emit_abc(OpCode op, int a, int b, int c, int line);
         int emit_abx(OpCode op, int a, int bx, int line);
         int emit_asbx(OpCode op, int a, int sbx, int line);
+        int overflow_line() const { return overflow_line_; }
 
         /* --- Constantes --- */
         int add_constant(Value val); /* retorna índice na pool */
@@ -133,6 +134,7 @@ namespace zen
         ObjFunc *func_; /* func em construção */
         int last_line_;
         int last_op_start_;
+        int overflow_line_ = 0; /* first line with an ABC operand past 255, 0 if none */
         int jump_count_;
         int last_label_ = -1;
         char escape_error_[128] = {};

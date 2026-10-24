@@ -99,6 +99,8 @@ namespace zen
         /* Implicit return nil at end of script */
         state_->emitter.emit_abc(OP_RETURNNIL, 0, 1, 0, previous_.line);
 
+        check_operands();
+
         ObjFunc *script = state_->emitter.end(state_->max_reg);
         script->arity = 0;
 
@@ -191,6 +193,8 @@ namespace zen
             state_->emitter.emit_abc(OP_RETURNNIL, 0, 1, 0, previous_.line);
         }
 
+        check_operands();
+
         ObjFunc *script = state_->emitter.end(state_->max_reg);
         script->arity = 0;
 
@@ -241,6 +245,18 @@ namespace zen
     /* =========================================================
     ** Error reporting
     ** ========================================================= */
+
+    void Compiler::check_operands()
+    {
+        const int line = state_->emitter.overflow_line();
+        if (line <= 0)
+            return;
+        char msg[160];
+        snprintf(msg, sizeof msg,
+                 "Function too large near line %d: an instruction needs a constant or register past 255; split it.",
+                 line);
+        error(msg);
+    }
 
     void Compiler::error(const char *msg)
     {

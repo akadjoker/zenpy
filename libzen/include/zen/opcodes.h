@@ -267,11 +267,17 @@ namespace zen
         /* `return` with no value and the implicit end of a function:
         ** LOADNIL R[0] + RETURN R[0] as one dispatch (R[0] is dead here). */
         OP_NEXT,     /* R[A] = next(R[B]) — advance a generator/fiber one step */
-        OP_RETURNNIL, /* LAST opcode — s_opnames (debug.cpp) and
-                       ** dispatch_table (vm_dispatch.cpp) are sized against
-                       ** this one and static_assert on it. Add new opcodes
-                       ** ABOVE this line, and add their entry to both tables.
-                       ** OP_HALT is NOT last: it sits mid-enum. */
+        OP_RETURNNIL,
+        /* A class body field whose name or default sits past constant 255,
+        ** where OP_CLASSFIELD / OP_CLASSFIELDDEF cannot reach (8-bit C): the
+        ** compiler first loads the constant into R[C] with OP_LOADK. Added
+        ** after OP_RETURNNIL so no existing opcode changes its number. */
+        OP_CLASSFIELD_R,    /* as_class(R[A]).field_names[B] = as_string(R[C]) */
+        OP_CLASSFIELDDEF_R, /* LAST opcode — as_class(R[A]).field_defaults[B] = R[C].
+                            ** s_opnames (debug.cpp) and dispatch_table
+                            ** (vm_dispatch.cpp) are sized against this one and
+                            ** static_assert on it. Add new opcodes BELOW this line
+                            ** and move the mark, and add their entry to both tables. */
     };
 
 /* Encode/Decode — ABC format */

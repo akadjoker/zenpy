@@ -1127,12 +1127,14 @@ namespace zen
             &&lbl_OP_NEJMPIFNOT,
             &&lbl_OP_NEXT,
             &&lbl_OP_RETURNNIL,
+            &&lbl_OP_CLASSFIELD_R,
+            &&lbl_OP_CLASSFIELDDEF_R,
         };
 
         /* Same rule as s_opnames in debug.cpp, and worse when it breaks: a
         ** missing entry here shifts every later label, so DISPATCH() jumps
         ** into the wrong handler and the VM misbehaves with a clean build. */
-        static_assert(sizeof(dispatch_table) / sizeof(dispatch_table[0]) == (size_t)OP_RETURNNIL + 1,
+        static_assert(sizeof(dispatch_table) / sizeof(dispatch_table[0]) == (size_t)OP_CLASSFIELDDEF_R + 1,
                       "dispatch_table is out of sync with the OpCode enum");
 
 #ifdef ZEN_OPCODE_PROFILE
@@ -5489,6 +5491,54 @@ namespace zen
                 klass->num_field_defaults = new_n;
             }
             klass->field_defaults[field_idx] = K[ZEN_C(i)];
+            NEXT();
+        }
+
+        CASE(OP_CLASSFIELD_R)
+        {
+            /* OP_CLASSFIELD with the name in R[C] (constant index past 255). */
+            uint32_t i = *ip;
+            ObjClass *klass = as_class(R[ZEN_A(i)]);
+            int field_idx = ZEN_B(i);
+            ObjString *fname = as_string(R[ZEN_C(i)]);
+            if (field_idx >= klass->num_fields)
+            {
+                int old_n = klass->num_fields;
+                int new_n = field_idx + 1;
+                klass->field_names = (ObjString **)zen_realloc(
+                    &gc_, klass->field_names,
+                    sizeof(ObjString *) * old_n,
+                    sizeof(ObjString *) * new_n);
+                for (int fi = old_n; fi < new_n; fi++)
+                    klass->field_names[fi] = nullptr;
+                klass->num_fields = new_n;
+            }
+            klass->field_names[field_idx] = fname;
+            NEXT();
+        }
+
+        CASE(OP_CLASSFIELDDEF_R)
+        {
+            /* as_class(R[A]).field_defaults[B] = K[C] — the value a class
+            ** body assignment gave a field. Emitted right after the
+            ** OP_CLASSFIELD run that registered the names, so the field
+            ** index is already valid here. */
+            uint32_t i = *ip;
+            ObjClass *klass = as_class(R[ZEN_A(i)]);
+            int field_idx = ZEN_B(i);
+            if (field_idx >= klass->num_field_defaults)
+            {
+                int old_n = klass->num_field_defaults;
+                int new_n = field_idx + 1;
+                klass->field_defaults = (Value *)zen_realloc(
+                    &gc_, klass->field_defaults,
+                    sizeof(Value) * old_n,
+                    sizeof(Value) * new_n);
+                for (int fi = old_n; fi < new_n; fi++)
+                    klass->field_defaults[fi] = val_nil();
+                klass->num_field_defaults = new_n;
+            }
+            klass->field_defaults[field_idx] = R[ZEN_C(i)];
             NEXT();
         }
 

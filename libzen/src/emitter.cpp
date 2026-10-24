@@ -8,6 +8,7 @@ namespace zen
 
     void Emitter::begin(const char *name, int arity, const char *source)
     {
+        overflow_line_ = 0;
         func_ = new_func(gc_);
         func_->arity = arity;
         func_->name = name ? intern_string(gc_, name, (int)strlen(name)) : nullptr;
@@ -70,6 +71,17 @@ namespace zen
 
     int Emitter::emit_abc(OpCode op, int a, int b, int c, int line)
     {
+        /* An operand past 8 bits would spill into its neighbours and run as
+        ** another instruction: remember where, so the compiler stops with an
+        ** error instead (Compiler::check_operands). */
+        if ((a | b | c) & ~0xFF)
+        {
+            if (overflow_line_ == 0)
+                overflow_line_ = line > 0 ? line : 1;
+            a &= 0xFF;
+            b &= 0xFF;
+            c &= 0xFF;
+        }
         return last_op_start_ = emit(ZEN_ENCODE(op, a, b, c), line);
     }
 

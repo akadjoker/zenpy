@@ -62,3 +62,10 @@
 - [x] dict comprehensions `{k: v for k in iter}`
 - [x] set comprehensions `{x for x in iter}`
 - [x] `len()` intrinsic (OP_LEN)
+
+- ABC operands are 8 bits: an instruction that needs a constant past 255 (a field read or write
+  by name, a method registered on a class, the class name in OP_NEWCLASS) cannot be encoded in a
+  function with more than 256 constants. The compiler now stops with "Function too large" instead
+  of emitting a corrupt instruction; class field names and defaults already go through registers
+  (OP_CLASSFIELD_R / OP_CLASSFIELDDEF_R). Register forms for SETFIELD / GETFIELD / NEWCLASS would
+  lift the limit.

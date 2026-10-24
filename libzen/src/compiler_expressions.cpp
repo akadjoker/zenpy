@@ -2915,6 +2915,8 @@ namespace zen
         int result = expression(-1);
         state_->emitter.emit_abc(OP_RETURN, result, 1, 0, previous_.line);
 
+        check_operands();
+
         ObjFunc *fn = state_->emitter.end(state_->max_reg);
         fn->arity = arity;
 

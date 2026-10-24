@@ -135,6 +135,8 @@ namespace zen
         "NEJMPIFNOT",
         "NEXT",
         "RETURNNIL",
+        "CLASSFIELD_R",
+        "CLASSFIELDDEF_R",
     };
 
     /* Indexed by OpCode: opcode_name() reads it as s_opnames[(int)op], so an
@@ -142,7 +144,7 @@ namespace zen
     ** and the disassembler silently prints the wrong one — which is exactly
     ** what the comment above describes happening. This makes it a build
     ** error instead. */
-    static_assert(sizeof(s_opnames) / sizeof(s_opnames[0]) == (size_t)OP_RETURNNIL + 1,
+    static_assert(sizeof(s_opnames) / sizeof(s_opnames[0]) == (size_t)OP_CLASSFIELDDEF_R + 1,
                   "s_opnames is out of sync with the OpCode enum");
 
 
@@ -797,6 +799,16 @@ namespace zen
         case OP_CLASSFIELDDEF:
         {
             printf("R[%d].field_default[%d] = K[%d]", a, b, c);
+            break;
+        }
+        case OP_CLASSFIELD_R:
+        {
+            printf("R[%d].field[%d] = R[%d]", a, b, c);
+            break;
+        }
+        case OP_CLASSFIELDDEF_R:
+        {
+            printf("R[%d].field_default[%d] = R[%d]", a, b, c);
             break;
         }
         case OP_CLASSFLATTEN:

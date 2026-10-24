@@ -356,6 +356,8 @@ namespace zen
         /* Implicit return None */
         state_->emitter.emit_abc(OP_RETURNNIL, 0, 1, 0, previous_.line);
 
+        check_operands();
+
         ObjFunc *fn = state_->emitter.end(state_->max_reg);
         fn->is_generator = state_->is_generator;
         /* Negative arity = variadic: -(required_params + 1)
@@ -695,6 +697,8 @@ namespace zen
                     state_->emitter.emit_abc(OP_RETURNNIL, 0, 1, 0, previous_.line);
                 }
 
+                check_operands();
+
                 ObjFunc *fn = state_->emitter.end(state_->max_reg);
                 fn->is_generator = state_->is_generator;
                 fn->arity = is_vararg ? -(arity) : arity;
@@ -849,8 +853,17 @@ namespace zen
         {
             int name_ki = state_->emitter.add_string_constant(
                 class_field_table_[fi]->chars, class_field_table_[fi]->length);
-            if (name_ki <= 255 && fi <= 255)
+            if (fi > 255) continue;
+            if (name_ki <= 255)
                 state_->emitter.emit_abc(OP_CLASSFIELD, class_reg, fi, name_ki, previous_.line);
+            else
+            {
+                // A big script runs past constant 255: the name goes through a register.
+                const int tmp = alloc_reg();
+                state_->emitter.emit_abx(OP_LOADK, tmp, name_ki, previous_.line);
+                state_->emitter.emit_abc(OP_CLASSFIELD_R, class_reg, fi, tmp, previous_.line);
+                free_reg(tmp);
+            }
         }
 
         /* Then the values the class body gave them, after every name is
@@ -858,9 +871,18 @@ namespace zen
         for (int di = 0; di < class_field_default_count_; di++)
         {
             const ClassFieldDefault &def = class_field_defaults_[di];
-            if (def.const_index <= 255 && def.field_index <= 255)
+            if (def.field_index > 255) continue;
+            if (def.const_index <= 255)
                 state_->emitter.emit_abc(OP_CLASSFIELDDEF, class_reg, def.field_index,
                                          def.const_index, previous_.line);
+            else
+            {
+                const int tmp = alloc_reg();
+                state_->emitter.emit_abx(OP_LOADK, tmp, def.const_index, previous_.line);
+                state_->emitter.emit_abc(OP_CLASSFIELDDEF_R, class_reg, def.field_index, tmp,
+                                         previous_.line);
+                free_reg(tmp);
+            }
         }
         class_field_default_count_ = prev_field_default_count;
 

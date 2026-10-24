@@ -234,6 +234,9 @@ namespace zen
 
         /* --- Error handling --- */
         void error(const char *msg);
+        /* Errors out when the function just compiled needed an operand the
+        ** 8-bit ABC fields cannot hold (more than 256 constants or registers). */
+        void check_operands();
         void error_at_current(const char *msg);
         void error_at(const Token &token, const char *msg);
 

@@ -26,6 +26,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <utility>
+#include <string>
 #include <vector>
 
 using namespace zen;
@@ -2531,6 +2532,43 @@ static void test_native_properties()
     }
 }
 
+/* =========================================================
+** A function's source name lives as long as the function: a runtime error
+** after collections still names the script in its trace (the collector did
+** not mark ObjFunc::source, and the trace read a freed string).
+** ========================================================= */
+static void capture_err(const char *str, int len, void *userdata)
+{
+    static_cast<std::string *>(userdata)->append(str, (size_t)len);
+}
+
+static void test_trace_source_survives_gc()
+{
+    printf("\n--- runtime error trace after collections ---\n");
+
+    VM vm;
+    vm.open_lib_globals(&zen_lib_base);
+    std::string err;
+    ZenCallbacks cb = vm.callbacks();
+    cb.print_err = capture_err;
+    cb.userdata = &err;
+    vm.set_callbacks(cb);
+
+    run_source(vm, R"(
+def boom():
+    x = None
+    return x.missing
+)", "traced_module_name.py");
+    vm.collect();
+    run_source(vm, kRefGarbageLoop);
+    vm.collect();
+
+    vm.call_global("boom", nullptr, 0);
+    TEST("the trace still names the function's script");
+    CHECK(vm.had_error() && err.find("File \"traced_module_name.py\"") != std::string::npos,
+          "expected the script name in the trace");
+}
+
 int main()
 {
     printf("=== Zen Embedding Tests (C++ <-> Script) ===\n");
@@ -2561,6 +2599,7 @@ int main()
     test_host_refs_and_bound_methods();
     test_gc_tuning();
     test_native_properties();
+    test_trace_source_survives_gc();
 
     printf("\n========================================\n");
     printf("Results: %d passed, %d failed\n", g_tests_passed, g_tests_failed);

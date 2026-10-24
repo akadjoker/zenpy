@@ -1515,6 +1515,7 @@ namespace zen
         {
             ObjFunc *fn = (ObjFunc *)obj;
             gc_mark_obj(gc, (Obj *)fn->name);
+            gc_mark_obj(gc, (Obj *)fn->source);
             for (int i = 0; i < fn->const_count; i++)
                 gc_mark_value(gc, fn->constants[i]);
             for (int i = 0; i < fn->default_count; i++)

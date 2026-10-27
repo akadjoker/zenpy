@@ -1514,6 +1514,84 @@ static void test_bytecode_roundtrip_fresh_vm()
 }
 
 /* =========================================================
+** TEST 17b: bytecode with more than 256 selectors
+**
+** An engine that binds a few hundred native methods interns that many
+** selectors before any script is compiled, and the dump writes the whole
+** table. The loader used to refuse any table above 256 entries, so no
+** bytecode produced by such a host could ever be loaded back.
+** ========================================================= */
+static void intern_host_selectors(VM &vm, int count)
+{
+    char name[32];
+    for (int i = 0; i < count; i++)
+    {
+        int len = snprintf(name, sizeof(name), "host_method_%d", i);
+        vm.intern_selector(name, len);
+    }
+}
+
+static void test_bytecode_many_selectors()
+{
+    printf("\n[Test 17b] bytecode round trip with more than 256 selectors\n");
+
+    const char *path = "test_embedding_selectors.zbc";
+    const char *source =
+        "class Counter:\n"
+        "    def __init__(self):\n"
+        "        self.v = 1\n"
+        "    def bump(self, d):\n"
+        "        self.v += d\n"
+        "        return self.v\n"
+        "c = Counter()\n"
+        "u = c.bump(2)\n";
+    const int host_selectors = 300;
+
+    char err[256] = {0};
+    bool dumped = false;
+    {
+        VM vm;
+        register_roundtrip_libs(vm);
+        intern_host_selectors(vm, host_selectors);
+        Compiler compiler;
+        ObjFunc *fn = compiler.compile(&vm.get_gc(), &vm, source, "<dump>");
+        dumped = fn && dump_bytecode_file(&vm, fn, path, false, err, sizeof(err));
+    }
+    TEST("compile + dump with a large selector table");
+    CHECK(dumped, err[0] ? err : "dump failed");
+    if (!dumped)
+        return;
+
+    std::vector<uint8_t> bytes;
+    if (FILE *f = fopen(path, "rb"))
+    {
+        uint8_t buf[4096];
+        size_t got;
+        while ((got = fread(buf, 1, sizeof(buf), f)) > 0)
+            bytes.insert(bytes.end(), buf, buf + got);
+        fclose(f);
+    }
+    remove(path);
+
+    VM vm;
+    register_roundtrip_libs(vm);
+    intern_host_selectors(vm, host_selectors);
+    TEST("host interned more than 256 selectors");
+    CHECK(vm.num_selectors() > 256, "test setup: selector table too small");
+    err[0] = '\0';
+    ObjFunc *fn = load_bytecode_buffer(&vm, bytes.data(), bytes.size(), err, sizeof(err));
+    TEST("load with more than 256 selectors");
+    CHECK(fn != nullptr, err[0] ? err : "load failed");
+    if (!fn)
+        return;
+
+    vm.run(fn);
+    Value u = vm.get_global("u");
+    TEST("user class method c.bump(2) == 3 after load");
+    CHECK(!vm.had_error() && is_int(u) && u.as.integer == 3, "expected 3");
+}
+
+/* =========================================================
 ** TEST 18: subscripts beyond 32 bits are out of range, not wrapped
 **
 ** (int32_t)key.as.integer turned xs[4294967296] into xs[0] and
@@ -2591,6 +2669,7 @@ int main()
     test_native_class_inference();
     test_failing_native_ctor();
     test_bytecode_roundtrip_fresh_vm();
+    test_bytecode_many_selectors();
     test_index_beyond_32_bits();
     test_native_keyword_arguments();
     test_method_flags_and_gc();

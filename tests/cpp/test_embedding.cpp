@@ -1181,6 +1181,32 @@ t2 = c2.get_component<Transform>()
     Value t2v = vm.get_global("t2");
     CHECK(!vm.had_error() && is_instance(t2v), "expected plain native method + generic method to coexist");
 
+    /* An engine script reaches its components through a field the host set
+    ** (`self.node`), which no annotation types. The glued `<T>(` form on a
+    ** receiver with no static class is still a generic call when a native
+    ** class registered that name as a generic method. */
+    TEST("get_component<T>() on a receiver with no static class (host-set field)");
+    run_source(vm, R"(
+class Holder:
+    def __init__(self, c):
+        self.c = c
+h = Holder(c2)
+t3 = h.c.get_component<Transform>()
+)");
+    Value t3v = vm.get_global("t3");
+    CHECK(!vm.had_error() && is_instance(t3v), "expected the generic call to resolve without a type annotation");
+
+    TEST("`a.x<b>(c)` stays two comparisons when no native class has a generic `x`");
+    run_source(vm, R"(
+class Pair:
+    def __init__(self):
+        self.width = 1
+p = Pair()
+cmp = p.width<2>(0)
+)");
+    Value cmpv = vm.get_global("cmp");
+    CHECK(!vm.had_error() && is_bool(cmpv), "expected a comparison result, not a generic call");
+
     /* Regression: a GenericNativeFn returning -1 (the established
     ** error-signal convention) must raise a runtime error, not be silently
     ** swallowed into a nil result — see OP_INVOKE_GENERIC's native branch. */

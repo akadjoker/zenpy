@@ -436,6 +436,10 @@ namespace zen
         ** requires for a native class to be usable from script at all. */
         bool native_generic_method_arity(const char *cls_name, int32_t cls_len,
                                           const Token &method, int &out_arity) const;
+        /* `x.m<T>(...)` with no static class for `x`: true when some native
+        ** class registered `m` as a generic method, so the glued `<T>(` form
+        ** is a generic call and not two comparisons. */
+        bool native_generic_method_any(const Token &method, int &out_arity) const;
         int sig_param_index(const FuncSig *sig, const Token &name) const;
         void emit_sig_default(const SigParam &p, int reg);
         bool next_is_keyword_arg();

@@ -2107,6 +2107,32 @@ namespace zen
         return false;
     }
 
+    bool Compiler::native_generic_method_any(const Token &method, int &out_arity) const
+    {
+        int slot = vm_->find_selector(method.start, method.length);
+        if (slot < 0)
+            return false;
+        const int count = vm_->num_globals();
+        for (int g = 0; g < count; g++)
+        {
+            Value cls_val = vm_->get_global(g);
+            if (!is_class(cls_val))
+                continue;
+            ObjClass *klass = as_class(cls_val);
+            if (slot >= klass->vtable_size)
+                continue;
+            Value mval = klass->vtable[slot];
+            if (!is_native(mval))
+                continue;
+            ObjNative *nat = as_native(mval);
+            if (nat->generic_arity <= 0)
+                continue;
+            out_arity = nat->generic_arity;
+            return true;
+        }
+        return false;
+    }
+
     /* Look up `name` on `owner`, then on what `owner` inherits from. */
     static const int kMaxSigInherit = 8;
 

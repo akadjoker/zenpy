@@ -1776,6 +1776,8 @@ namespace zen
             if (receiver_has_static_class)
                 is_native_generic = native_generic_method_arity(receiver_class_name, receiver_class_len,
                                                                   field, native_generic_arity);
+            else
+                is_native_generic = native_generic_method_any(field, native_generic_arity);
         }
         bool method_is_generic = method_sig || is_native_generic;
 

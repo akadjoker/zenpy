@@ -734,6 +734,13 @@ namespace zen
         return reg;
     }
 
+    void Compiler::start_local(int local)
+    {
+        const int record = state_->locals[local].record;
+        if (record >= 0)
+            state_->locvar_records[record].start_pc = state_->emitter.current_offset();
+    }
+
     /* =========================================================
     ** Class field table — compile-time O(1) field index lookup
     ** ========================================================= */

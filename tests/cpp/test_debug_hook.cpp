@@ -102,11 +102,67 @@ static void test_debug_hook()
     CHECK(run_source(plain, source, "debug.zen") && quiet.lines.empty(), "ran with a hook");
 }
 
+/* =========================================================
+** A local is in scope once its value is in, not from the start of
+** its line: before that its register holds a temporary
+** ========================================================= */
+struct ScopeRecord
+{
+    std::vector<std::string> seen; /* "line:frame:name" */
+};
+
+static void scope_hook(VM *vm, void *user)
+{
+    ScopeRecord *record = (ScopeRecord *)user;
+    const int line = vm->debug_frame_line(0);
+    for (int depth = 0; depth < vm->debug_frame_count(); depth++)
+        for (int i = 0; i < vm->debug_local_count(depth); i++)
+            record->seen.push_back(std::to_string(line) + ":" + std::to_string(depth) + ":" +
+                                   vm->debug_local_name(depth, i));
+}
+
+static bool seen(const ScopeRecord &record, const char *entry)
+{
+    for (const std::string &s : record.seen)
+        if (s == entry)
+            return true;
+    return false;
+}
+
+static void test_local_scope()
+{
+    printf("\n--- Locals in scope after their assignment ---\n");
+    const char *source = "def twice(x):\n"          /* 1 */
+                         "    return x * 2\n"       /* 2 */
+                         "def run():\n"             /* 3 */
+                         "    a = 1\n"              /* 4 */
+                         "    b = twice(a)\n"       /* 5 */
+                         "    const c = a + b\n"    /* 6 */
+                         "    d: int = c\n"         /* 7 */
+                         "    return d\n"           /* 8 */
+                         "run()\n";                 /* 9 */
+    VM vm;
+    ScopeRecord record;
+    vm.set_debug_hook(&scope_hook, &record);
+    const bool ran = run_source(vm, source, "scope.zen");
+    vm.set_debug_hook(nullptr, nullptr);
+
+    TEST("no local before its first assignment");
+    CHECK(ran && !seen(record, "4:0:a") && seen(record, "5:0:a"), "a seen on its own line");
+
+    TEST("caller's local hidden while it calls");
+    CHECK(seen(record, "2:1:a") && !seen(record, "2:1:b") && seen(record, "6:0:b"), "b seen inside twice()");
+
+    TEST("const and annotated locals the same");
+    CHECK(!seen(record, "6:0:c") && seen(record, "7:0:c") && !seen(record, "7:0:d") && seen(record, "8:0:d"),
+          "c or d seen before they hold a value");
+}
 
 int main()
 {
     printf("=== Zen Debug Hook Tests ===\n");
     test_debug_hook();
+    test_local_scope();
     printf("\nResults: %d passed, %d failed\n", g_tests_passed, g_tests_failed);
     return g_tests_failed == 0 ? 0 : 1;
 }

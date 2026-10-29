@@ -1039,9 +1039,11 @@ namespace zen
         {
             /* Local const */
             int reg = add_local(name_tok);
-            state_->locals[state_->local_count - 1].is_const = true;
+            const int local = state_->local_count - 1;
+            state_->locals[local].is_const = true;
             int val = expression(reg);
             if (val != reg) emit_move(reg, val);
+            start_local(local);
         }
         else
         {
@@ -1365,13 +1367,15 @@ namespace zen
                             ** x as `x = expr`, not write a global every time
                             ** through a hot loop. */
                             int local_reg = add_local(name_tok);
-                            state_->locals[state_->local_count - 1].depth = 1;
+                            const int local = state_->local_count - 1;
+                            state_->locals[local].depth = 1;
                             if (has_simple_type)
                                 set_local_type_hint(local_reg, type_tok);
                             else if (has_array_element_type)
                                 set_local_array_element_type(local_reg, array_element_tok);
                             int val = expression(local_reg);
                             if (val != local_reg) emit_move(local_reg, val);
+                            start_local(local);
                         }
                         else
                         {
@@ -1466,10 +1470,12 @@ namespace zen
                         ** Python has no block scoping — locals created inside if/while/for
                         ** survive after the block ends. */
                         int local_reg = add_local(name_tok);
+                        const int local = state_->local_count - 1;
                         /* Override depth to function level so end_scope doesn't destroy it */
-                        state_->locals[state_->local_count - 1].depth = 1;
+                        state_->locals[local].depth = 1;
                         int val = expression(local_reg);
                         if (val != local_reg) emit_move(local_reg, val);
+                        start_local(local);
                         infer_assigned_class_local(local_reg);
                     }
                     return;

@@ -474,6 +474,8 @@ namespace zen
         /* --- Variable declaration/assignment --- */
         int declare_local(const Token &name);
         int add_local(const Token &name);
+        /* A debugger sees the local from here on, once its value is in. */
+        void start_local(int local);
         /* The function's named locals, from the records, into fn. */
         void store_locvars(ObjFunc *fn);
         int named_variable(const Token &name, int dest, bool can_assign);

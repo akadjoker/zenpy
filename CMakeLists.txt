@@ -33,6 +33,8 @@ if(ZEN_SANITIZE AND CMAKE_BUILD_TYPE STREQUAL "Debug"
 endif()
 
 # --- libzen (the VM) ---
+# The repository's own build also makes zen_debug, for test_debug_hook.
+set(ZEN_BUILD_DEBUG_LIBRARY ON CACHE BOOL "Also build zen_debug, libzen with the debug hook")
 add_subdirectory(libzen)
 
 # --- CLI (zen executable — VM only, no modules) ---

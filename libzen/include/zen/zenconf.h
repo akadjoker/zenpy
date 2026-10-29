@@ -12,6 +12,13 @@
 #include <cstdio>
 #include <cstddef>
 
+/* --- Debug hook ---
+** 1 only in zen_debug (see libzen/CMakeLists.txt): the dispatch then calls
+** VM::set_debug_hook's hook. 0 everywhere else, the dispatch unchanged. */
+#ifndef ZEN_DEBUG_HOOK
+  #define ZEN_DEBUG_HOOK 0
+#endif
+
 /* --- Embedder hook ---
 ** With -DZEN_HOST_OUTPUT the host owns every zen_write*; the guards below then
 ** find them already defined and leave the platform defaults alone. */

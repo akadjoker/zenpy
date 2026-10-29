@@ -1149,8 +1149,10 @@ namespace zen
         zen_prof_tick(ZEN_OP(*ip));    \
         goto *dispatch_table[ZEN_OP(*ip)]; \
     } while (0)
-#else
+#elif ZEN_DEBUG_HOOK
 #define DISPATCH() goto *table[ZEN_OP(*ip)]
+#else
+#define DISPATCH() goto *dispatch_table[ZEN_OP(*ip)]
 #endif
 #define CASE(op) lbl_##op:
 #define NEXT()      \
@@ -1160,9 +1162,10 @@ namespace zen
         DISPATCH(); \
     } while (0)
 
+#if ZEN_DEBUG_HOOK
         /* While a debug hook is set every entry of the table in use goes
-        ** through lbl_debug_hook first; without one the table is the plain
-        ** one and nothing is added to the dispatch. */
+        ** through lbl_debug_hook first. Only a build with ZEN_DEBUG_HOOK has
+        ** this; any other dispatches exactly as without a debugger. */
         static const void *debug_table[sizeof(dispatch_table) / sizeof(dispatch_table[0])];
         if (!debug_table[0])
             for (size_t d = 0; d < sizeof(debug_table) / sizeof(debug_table[0]); ++d)
@@ -1177,6 +1180,9 @@ namespace zen
         LOAD_STATE();
         table = debug_hook_ ? debug_table : dispatch_table;
         goto *dispatch_table[ZEN_OP(*ip)];
+#else
+        DISPATCH();
+#endif
 
 #else
 
@@ -1197,12 +1203,14 @@ namespace zen
         for (;;)
         {
         zen_dispatch_top:
+#if ZEN_DEBUG_HOOK
             if (debug_hook_)
             {
                 SAVE_IP();
                 debug_step(fiber);
                 LOAD_STATE();
             }
+#endif
 
 #define SWITCH_TOP       \
     switch (ZEN_OP(*ip)) \

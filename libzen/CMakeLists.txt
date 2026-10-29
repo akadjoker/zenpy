@@ -66,6 +66,30 @@ if(ZEN_BUILD_FUZZ)
     target_compile_definitions(zen_static PRIVATE ZEN_DEBUG_STRESS_GC)
 endif()
 
+# --- libzen with the debug hook ---
+# VM::set_debug_hook only works where the dispatch carries the hook, and only
+# zen_debug does: zen_static dispatches exactly as with no debugger, so the
+# programs that ship never pay for one. A host builds this second library for
+# its debugger alone (-DZEN_BUILD_DEBUG_LIBRARY=ON).
+option(ZEN_BUILD_DEBUG_LIBRARY "Also build zen_debug, libzen with the debug hook" OFF)
+if(ZEN_BUILD_DEBUG_LIBRARY)
+    add_library(zen_debug STATIC ${CORE_SRCS})
+    target_include_directories(zen_debug PUBLIC include include/zen PRIVATE src third_party ${ZEN_VENDOR_INCLUDES})
+    target_link_libraries(zen_debug PUBLIC ${ZEN_VENDOR_LIBS} ${CMAKE_DL_LIBS})
+    if(WIN32)
+        target_link_libraries(zen_debug PUBLIC ws2_32)
+    endif()
+    if(ANDROID)
+        target_link_libraries(zen_debug PUBLIC log)
+    endif()
+    target_compile_definitions(zen_debug PUBLIC ${ZEN_DEFINITIONS} ZEN_DEBUG_HOOK=1)
+    if(NOT MSVC)
+        target_compile_options(zen_debug PRIVATE $<$<CONFIG:Release>:-O3>)
+    endif()
+    target_compile_definitions(zen_debug PRIVATE $<$<CONFIG:Release>:NDEBUG>)
+    set_target_properties(zen_debug PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
+
 # --- libzen (shared library) ---
 # add_library(zen_shared SHARED ${CORE_SRCS})
 # target_include_directories(zen_shared PUBLIC include include/zen PRIVATE src ${ZEN_VENDOR_INCLUDES})

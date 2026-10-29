@@ -186,6 +186,27 @@ if have_embed; then
     fi
 fi
 
+# --- Debug hook (zen_debug) ---
+DEBUGHOOK="${DEBUGHOOK:-$ROOT/bin/test_debug_hook}"
+if [[ -n "$ZEN_RUNNER" ]]; then have_debughook() { [[ -f "$DEBUGHOOK" ]]; }
+else have_debughook() { [[ -x "$DEBUGHOOK" ]]; }; fi
+if have_debughook; then
+    printf "  %-40s" "test_debug_hook (C++)"
+    if [[ -n "$ZEN_RUNNER" ]]; then output=$("$ZEN_RUNNER" "$DEBUGHOOK" 2>&1) && ret=0 || ret=$?
+    else output=$("$DEBUGHOOK" 2>&1) && ret=0 || ret=$?; fi
+    if [[ $ret -eq 0 ]]; then
+        echo -e "${GREEN}OK${NC}"
+        passed=$((passed + 1))
+    else
+        echo -e "${RED}FAIL${NC} (exit $ret)"
+        failed=$((failed + 1))
+        failures+=("test_debug_hook")
+        if [[ "$VERBOSE" == "1" ]]; then
+            echo "$output" | tail -20 | sed 's/^/    /'
+        fi
+    fi
+fi
+
 # --- Load-time script introspection ---
 INFO="${INFO:-$ROOT/bin/test_script_info}"
 if [[ -n "$ZEN_RUNNER" ]]; then have_info() { [[ -f "$INFO" ]]; }

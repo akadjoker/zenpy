@@ -285,9 +285,12 @@ namespace zen
         ** the frames meanwhile. The hook is not called again while it runs.
         ** Without one the dispatch is as it always was. Frame 0 is the
         ** innermost; a local is one of the frame's named ones in scope at its
-        ** instruction. */
+        ** instruction.
+        ** The dispatch only has the hook in a build with ZEN_DEBUG_HOOK=1; in
+        ** any other set_debug_hook returns false and the VM runs exactly as it
+        ** would with no debugger. */
         typedef void (*DebugHook)(VM *vm, void *user);
-        void set_debug_hook(DebugHook hook, void *user);
+        bool set_debug_hook(DebugHook hook, void *user);
         bool debugging() const { return debug_hook_ != nullptr; }
         int debug_frame_count() const;
         ObjFunc *debug_frame_function(int depth) const;

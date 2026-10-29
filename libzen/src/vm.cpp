@@ -1396,13 +1396,18 @@ namespace zen
     ** Strings
     ** ========================================================= */
 
-    void VM::set_debug_hook(DebugHook hook, void *user)
+    bool VM::set_debug_hook(DebugHook hook, void *user)
     {
+#if !ZEN_DEBUG_HOOK
+        if (hook)
+            return false;
+#endif
         debug_hook_ = hook;
         debug_user_ = user;
         debug_func_ = nullptr;
         debug_line_ = -1;
         debug_depth_ = -1;
+        return true;
     }
 
     void VM::debug_step(ObjFiber *fiber)

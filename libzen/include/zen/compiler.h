@@ -66,9 +66,19 @@ namespace zen
     ** Local variable (compile-time only, not stored at runtime)
     ** ========================================================= */
 
+    /* A local as debuggers see it, gathered while its function compiles. */
+    struct LocVarRecord
+    {
+        Token name;
+        int reg;
+        int start_pc;
+        int end_pc; /* -1 while still in scope */
+    };
+
     struct Local
     {
         Token name;
+        int record = -1; /* its LocVarRecord */
         int depth;      /* scope depth (0 = function body) */
         int reg;        /* which register holds this local */
         bool captured;  /* true if captured by a closure */
@@ -178,6 +188,9 @@ namespace zen
         Local locals[kMaxLocals];
         int local_count;
         int scope_depth;
+        LocVarRecord *locvar_records = nullptr;
+        int locvar_record_count = 0;
+        int locvar_record_capacity = 0;
 
         /* Registers */
         int next_reg;               /* next free register */
@@ -452,6 +465,8 @@ namespace zen
         /* --- Variable declaration/assignment --- */
         int declare_local(const Token &name);
         int add_local(const Token &name);
+        /* The function's named locals, from the records, into fn. */
+        void store_locvars(ObjFunc *fn);
         int named_variable(const Token &name, int dest, bool can_assign);
 
         /* --- Scope management --- */

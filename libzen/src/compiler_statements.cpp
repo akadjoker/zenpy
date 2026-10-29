@@ -393,6 +393,7 @@ namespace zen
             }
         }
 
+        store_locvars(fn);
         /* Restore enclosing state */
         state_ = enclosing;
 
@@ -730,6 +731,7 @@ namespace zen
                     }
                 }
 
+                store_locvars(fn);
                 state_ = enclosing;
 
                 /* Store method on class: emit closure, then set on class */

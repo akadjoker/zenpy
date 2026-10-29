@@ -140,6 +140,16 @@ namespace zen
         uint8_t is_local; /* 1 = from parent's locals, 0 = from parent's upvalues */
     };
 
+    /* A named local for debuggers: the register it lives in while the
+    ** instructions [start_pc, end_pc) run. */
+    struct LocVar
+    {
+        ObjString *name;
+        int32_t reg;
+        int32_t start_pc;
+        int32_t end_pc;
+    };
+
     struct ObjFunc
     {
         Obj obj;
@@ -159,6 +169,8 @@ namespace zen
         Value *constants;       /* pool de constantes (ints, floats, strings) */
         Value *defaults;        /* default values para os últimos default_count params */
         UpvalDesc *upval_descs; /* upvalue descriptors (NULL se 0) */
+        LocVar *locvars;        /* named locals (debug), NULL se 0 */
+        int32_t locvar_count;
         ObjString *name;        /* nome da função (debug) */
         ObjString *source;      /* ficheiro fonte (debug) */
         ObjClass *return_class; /* return type hint (class), NULL if unknown */

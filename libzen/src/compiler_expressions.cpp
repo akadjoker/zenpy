@@ -2935,6 +2935,7 @@ namespace zen
             }
         }
 
+        store_locvars(fn);
         state_ = enclosing;
 
         int ki = state_->emitter.add_constant(val_obj((Obj *)fn));

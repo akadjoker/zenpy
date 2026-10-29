@@ -1396,6 +1396,101 @@ namespace zen
     ** Strings
     ** ========================================================= */
 
+    void VM::set_debug_hook(DebugHook hook, void *user)
+    {
+        debug_hook_ = hook;
+        debug_user_ = user;
+        debug_func_ = nullptr;
+        debug_line_ = -1;
+        debug_depth_ = -1;
+    }
+
+    void VM::debug_step(ObjFiber *fiber)
+    {
+        if (!debug_hook_ || in_debug_hook_ || !fiber || fiber->frame_count <= 0)
+            return;
+        const CallFrame &frame = fiber->frames[fiber->frame_count - 1];
+        ObjFunc *fn = frame.func;
+        if (!fn || !fn->lines || frame.ip < fn->code || frame.ip >= fn->code + fn->code_count)
+            return;
+        const int line = fn->lines[frame.ip - fn->code];
+        if (line == debug_line_ && fn == debug_func_ && fiber->frame_count == debug_depth_)
+            return;
+        debug_line_ = line;
+        debug_func_ = fn;
+        debug_depth_ = fiber->frame_count;
+        in_debug_hook_ = true;
+        debug_hook_(this, debug_user_);
+        in_debug_hook_ = false;
+    }
+
+    const CallFrame *VM::debug_frame(int depth) const
+    {
+        const ObjFiber *fiber = current_fiber_;
+        if (!fiber || depth < 0 || depth >= fiber->frame_count)
+            return nullptr;
+        return &fiber->frames[fiber->frame_count - 1 - depth];
+    }
+
+    int VM::debug_frame_count() const
+    {
+        return current_fiber_ ? current_fiber_->frame_count : 0;
+    }
+
+    ObjFunc *VM::debug_frame_function(int depth) const
+    {
+        const CallFrame *frame = debug_frame(depth);
+        return frame ? frame->func : nullptr;
+    }
+
+    int VM::debug_frame_line(int depth) const
+    {
+        const CallFrame *frame = debug_frame(depth);
+        const ObjFunc *fn = frame ? frame->func : nullptr;
+        if (!fn || !fn->lines || fn->code_count <= 0)
+            return 0;
+        long pc = frame->ip - fn->code;
+        pc = pc < 0 ? 0 : (pc >= fn->code_count ? fn->code_count - 1 : pc);
+        return fn->lines[pc];
+    }
+
+    const LocVar *VM::debug_local(int depth, int index) const
+    {
+        const CallFrame *frame = debug_frame(depth);
+        const ObjFunc *fn = frame ? frame->func : nullptr;
+        if (!fn || index < 0)
+            return nullptr;
+        const long pc = frame->ip - fn->code;
+        for (int i = 0; i < fn->locvar_count; i++)
+        {
+            const LocVar &var = fn->locvars[i];
+            if (pc >= var.start_pc && pc < var.end_pc && index-- == 0)
+                return &var;
+        }
+        return nullptr;
+    }
+
+    int VM::debug_local_count(int depth) const
+    {
+        int count = 0;
+        while (debug_local(depth, count))
+            ++count;
+        return count;
+    }
+
+    const char *VM::debug_local_name(int depth, int index) const
+    {
+        const LocVar *var = debug_local(depth, index);
+        return var && var->name ? var->name->chars : "";
+    }
+
+    Value VM::debug_local_value(int depth, int index) const
+    {
+        const LocVar *var = debug_local(depth, index);
+        const CallFrame *frame = debug_frame(depth);
+        return var && frame ? frame->base[var->reg] : val_nil();
+    }
+
     ObjString *VM::make_string(const char *str, int length)
     {
         if (length < 0)

@@ -404,6 +404,8 @@ namespace zen
         fn->constants = nullptr;
         fn->defaults = nullptr;
         fn->upval_descs = nullptr;
+        fn->locvars = nullptr;
+        fn->locvar_count = 0;
         fn->name = nullptr;
         fn->source = nullptr;
         fn->return_class = nullptr;
@@ -1520,6 +1522,8 @@ namespace zen
                 gc_mark_value(gc, fn->constants[i]);
             for (int i = 0; i < fn->default_count; i++)
                 gc_mark_value(gc, fn->defaults[i]);
+            for (int i = 0; i < fn->locvar_count; i++)
+                gc_mark_obj(gc, (Obj *)fn->locvars[i].name);
             break;
         }
 
@@ -1810,6 +1814,8 @@ namespace zen
                 zen_free(gc, fn->upval_descs, sizeof(UpvalDesc) * fn->upvalue_count);
             if (fn->defaults)
                 zen_free(gc, fn->defaults, sizeof(Value) * fn->default_count);
+            if (fn->locvars)
+                zen_free(gc, fn->locvars, sizeof(LocVar) * fn->locvar_count);
             break;
         }
         case OBJ_NATIVE:

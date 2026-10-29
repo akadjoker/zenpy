@@ -278,6 +278,24 @@ namespace zen
         GC &get_gc() { return gc_; }
         ObjFiber *current_fiber() const { return current_fiber_; }
 
+        /* --- Debugging ---
+        ** With a hook set, the VM calls it before an instruction whose source
+        ** line, function or call depth differs from the last one it reported:
+        ** once a line, so a host can stop at a breakpoint or a step and read
+        ** the frames meanwhile. The hook is not called again while it runs.
+        ** Without one the dispatch is as it always was. Frame 0 is the
+        ** innermost; a local is one of the frame's named ones in scope at its
+        ** instruction. */
+        typedef void (*DebugHook)(VM *vm, void *user);
+        void set_debug_hook(DebugHook hook, void *user);
+        bool debugging() const { return debug_hook_ != nullptr; }
+        int debug_frame_count() const;
+        ObjFunc *debug_frame_function(int depth) const;
+        int debug_frame_line(int depth) const;
+        int debug_local_count(int depth) const;
+        const char *debug_local_name(int depth, int index) const;
+        Value debug_local_value(int depth, int index) const;
+
         /* --- GC root for natives (Lua-style) ---
         ** Copies v into the slot at the current fiber's stack_top and bumps
         ** it. The GC marks the fiber stack up to stack_top, so the value
@@ -393,6 +411,16 @@ namespace zen
         int run_depth_;           /* nested VM::run() depth — see run_nested */
         int external_call_stop_depth_; /* return to C++ when nested script call unwinds here */
         bool had_error_;          /* runtime error occurred */
+
+        DebugHook debug_hook_ = nullptr;
+        void *debug_user_ = nullptr;
+        bool in_debug_hook_ = false;
+        ObjFunc *debug_func_ = nullptr;
+        int debug_line_ = -1;
+        int debug_depth_ = -1;
+        void debug_step(ObjFiber *fiber);
+        const CallFrame *debug_frame(int depth) const;
+        const LocVar *debug_local(int depth, int index) const;
 
         /* Search paths for include/import */
         static const int MAX_SEARCH_PATHS = 16;

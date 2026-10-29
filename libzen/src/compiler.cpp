@@ -103,6 +103,7 @@ namespace zen
 
         ObjFunc *script = state_->emitter.end(state_->max_reg);
         script->arity = 0;
+        store_locvars(script);
 
         free_signatures();
         gc_resume(gc_);
@@ -197,6 +198,7 @@ namespace zen
 
         ObjFunc *script = state_->emitter.end(state_->max_reg);
         script->arity = 0;
+        store_locvars(script);
 
         free_signatures();
         gc_resume(gc_);
@@ -627,6 +629,8 @@ namespace zen
             {
                 state_->emitter.emit_abc(OP_CLOSE, local.reg, 0, 0, previous_.line);
             }
+            if (local.record >= 0)
+                state_->locvar_records[local.record].end_pc = state_->emitter.current_offset();
             state_->local_count--;
             /* Free the register */
             if (local.reg == state_->next_reg - 1)
@@ -668,6 +672,32 @@ namespace zen
         return add_local(name);
     }
 
+    void Compiler::store_locvars(ObjFunc *fn)
+    {
+        const int count = state_->locvar_record_count;
+        if (count > 0)
+        {
+            fn->locvars = (LocVar *)zen_alloc(gc_, sizeof(LocVar) * count);
+            for (int i = 0; i < count; i++)
+                fn->locvars[i].name = nullptr;
+            fn->locvar_count = count;
+            for (int i = 0; i < count; i++)
+            {
+                const LocVarRecord &record = state_->locvar_records[i];
+                LocVar &var = fn->locvars[i];
+                var.reg = record.reg;
+                var.start_pc = record.start_pc < fn->code_count ? record.start_pc : fn->code_count;
+                var.end_pc = record.end_pc < 0 || record.end_pc > fn->code_count ? fn->code_count : record.end_pc;
+                var.name = token_string(record.name);
+            }
+        }
+        if (state_->locvar_records)
+            zen_free(gc_, state_->locvar_records, sizeof(LocVarRecord) * state_->locvar_record_capacity);
+        state_->locvar_records = nullptr;
+        state_->locvar_record_count = 0;
+        state_->locvar_record_capacity = 0;
+    }
+
     int Compiler::add_local(const Token &name)
     {
         if (state_->local_count >= kMaxLocals)
@@ -677,6 +707,17 @@ namespace zen
         }
         int reg = alloc_reg();
         Local &local = state_->locals[state_->local_count++];
+        if (state_->locvar_record_count == state_->locvar_record_capacity)
+        {
+            const int capacity = state_->locvar_record_capacity ? state_->locvar_record_capacity * 2 : 16;
+            state_->locvar_records = (LocVarRecord *)zen_realloc(gc_, state_->locvar_records,
+                                                                 sizeof(LocVarRecord) * state_->locvar_record_capacity,
+                                                                 sizeof(LocVarRecord) * capacity);
+            state_->locvar_record_capacity = capacity;
+        }
+        local.record = state_->locvar_record_count;
+        state_->locvar_records[state_->locvar_record_count++] =
+            LocVarRecord{name, reg, state_->emitter.current_offset(), -1};
         local.name = name;
         local.depth = state_->scope_depth;
         local.reg = reg;

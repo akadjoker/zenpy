@@ -225,6 +225,15 @@ namespace zen
     {
     public:
         ObjFunc *compile(GC *gc, VM *vm, const char *source, const char *filename);
+        /* Each file's top-level variables its own. A name assigned at module
+        ** level (in an if, a loop or not) or declared global in one of its
+        ** functions becomes the global "<filename>:<name>", so two scripts
+        ** with a `count` each keep their own; what the file does not assign
+        ** (builtins, the host's natives) and what it binds with def, class,
+        ** record, enum or import stays shared. Only compile() and the
+        ** instructions' global indices change: the VM and the bytecode format
+        ** are the same. Off by default. */
+        void set_private_globals(bool on) { private_globals_ = on; }
         ObjFunc *compile_eval(GC *gc, VM *vm, const char *source, const char *filename, bool silent = false);
         bool had_error() const { return had_error_; }
 
@@ -536,6 +545,13 @@ namespace zen
         bool abort_parse_;     /* stop parsing early after too many errors */
         static const int kMaxCompileErrors = 12;
         const char *current_file_;
+
+        bool private_globals_ = false;
+        static const int kMaxModuleNames = 512;
+        Token module_vars_[kMaxModuleNames];
+        int module_var_count_ = 0;
+        void scan_module_vars(const char *source);
+        bool is_module_var(const char *name, int len) const;
 
         /* Error capture buffer (POD) */
         char      err_buf_[kErrorBufSize];

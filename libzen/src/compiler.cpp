@@ -59,6 +59,9 @@ namespace zen
         sig_params_ = nullptr; sig_param_count_ = 0; sig_param_cap_ = 0;
         sig_classes_ = nullptr; sig_class_count_ = 0; sig_class_cap_ = 0;
         prescan_signatures(source, filename);
+        module_var_count_ = 0;
+        if (private_globals_ && filename)
+            scan_module_vars(source);
 
         lexer_.init(source, filename);
 
@@ -143,6 +146,7 @@ namespace zen
         sig_params_ = nullptr; sig_param_count_ = 0; sig_param_cap_ = 0;
         sig_classes_ = nullptr; sig_class_count_ = 0; sig_class_cap_ = 0;
         prescan_signatures(source, filename);
+        module_var_count_ = 0;
 
         lexer_.init(source, filename);
 
@@ -1216,12 +1220,255 @@ namespace zen
     ** Global slot management
     ** ========================================================= */
 
+    /* Which names this file's top level makes its own, read ahead with a
+    ** lexer of its own so a function above the assignment already knows. A
+    ** line is read whole; its scope is the stack of the blocks it is in (a
+    ** def's, a class's or a plain if/for/while's). */
+    void Compiler::scan_module_vars(const char *source)
+    {
+        module_var_count_ = 0;
+        Token defined[kMaxModuleNames];
+        int defined_count = 0;
+        Lexer lex;
+        lex.init(source, current_file_);
+
+        static const int kMaxDepth = 128;
+        static const int kMaxLine = 512;
+        unsigned char kinds[kMaxDepth]; /* 0 plain block, 1 def, 2 class */
+        int depth = 0, defs = 0, classes = 0;
+        unsigned char pending = 0;
+        Token line[kMaxLine];
+        int count = 0;
+        bool done = false;
+
+        auto add = [&](Token *list, int &n, const Token &t)
+        {
+            for (int i = 0; i < n; i++)
+                if (identifiers_equal(list[i], t))
+                    return;
+            if (n < kMaxModuleNames)
+                list[n++] = t;
+        };
+        auto is_assign = [](TokenType type)
+        {
+            return type == TOK_EQ || type == TOK_PLUS_EQ || type == TOK_MINUS_EQ || type == TOK_STAR_EQ ||
+                   type == TOK_SLASH_EQ || type == TOK_PERCENT_EQ || type == TOK_DSTAR_EQ ||
+                   type == TOK_DSLASH_EQ || type == TOK_AMP_EQ || type == TOK_PIPE_EQ ||
+                   type == TOK_CARET_EQ || type == TOK_LSHIFT_EQ || type == TOK_RSHIFT_EQ;
+        };
+        /* The names a target binds: plain names in a list or tuple, a name
+        ** with an annotation; a.b or a[i] bind none. */
+        auto bind_targets = [&](int from, int to)
+        {
+            if (from < to && line[from].type == TOK_CONST)
+                from++;
+            if (from + 1 < to && line[from].type == TOK_IDENTIFIER && line[from + 1].type == TOK_COLON)
+            {
+                add(module_vars_, module_var_count_, line[from]);
+                return;
+            }
+            for (int i = from; i < to; i++)
+            {
+                const TokenType type = line[i].type;
+                if (type != TOK_IDENTIFIER && type != TOK_COMMA && type != TOK_LPAREN && type != TOK_RPAREN &&
+                    type != TOK_LBRACKET && type != TOK_RBRACKET && type != TOK_STAR && type != TOK_UNDERSCORE)
+                    return;
+            }
+            for (int i = from; i < to; i++)
+                if (line[i].type == TOK_IDENTIFIER)
+                    add(module_vars_, module_var_count_, line[i]);
+        };
+        /* One simple statement at module level: every segment before an
+        ** assignment at bracket depth 0 is a target. */
+        auto simple_statement = [&](int from, int to)
+        {
+            if (from >= to)
+                return;
+            if (line[from].type == TOK_IMPORT)
+            {
+                int last = -1;
+                for (int i = from + 1; i < to; i++)
+                    if (line[i].type == TOK_IDENTIFIER)
+                        last = i;
+                if (last >= 0)
+                    add(defined, defined_count, line[last]);
+                return;
+            }
+            if (line[from].type == TOK_FROM)
+            {
+                bool names = false;
+                for (int i = from + 1; i < to; i++)
+                {
+                    if (line[i].type == TOK_IMPORT)
+                        names = true;
+                    else if (names && line[i].type == TOK_IDENTIFIER)
+                        add(defined, defined_count, line[i]);
+                }
+                return;
+            }
+            if (line[from].type == TOK_USING)
+                return;
+            int nesting = 0, segment = from;
+            for (int i = from; i < to; i++)
+            {
+                const TokenType type = line[i].type;
+                if (type == TOK_LPAREN || type == TOK_LBRACKET || type == TOK_LBRACE)
+                    nesting++;
+                else if (type == TOK_RPAREN || type == TOK_RBRACKET || type == TOK_RBRACE)
+                    nesting--;
+                else if (nesting == 0 && type == TOK_LAMBDA)
+                    break;
+                else if (nesting == 0 && is_assign(type))
+                {
+                    bind_targets(segment, i);
+                    segment = i + 1;
+                }
+            }
+        };
+        auto read_line = [&]()
+        {
+            if (count == 0)
+                return;
+            int at = 0;
+            if (line[at].type == TOK_ASYNC && count > 1)
+                at++;
+            const bool module_level = defs == 0 && classes == 0;
+            const TokenType head = line[at].type;
+            const bool ends_block = line[count - 1].type == TOK_COLON;
+            if (head == TOK_AT)
+                return;
+            if (head == TOK_DEF || head == TOK_CLASS || head == TOK_RECORD || head == TOK_ENUM)
+            {
+                if (module_level && at + 1 < count && line[at + 1].type == TOK_IDENTIFIER)
+                    add(defined, defined_count, line[at + 1]);
+                pending = ends_block ? (head == TOK_DEF ? 1 : 2) : 0;
+                return;
+            }
+            pending = 0;
+            if (!module_level)
+            {
+                /* A def's `global` names, also after a one-line header. */
+                if (defs > 0)
+                    for (int i = at; i < count; i++)
+                        if (line[i].type == TOK_GLOBAL)
+                            for (int j = i + 1; j < count && line[j].type != TOK_SEMICOLON; j++)
+                                if (line[j].type == TOK_IDENTIFIER)
+                                    add(module_vars_, module_var_count_, line[j]);
+                return;
+            }
+            /* A for's own variable is the loop's, not a global. */
+            int body = at;
+            if (head == TOK_IF || head == TOK_ELIF || head == TOK_ELSE || head == TOK_WHILE || head == TOK_FOR ||
+                head == TOK_MATCH)
+            {
+                /* What follows the header's colon on the same line is a body. */
+                if (ends_block)
+                    return;
+                int nesting = 0;
+                body = count;
+                for (int i = at; i < count; i++)
+                {
+                    const TokenType type = line[i].type;
+                    if (type == TOK_LPAREN || type == TOK_LBRACKET || type == TOK_LBRACE)
+                        nesting++;
+                    else if (type == TOK_RPAREN || type == TOK_RBRACKET || type == TOK_RBRACE)
+                        nesting--;
+                    else if (nesting == 0 && type == TOK_COLON)
+                    {
+                        body = i + 1;
+                        break;
+                    }
+                }
+            }
+            int from = body;
+            for (int i = body; i <= count; i++)
+                if (i == count || line[i].type == TOK_SEMICOLON)
+                {
+                    simple_statement(from, i);
+                    from = i + 1;
+                }
+        };
+
+        while (!done)
+        {
+            const Token t = lex.next_token();
+            switch (t.type)
+            {
+            case TOK_EOF:
+            case TOK_ERROR:
+                read_line();
+                done = true;
+                break;
+            case TOK_NEWLINE:
+                read_line();
+                count = 0;
+                break;
+            case TOK_INDENT:
+                read_line();
+                count = 0;
+                if (depth < kMaxDepth)
+                {
+                    kinds[depth++] = pending;
+                    defs += pending == 1;
+                    classes += pending == 2;
+                }
+                pending = 0;
+                break;
+            case TOK_DEDENT:
+                read_line();
+                count = 0;
+                if (depth > 0)
+                {
+                    const unsigned char kind = kinds[--depth];
+                    defs -= kind == 1;
+                    classes -= kind == 2;
+                }
+                break;
+            default:
+                if (count < kMaxLine)
+                    line[count++] = t;
+                break;
+            }
+        }
+
+        /* What def, class or import binds stays shared. */
+        int kept = 0;
+        for (int i = 0; i < module_var_count_; i++)
+        {
+            bool shared = false;
+            for (int d = 0; d < defined_count && !shared; d++)
+                shared = identifiers_equal(module_vars_[i], defined[d]);
+            if (!shared)
+                module_vars_[kept++] = module_vars_[i];
+        }
+        module_var_count_ = kept;
+    }
+
+    bool Compiler::is_module_var(const char *name, int len) const
+    {
+        for (int i = 0; i < module_var_count_; i++)
+            if (module_vars_[i].length == len && memcmp(module_vars_[i].start, name, (size_t)len) == 0)
+                return true;
+        return false;
+    }
+
     int Compiler::require_global_slot(const char *name, int len)
     {
-        char buf[256];
+        char buf[512];
         int n = len < 255 ? len : 255;
-        memcpy(buf, name, n);
-        buf[n] = '\0';
+        if (private_globals_ && current_file_ && is_module_var(name, len))
+        {
+            const int file = (int)strlen(current_file_) < 240 ? (int)strlen(current_file_) : 240;
+            memcpy(buf, current_file_, (size_t)file);
+            buf[file] = ':';
+            memcpy(buf + file + 1, name, (size_t)n);
+            buf[file + 1 + n] = '\0';
+        }
+        else
+        {
+            memcpy(buf, name, n);
+            buf[n] = '\0';
+        }
 
         int gidx = vm_->find_global(buf);
         if (gidx >= 0)

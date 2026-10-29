@@ -2686,6 +2686,191 @@ static void test_no_debug_hook()
     CHECK(!vm.set_debug_hook(&no_hook, nullptr) && !vm.debugging(), "a hook in the plain dispatch");
 }
 
+/* =========================================================
+** Private globals: each file's top-level variables its own
+** ========================================================= */
+static std::vector<std::pair<std::string, long long>> g_put;
+
+static int native_put(VM *vm, Value *args, int nargs)
+{
+    (void)vm;
+    if (nargs >= 2 && is_string(args[0]))
+        g_put.push_back({as_string(args[0])->chars, is_int(args[1]) ? args[1].as.integer : -999});
+    return 0;
+}
+
+static long long got(const char *key)
+{
+    for (auto it = g_put.rbegin(); it != g_put.rend(); ++it)
+        if (it->first == key)
+            return it->second;
+    return -1;
+}
+
+static bool run_file(VM &vm, const char *source, const char *file, bool isolated = true)
+{
+    Compiler compiler;
+    compiler.set_private_globals(isolated);
+    ObjFunc *fn = compiler.compile(&vm.get_gc(), &vm, source, file);
+    if (!fn) return false;
+    vm.run(fn);
+    return true;
+}
+
+static void test_private_globals()
+{
+    printf("\n--- Private globals ---\n");
+    g_put.clear();
+    VM vm;
+    vm.def_native("put", native_put, 2);
+    vm.def_global("HOST_VALUE", val_int(77));
+
+    const char *a = "def early():\n"            /* reads count before it is assigned below */
+                    "    return count\n"
+                    "count = 1\n"
+                    "count += 10\n"
+                    "x, y = 2, 3\n"
+                    "if True:\n"
+                    "    nested = 4\n"
+                    "if True: inline = 5\n"
+                    "for i in [6]:\n"
+                    "    looped = i\n"
+                    "def setup():\n"
+                    "    global speed\n"
+                    "    speed = 8\n"
+                    "setup()\n"
+                    "def helper():\n"
+                    "    return 99\n"
+                    "class Shared:\n"
+                    "    count = 500\n"
+                    "    def value(self):\n"
+                    "        return count\n"
+                    "def report():\n"
+                    "    put(\"a.early\", early())\n"
+                    "    put(\"a.count\", count)\n"
+                    "    put(\"a.xy\", x * 10 + y)\n"
+                    "    put(\"a.nested\", nested)\n"
+                    "    put(\"a.inline\", inline)\n"
+                    "    put(\"a.looped\", looped)\n"
+                    "    put(\"a.speed\", speed)\n"
+                    "    put(\"a.method\", Shared().value())\n"
+                    "    put(\"a.host\", HOST_VALUE)\n"
+                    "    put(\"a.class_attr\", Shared().count)\n";
+    const char *b = "count = 2\n"
+                    "x, y = 20, 30\n"
+                    "nested = 40\n"
+                    "inline = 50\n"
+                    "looped = 60\n"
+                    "speed = 80\n"
+                    "def report_b():\n"
+                    "    put(\"b.count\", count)\n"
+                    "    put(\"b.xy\", x * 10 + y)\n"
+                    "    put(\"b.nested\", nested)\n"
+                    "    put(\"b.inline\", inline)\n"
+                    "    put(\"b.looped\", looped)\n"
+                    "    put(\"b.speed\", speed)\n"
+                    "    put(\"b.helper\", helper())\n"
+                    "    put(\"b.shared_class\", Shared().value())\n"
+                    "    put(\"b.host\", HOST_VALUE)\n";
+    const bool compiled = run_file(vm, a, "a.zen") && run_file(vm, b, "b.zen") &&
+                          run_file(vm, "report()\nreport_b()\n", "main.zen");
+
+    TEST("both files compile and run");
+    CHECK(compiled, "compile or run failed");
+
+    TEST("each file keeps its own count (and +=)");
+    CHECK(got("a.count") == 11 && got("b.count") == 2, "count shared");
+
+    TEST("a function above the assignment reads its file's");
+    CHECK(got("a.early") == 11, "early() read another count");
+
+    TEST("tuple targets, if bodies, one-line if, a for's body");
+    CHECK(got("a.xy") == 23 && got("b.xy") == 230 && got("a.nested") == 4 && got("b.nested") == 40 &&
+              got("a.inline") == 5 && got("b.inline") == 50 && got("a.looped") == 6 && got("b.looped") == 60,
+          "a binding leaked across files");
+
+    TEST("global in a function is the file's");
+    CHECK(got("a.speed") == 8 && got("b.speed") == 80, "speed shared");
+
+    TEST("methods read the file's variable, class attrs stay apart");
+    CHECK(got("a.method") == 11 && got("b.shared_class") == 11 && got("a.class_attr") == 500,
+          "method or class attribute");
+
+    TEST("def and class stay shared across files");
+    CHECK(got("b.helper") == 99, "helper() not shared");
+
+    TEST("names a file does not assign stay the host's");
+    CHECK(got("a.host") == 77 && got("b.host") == 77, "host global hidden");
+
+    TEST("the globals carry the file in their name");
+    CHECK(vm.find_global("a.zen:count") >= 0 && vm.find_global("b.zen:count") >= 0 &&
+              vm.find_global("helper") >= 0 && vm.find_global("a.zen:helper") < 0,
+          "names in the global table");
+
+    TEST("compiling the file again keeps its variable");
+    g_put.clear();
+    CHECK(run_file(vm, "count = 5\ndef report_again():\n    put(\"a2.count\", count)\nreport_again()\n", "a.zen") &&
+              got("a2.count") == 5 && vm.get_global(vm.find_global("a.zen:count")).as.integer == 5,
+          "reload");
+
+    TEST("off by default: one namespace as before");
+    VM plain;
+    plain.def_native("put", native_put, 2);
+    g_put.clear();
+    CHECK(run_file(plain, "count = 1\n", "a.zen", false) &&
+              run_file(plain, "count = 2\nput(\"plain\", count)\n", "b.zen", false) &&
+              run_file(plain, "put(\"plain.a\", count)\n", "c.zen", false) && got("plain.a") == 2 &&
+              plain.find_global("a.zen:count") < 0,
+          "isolated without asking");
+
+    TEST("const, annotations and chained targets are the file's");
+    VM more;
+    more.def_native("put", native_put, 2);
+    g_put.clear();
+    CHECK(run_file(more, "const LIMIT = 3\nrate: int = 4\nlo = hi = 5\ndef r1():\n    put(\"m1\", LIMIT * 100 + rate * 10 + lo + hi)\n", "m1.zen") &&
+              run_file(more, "LIMIT = 9\nrate = 9\nlo = 9\nhi = 9\nr1()\n", "m2.zen") && got("m1") == 350 &&
+              more.find_global("m1.zen:rate") >= 0 && more.find_global("m1.zen:hi") >= 0,
+          "const, annotation or chain");
+
+    TEST("bytecode keeps the private names");
+    {
+        VM source;
+        source.def_native("put", native_put, 2);
+        Compiler compiler;
+        compiler.set_private_globals(true);
+        ObjFunc *fn = compiler.compile(&source.get_gc(), &source, "count = 41\ncount += 1\nput(\"zbc\", count)\n", "z.zen");
+        const char *path = "private_globals_test.zbc";
+        char err[256] = "";
+        bool ok = fn && dump_bytecode_file(&source, fn, path, false, err, sizeof err);
+        std::vector<uint8_t> bytes;
+        if (FILE *f = fopen(path, "rb"))
+        {
+            uint8_t buf[4096];
+            size_t n;
+            while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+                bytes.insert(bytes.end(), buf, buf + n);
+            fclose(f);
+        }
+        remove(path);
+        VM loaded;
+        loaded.def_native("put", native_put, 2);
+        g_put.clear();
+        ObjFunc *back = ok ? load_bytecode_buffer(&loaded, bytes.data(), bytes.size(), err, sizeof err) : nullptr;
+        if (back)
+            loaded.run(back);
+        CHECK(back && got("zbc") == 42 && loaded.find_global("z.zen:count") >= 0 && loaded.find_global("count") < 0,
+              err[0] ? err : "bytecode");
+    }
+
+    TEST("keyword args and attribute writes bind nothing");
+    VM kw;
+    kw.def_native("put", native_put, 2);
+    g_put.clear();
+    CHECK(run_file(kw, "class Box:\n    pass\nbox = Box()\nbox.count = 3\nput(key=\"k\", value=1)\n", "k.zen") &&
+              kw.find_global("k.zen:count") < 0 && kw.find_global("k.zen:key") < 0 && kw.find_global("k.zen:box") >= 0,
+          "a non-binding name was made private");
+}
+
 int main()
 {
     printf("=== Zen Embedding Tests (C++ <-> Script) ===\n");
@@ -2705,6 +2890,7 @@ int main()
     test_resume_fiber_error_handling();
     test_generic_native_method();
     test_no_debug_hook();
+    test_private_globals();
     test_closed_script_class();
     test_native_class_inference();
     test_failing_native_ctor();

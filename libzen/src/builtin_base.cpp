@@ -1531,6 +1531,18 @@ namespace zen
         return 1;
     }
 
+    int VM::debug_value_text(Value value, char *out, int capacity)
+    {
+        if (!out || capacity <= 0)
+            return 0;
+        ct::String text;
+        py_append_value(this, text, value, true);
+        const int length = (int)text.size() < capacity - 1 ? (int)text.size() : capacity - 1;
+        memcpy(out, text.c_str(), (size_t)length);
+        out[length] = '\0';
+        return length;
+    }
+
     static int nat_abs(VM *vm, Value *args, int nargs)
     {
         if (nargs < 1) { vm->runtime_error("abs() takes one argument"); return -1; }

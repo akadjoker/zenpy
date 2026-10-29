@@ -2731,6 +2731,13 @@ static void test_debug_hook()
     CHECK(record.locals_at_6.size() == 1 && record.locals_at_6[0] == "total" && record.total_at_6 == 5,
           "local names or values");
 
+    TEST("value text as repr writes it");
+    char text[16];
+    const int length = vm.debug_value_text(val_int(42), text, sizeof text);
+    char quoted[8];
+    vm.debug_value_text(val_obj((Obj *)vm.make_string("hello world")), quoted, sizeof quoted);
+    CHECK(length == 2 && std::strcmp(text, "42") == 0 && std::strcmp(quoted, "'hello ") == 0, "value text");
+
     TEST("no hook: nothing recorded");
     DebugRecord quiet;
     VM plain;

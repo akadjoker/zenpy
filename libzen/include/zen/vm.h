@@ -295,6 +295,9 @@ namespace zen
         int debug_local_count(int depth) const;
         const char *debug_local_name(int depth, int index) const;
         Value debug_local_value(int depth, int index) const;
+        /* The value as repr() writes it, cut to fit capacity (with its
+        ** terminator); the length written. */
+        int debug_value_text(Value value, char *out, int capacity);
 
         /* --- GC root for natives (Lua-style) ---
         ** Copies v into the slot at the current fiber's stack_top and bumps

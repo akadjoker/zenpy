@@ -331,7 +331,10 @@ namespace zen
 
     void VM::run(ObjClosure *closure)
     {
-        if (run_depth_ > 0)
+        /* Nested: inside another run(), or inside a script frame the host is
+        ** executing through invoke()/call_fn() (a native that loads and runs a
+        ** module). Restarting the main fiber here would wipe those frames. */
+        if (run_depth_ > 0 || (current_fiber_ && current_fiber_->frame_count > 0))
         {
             run_nested(closure);
             return;
@@ -539,7 +542,10 @@ namespace zen
                               cl->func->name ? cl->func->name->chars : "?");
                 return val_nil();
             }
-            return call_closure_from_cpp(cl, args, nargs);
+            /* call_fn runs it on frame 0 of the main fiber when nothing is
+            ** running, and as a nested call on the current fiber when the
+            ** host is inside a script call (a native that calls back). */
+            return call_fn(callee, args, nargs);
         }
         runtime_error("global %d is not callable", idx);
         return val_nil();

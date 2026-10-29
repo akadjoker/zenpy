@@ -912,6 +912,26 @@ static int native_spawn(VM *vm, Value *args, int nargs)
     return 1;
 }
 
+/* run() a module from inside a native, then call one of its globals. */
+static int native_spawn_and_call(VM *vm, Value *args, int nargs)
+{
+    if (nargs < 1 || !is_string(args[0]))
+    {
+        args[0] = val_bool(false);
+        return 1;
+    }
+    Compiler compiler;
+    ObjFunc *fn = compiler.compile(&vm->get_gc(), vm, safe_string_chars(args[0]), "<spawned>");
+    if (!fn)
+    {
+        args[0] = val_bool(false);
+        return 1;
+    }
+    vm->run(fn);
+    args[0] = vm->call_global("answer", nullptr, 0);
+    return 1;
+}
+
 static void test_run_from_inside_script()
 {
     printf("\n[Test 11] run() from inside a running script\n");
@@ -959,6 +979,27 @@ static void test_run_from_inside_script()
     CHECK(deep && !vm.had_error() && d.type == VAL_INT && d.as.integer == 22 &&
           inner.type == VAL_INT && inner.as.integer == 42,
           "expected deep_result == 22 and inner_value == 42");
+
+    /* The outer script call started from C++ with invoke(), not run(): a
+    ** host dispatching an event handler. The native then run()s a module
+    ** and call_global()s one of its functions. Both used to restart frame
+    ** 0 of the main fiber and wipe the handler's registers (its self). */
+    TEST("run() and call_global() nested under invoke()");
+    vm.def_native("spawn_and_call", native_spawn_and_call, 1);
+    const bool defined = run_source(vm,
+        "class Handler:\n"
+        "    def __init__(self):\n"
+        "        self.hits = 0\n"
+        "    def on_click(self, sender):\n"
+        "        self.hits = self.hits + 1\n"
+        "        got = spawn_and_call(\"def answer():\\n    return 42\\n\")\n"
+        "        return self.hits * 100 + got\n"
+        "handler = Handler()\n");
+    Value handler = vm.get_global("handler");
+    Value sender = val_nil();
+    Value hit = vm.invoke(handler, "on_click", &sender, 1);
+    CHECK(defined && !vm.had_error() && hit.type == VAL_INT && hit.as.integer == 142,
+          "expected 142: self survived the nested run() and call_global()");
 }
 
 /* =========================================================

@@ -1380,7 +1380,7 @@ namespace zen
                     }
 
                     int arg_reg = base + 1 + idx;
-                    if (arg_reg >= kMaxRegisters)
+                    if (arg_reg >= kMaxRegisters || idx >= kMaxCallArgs)
                     {
                         error("Too many arguments.");
                         return nargs;
@@ -1405,7 +1405,7 @@ namespace zen
                 }
 
                 int arg_reg = base + 1 + nargs;
-                if (arg_reg >= kMaxRegisters)
+                if (arg_reg >= kMaxRegisters || nargs >= kMaxCallArgs)
                 {
                     error("Too many arguments.");
                     return nargs;
@@ -1669,6 +1669,8 @@ namespace zen
                 o.kind = ZEN_OP(ins) == OP_GETFIELD ? ReceiverOrigin::FIELD : ReceiverOrigin::FIELD_IDX;
                 o.parent = ZEN_B(ins);
                 o.c = ZEN_C(ins);
+                if (ZEN_OP(ins) == OP_GETFIELD && o.c == kFarConstantSlot)
+                    o.c = ZEN_BX(e.instruction_at(start - 1));
                 break;
             case OP_GETINDEX:
                 /* The index register must still hold the index: a local, or
@@ -1701,27 +1703,43 @@ namespace zen
             o.parent = ZEN_B(ins);
             o.c = ZEN_C(ins);
             o.name_ki = ZEN_C(w2);
+            if (o.name_ki == kFarConstantSlot)
+                o.name_ki = ZEN_BX(e.instruction_at(start - 1));
         }
     }
 
     /* The inverse store of the read captured above: parent.field = obj,
     ** G = obj, upvalue = obj, parent[idx] = obj. For a heap object this writes the very
     ** reference back (a no-op); for a Vec it stores the modified copy. */
+    int Compiler::name_operand(int name_ki, int line)
+    {
+        if (name_ki < kFarConstantSlot)
+            return name_ki;
+        state_->emitter.emit_abx(OP_LOADNAME, 0, name_ki, line);
+        return kFarConstantSlot;
+    }
+
     void Compiler::emit_receiver_writeback(const ReceiverOrigin &o, int obj, int line)
     {
         Emitter &e = state_->emitter;
         switch (o.kind)
         {
         case ReceiverOrigin::FIELD:
-            e.emit_abc(OP_SETFIELD, o.parent, o.c, obj, line);
+        {
+            const int name = name_operand(o.c, line);
+            e.emit_abc(OP_SETFIELD, o.parent, name, obj, line);
             break;
+        }
         case ReceiverOrigin::FIELD_IDX:
             e.emit_abc(OP_SETFIELD_IDX, o.parent, o.c, obj, line);
             break;
         case ReceiverOrigin::FIELD_IDXC:
+        {
+            const int name = name_operand(o.name_ki, line);
             e.emit_abc(OP_SETFIELD_IDXC, o.parent, o.c, obj, line);
-            e.emit((uint32_t)ZEN_ENCODE(OP_SETFIELD, o.parent, o.name_ki, obj), line);
+            e.emit((uint32_t)ZEN_ENCODE(OP_SETFIELD, o.parent, name, obj), line);
             break;
+        }
         case ReceiverOrigin::GLOBAL:
             e.emit_abx(OP_SETGLOBAL, obj, o.bx, line);
             break;
@@ -1959,13 +1977,14 @@ namespace zen
         {
             int val = expression(-1);
             int name_ki = state_->emitter.add_string_constant(field.start, field.length);
+            const int name = name_operand(name_ki, previous_.line);
             if (checked_fidx >= 0)
             {
                 state_->emitter.emit_abc(OP_SETFIELD_IDXC, obj, checked_fidx, val, previous_.line);
-                state_->emitter.emit((uint32_t)ZEN_ENCODE(OP_SETFIELD, obj, name_ki, val), previous_.line);
+                state_->emitter.emit((uint32_t)ZEN_ENCODE(OP_SETFIELD, obj, name, val), previous_.line);
             }
             else
-                state_->emitter.emit_abc(OP_SETFIELD, obj, name_ki, val, previous_.line);
+                state_->emitter.emit_abc(OP_SETFIELD, obj, name, val, previous_.line);
             emit_receiver_writeback(origin, obj, previous_.line);
             free_reg(val);
             if (obj != reg)
@@ -1993,13 +2012,14 @@ namespace zen
             }
             int name_ki = state_->emitter.add_string_constant(field.start, field.length);
             int tmp = alloc_reg();
+            const int read_name = name_operand(name_ki, field.line);
             if (checked_fidx >= 0)
             {
                 state_->emitter.emit_abc(OP_GETFIELD_IDXC, tmp, obj, checked_fidx, field.line);
-                state_->emitter.emit((uint32_t)ZEN_ENCODE(OP_GETFIELD, tmp, obj, name_ki), field.line);
+                state_->emitter.emit((uint32_t)ZEN_ENCODE(OP_GETFIELD, tmp, obj, read_name), field.line);
             }
             else
-                state_->emitter.emit_abc(OP_GETFIELD, tmp, obj, name_ki, field.line);
+                state_->emitter.emit_abc(OP_GETFIELD, tmp, obj, read_name, field.line);
             int rhs_start = state_->emitter.current_offset();
             int rhs = expression(-1);
             bool folded = false;
@@ -2022,13 +2042,14 @@ namespace zen
                 state_->emitter.emit_abc(arith, tmp, tmp, rhs, op.line);
                 free_reg(rhs);
             }
+            const int write_name = name_operand(name_ki, op.line);
             if (checked_fidx >= 0)
             {
                 state_->emitter.emit_abc(OP_SETFIELD_IDXC, obj, checked_fidx, tmp, op.line);
-                state_->emitter.emit((uint32_t)ZEN_ENCODE(OP_SETFIELD, obj, name_ki, tmp), op.line);
+                state_->emitter.emit((uint32_t)ZEN_ENCODE(OP_SETFIELD, obj, write_name, tmp), op.line);
             }
             else
-                state_->emitter.emit_abc(OP_SETFIELD, obj, name_ki, tmp, op.line);
+                state_->emitter.emit_abc(OP_SETFIELD, obj, write_name, tmp, op.line);
             emit_receiver_writeback(origin, obj, op.line);
             free_reg(tmp);
             if (obj != reg)
@@ -2196,8 +2217,9 @@ namespace zen
         int name_ki = state_->emitter.add_string_constant(field.start, field.length);
         if (checked_fidx >= 0)
         {
+            const int name = name_operand(name_ki, field.line);
             state_->emitter.emit_abc(OP_GETFIELD_IDXC, reg, obj, checked_fidx, field.line);
-            state_->emitter.emit((uint32_t)ZEN_ENCODE(OP_GETFIELD, reg, obj, name_ki), field.line);
+            state_->emitter.emit((uint32_t)ZEN_ENCODE(OP_GETFIELD, reg, obj, name), field.line);
             Token fcls;
             if (current_.type == TOK_DOT &&
                 field_class_guess(receiver_class_name, receiver_class_len, checked_fidx, fcls))
@@ -2208,7 +2230,10 @@ namespace zen
             }
         }
         else
-            state_->emitter.emit_abc(OP_GETFIELD, reg, obj, name_ki, field.line);
+        {
+            const int name = name_operand(name_ki, field.line);
+            state_->emitter.emit_abc(OP_GETFIELD, reg, obj, name, field.line);
+        }
         if (obj != reg)
             free_reg(obj);
         return reg;
@@ -2236,7 +2261,8 @@ namespace zen
         Token field = previous_;
         int name_ki = state_->emitter.add_string_constant(field.start, field.length);
 
-        state_->emitter.emit_abc(OP_GETFIELD, reg, reg, name_ki, line);
+        const int name = name_operand(name_ki, line);
+        state_->emitter.emit_abc(OP_GETFIELD, reg, reg, name, line);
         state_->emitter.patch_jump(jump);
 
         if (obj != reg)

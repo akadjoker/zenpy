@@ -10,6 +10,8 @@
 
 #include "compiler.h"
 
+#include <cstdlib>
+
 namespace zen
 {
 
@@ -53,6 +55,7 @@ namespace zen
         multi_assign_rhs_ = false;
         cmp_chain_end_ = -1;
         fn_written_global_count_ = 0;
+        fn_written_globals_full_ = false;
         last_cmp_.valid = false;
 
         sigs_ = nullptr; sig_count_ = 0; sig_cap_ = 0;
@@ -139,6 +142,7 @@ namespace zen
         multi_assign_rhs_ = false;
         cmp_chain_end_ = -1;
         fn_written_global_count_ = 0;
+        fn_written_globals_full_ = false;
         last_cmp_.valid = false;
         global_type_hint_count_ = 0;
 
@@ -252,15 +256,19 @@ namespace zen
     ** Error reporting
     ** ========================================================= */
 
+    Compiler::~Compiler()
+    {
+        free(class_registry_);
+    }
+
     void Compiler::check_operands()
     {
         const int line = state_->emitter.overflow_line();
         if (line <= 0)
             return;
         char msg[160];
-        snprintf(msg, sizeof msg,
-                 "Function too large near line %d: an instruction needs a constant or register past 255; split it.",
-                 line);
+        snprintf(msg, sizeof msg, "Function too large near line %d: more than %d constants; split it.",
+                 line, kMaxConstants);
         error(msg);
     }
 
@@ -835,7 +843,15 @@ namespace zen
     /* Save current class field table to the registry. Called after class_declaration(). */
     void Compiler::save_class_fields(Token class_name)
     {
-        if (class_registry_count_ >= kMaxClasses) return;
+        if (class_registry_count_ == class_registry_capacity_)
+        {
+            const int capacity = class_registry_capacity_ ? class_registry_capacity_ * 2 : 8;
+            void *grown = realloc(class_registry_, (size_t)capacity * sizeof(ClassFieldRegistry));
+            if (!grown)
+                return;
+            class_registry_ = (ClassFieldRegistry *)grown;
+            class_registry_capacity_ = capacity;
+        }
         ClassFieldRegistry &reg = class_registry_[class_registry_count_++];
         reg.name = class_name;
         reg.count = class_field_count_;
@@ -2638,7 +2654,7 @@ namespace zen
 
     void Compiler::infer_assigned_class_global(int gidx)
     {
-        bool written_in_fn = false;
+        bool written_in_fn = fn_written_globals_full_;
         for (int i = 0; i < fn_written_global_count_; i++)
             if (fn_written_globals_[i] == gidx)
                 written_in_fn = true;
@@ -2677,6 +2693,8 @@ namespace zen
                 return;
         if (fn_written_global_count_ < kMaxFnWrittenGlobals)
             fn_written_globals_[fn_written_global_count_++] = gidx;
+        else
+            fn_written_globals_full_ = true;
         for (int i = 0; i < global_type_hint_count_; i++)
         {
             GlobalTypeHint &h = global_type_hints_[i];

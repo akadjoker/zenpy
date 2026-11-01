@@ -497,7 +497,8 @@ namespace zen
         ObjString *class_name = token_string(name);
         int name_ki = state_->emitter.add_constant(val_obj((Obj *)class_name));
         int c_operand = (parent_reg >= 0) ? parent_reg : 255;
-        state_->emitter.emit_abc(OP_NEWCLASS, class_reg, name_ki, c_operand, name.line);
+        const int name_operand_b = name_operand(name_ki, name.line);
+        state_->emitter.emit_abc(OP_NEWCLASS, class_reg, name_operand_b, c_operand, name.line);
 
         if (parent_reg >= 0)
             free_reg(parent_reg);
@@ -742,7 +743,8 @@ namespace zen
                 /* OP_SETFIELD: class_reg.method_name = method_reg */
                 int mname_ki = state_->emitter.add_string_constant(
                     method_name.start, method_name.length);
-                state_->emitter.emit_abc(OP_SETFIELD, class_reg, mname_ki, method_reg,
+                const int method_operand = name_operand(mname_ki, method_name.line);
+                state_->emitter.emit_abc(OP_SETFIELD, class_reg, method_operand, method_reg,
                                          method_name.line);
                 free_reg(method_reg);
 
@@ -1179,7 +1181,8 @@ namespace zen
 
             /* dest = mod[field_name]:  R[dest] = R[mod_reg].K[fki] */
             int dest = alloc_reg();
-            state_->emitter.emit_abc(OP_GETFIELD, dest, mod_reg, fki, field_name.line);
+            const int field_operand = name_operand(fki, field_name.line);
+            state_->emitter.emit_abc(OP_GETFIELD, dest, mod_reg, field_operand, field_name.line);
 
             /* Make it a global */
             int gidx = find_or_add_global(field_name.start, field_name.length);
@@ -1283,6 +1286,8 @@ namespace zen
                 consume(TOK_IDENTIFIER, "Expected variable name.");
                 if (state_->global_count < CompilerState::kMaxGlobals)
                     state_->globals[state_->global_count++] = previous_;
+                else
+                    error("Too many global declarations in one function.");
             } while (match(TOK_COMMA));
         }
         else if (match(TOK_PRINT))

@@ -135,6 +135,7 @@ namespace zen
     ** no branch in the dispatch loop.
     ** ========================================================= */
 
+    static const int kMaxCallArgs = 63; /* bits 0x40 and 0x80 of the count are flags */
     static const int kMaxSigParams = 64; /* the fill mask is a uint64_t */
 
     struct SigParam
@@ -224,6 +225,11 @@ namespace zen
     class Compiler
     {
     public:
+        Compiler() = default;
+        ~Compiler();
+        Compiler(const Compiler &) = delete;
+        Compiler &operator=(const Compiler &) = delete;
+
         ObjFunc *compile(GC *gc, VM *vm, const char *source, const char *filename);
         /* Each file's top-level variables its own. A name assigned at module
         ** level (in an if, a loop or not) or declared global in one of its
@@ -354,6 +360,10 @@ namespace zen
         };
         void capture_receiver_origin(int obj, ReceiverOrigin &o) const;
         void emit_receiver_writeback(const ReceiverOrigin &o, int obj, int line);
+        /* The 8-bit operand for a name constant: past slot 255 this first emits
+        ** the OP_LOADNAME that puts the name there, so the instruction using
+        ** the operand has to come right after. */
+        int name_operand(int name_ki, int line);
         int safe_dot_expr(int obj, int dest);
         int null_coalesce(int left, int dest);
         int subscript_expr(int obj, int dest, bool can_assign);
@@ -575,8 +585,7 @@ namespace zen
         /* Class field index table — built as we see self.field = ... in methods.
         ** Enables OP_GETFIELD_IDX / OP_SETFIELD_IDX (O(1) field access).
         ** Also used for params annotated with the current class type. */
-        static const int kMaxClassFields = 128;
-        static const int kMaxClasses = 32;
+        static const int kMaxClassFields = 256;
 
         ObjString *class_field_table_[kMaxClassFields]; /* indexed by field order */
         int class_field_count_;
@@ -608,7 +617,8 @@ namespace zen
             uint8_t field_class_state[kMaxClassFields];
             int count;
         };
-        ClassFieldRegistry class_registry_[kMaxClasses];
+        ClassFieldRegistry *class_registry_ = nullptr; /* heap: a Compiler lives on the stack */
+        int class_registry_capacity_ = 0;
         int class_registry_count_;
 
         /* Global class-type annotations: `name: ClassName = ...` at global
@@ -697,6 +707,7 @@ namespace zen
         Token last_expr_ctor_class_;
         static const int kMaxFnWrittenGlobals = 64;
         int fn_written_globals_[kMaxFnWrittenGlobals];
+        bool fn_written_globals_full_ = false;
         int fn_written_global_count_;
 
         int lookup_class_field(ObjString *name) const;

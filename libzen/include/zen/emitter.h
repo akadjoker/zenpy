@@ -32,6 +32,21 @@ namespace zen
     **   e.patch_jump(hole);              // backpatch
     **   ObjFunc* fn = e.end(num_regs);   // finaliza, devolve func
     */
+    /* Owns its memory and moves, so an Emitter can still be assigned from a
+    ** temporary when a nested function starts. */
+    struct ConstantSlots
+    {
+        int *table = nullptr;
+        int count = 0;
+
+        ConstantSlots() = default;
+        ~ConstantSlots();
+        ConstantSlots(const ConstantSlots &) = delete;
+        ConstantSlots &operator=(const ConstantSlots &) = delete;
+        ConstantSlots(ConstantSlots &&other) noexcept;
+        ConstantSlots &operator=(ConstantSlots &&other) noexcept;
+    };
+
     class Emitter
     {
     public:
@@ -129,12 +144,14 @@ namespace zen
         void note_label(int target) { if (target > last_label_) last_label_ = target; }
         void grow_code();
         void grow_constants();
+        int find_constant(const Value &val);
 
         GC *gc_;
         ObjFunc *func_; /* func em construção */
         int last_line_;
         int last_op_start_;
-        int overflow_line_ = 0; /* first line with an ABC operand past 255, 0 if none */
+        int overflow_line_ = 0; /* first line past an encoding limit, 0 if none */
+        ConstantSlots slots_; /* open addressing, built past kLinearConstants */
         int jump_count_;
         int last_label_ = -1;
         char escape_error_[128] = {};

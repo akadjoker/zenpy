@@ -1,14 +1,67 @@
 #include "emitter.h"
 #include "memory.h"
 
+#include <cstdlib>
+#include <cstring>
+
 namespace zen
 {
+
+    namespace
+    {
+        constexpr int kLinearConstants = 32;
+
+        /* Identity, not the '==' operator: 3 and 3.0 stay apart, and so do 0.0
+        ** and -0.0. Strings are interned, so their pointers compare. */
+        inline uint64_t constant_bits(const Value &val)
+        {
+            uint64_t bits = 0;
+            std::memcpy(&bits, &val.as, sizeof bits);
+            return bits;
+        }
+
+        inline bool same_constant(const Value &a, const Value &b)
+        {
+            return a.type == b.type && constant_bits(a) == constant_bits(b);
+        }
+
+        inline uint32_t constant_hash(const Value &val)
+        {
+            uint64_t h = constant_bits(val) ^ ((uint64_t)val.type * 0x9E3779B97F4A7C15ull);
+            h ^= h >> 32;
+            h *= 0xFF51AFD7ED558CCDull;
+            h ^= h >> 29;
+            return (uint32_t)h;
+        }
+    }
+
+    ConstantSlots::~ConstantSlots()
+    {
+        std::free(table);
+    }
+
+    ConstantSlots::ConstantSlots(ConstantSlots &&other) noexcept : table(other.table), count(other.count)
+    {
+        other.table = nullptr;
+        other.count = 0;
+    }
+
+    ConstantSlots &ConstantSlots::operator=(ConstantSlots &&other) noexcept
+    {
+        std::free(table);
+        table = other.table;
+        count = other.count;
+        other.table = nullptr;
+        other.count = 0;
+        return *this;
+    }
 
     Emitter::Emitter(GC *gc) : gc_(gc), func_(nullptr), last_line_(0) {}
 
     void Emitter::begin(const char *name, int arity, const char *source)
     {
         overflow_line_ = 0;
+        slots_.count = 0;
         func_ = new_func(gc_);
         func_->arity = arity;
         func_->name = name ? intern_string(gc_, name, (int)strlen(name)) : nullptr;
@@ -97,25 +150,82 @@ namespace zen
 
     /* --- Constants --- */
 
+    /* -1 when val is not in the pool. Past kLinearConstants the lookup goes
+    ** through a table, or a literal with thousands of numbers would compile in
+    ** quadratic time; a function under it never allocates one. */
+    int Emitter::find_constant(const Value &val)
+    {
+        const int count = func_->const_count;
+        if (count <= kLinearConstants)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                if (same_constant(func_->constants[i], val))
+                    return i;
+            }
+            return -1;
+        }
+        if (count * 2 > slots_.count)
+        {
+            int slots = slots_.count ? slots_.count * 2 : kLinearConstants * 8;
+            while (count * 2 > slots)
+                slots *= 2;
+            int *grown = (int *)std::realloc(slots_.table, (size_t)slots * sizeof(int));
+            if (!grown)
+                return -1;
+            slots_.table = grown;
+            slots_.count = slots;
+            std::memset(slots_.table, 0xFF, (size_t)slots * sizeof(int));
+            const uint32_t mask = (uint32_t)slots - 1;
+            for (int i = 0; i < count; i++)
+            {
+                if (i == kFarConstantSlot)
+                    continue;
+                uint32_t slot = constant_hash(func_->constants[i]) & mask;
+                while (slots_.table[slot] >= 0)
+                    slot = (slot + 1) & mask;
+                slots_.table[slot] = i;
+            }
+        }
+        const uint32_t mask = (uint32_t)slots_.count - 1;
+        uint32_t slot = constant_hash(val) & mask;
+        while (slots_.table[slot] >= 0)
+        {
+            if (same_constant(func_->constants[slots_.table[slot]], val))
+                return slots_.table[slot];
+            slot = (slot + 1) & mask;
+        }
+        return -1;
+    }
+
     int Emitter::add_constant(Value val)
     {
-        /* Deduplica ints/floats simples (strings já são internadas).
-        ** O tipo tem de bater certo: values_equal() é a semântica do operador
-        ** '==', que compara int e float numericamente (3 == 3.0), e reusar o
-        ** slot de um 3.0 para um 3 devolvia um float onde o código escreveu
-        ** um int. Identidade de constante é mais estrita do que igualdade. */
-        for (int i = 0; i < func_->const_count; i++)
+        const int found = find_constant(val);
+        if (found >= 0)
+            return found;
+        if (func_->const_count >= kMaxConstants)
         {
-            if (func_->constants[i].type == val.type && values_equal(func_->constants[i], val))
-                return i;
+            if (overflow_line_ == 0)
+                overflow_line_ = last_line_ > 0 ? last_line_ : 1;
+            return 0;
         }
-        if (func_->const_count >= func_->const_capacity)
+        if (func_->const_count + 1 >= func_->const_capacity)
         {
             grow_constants();
         }
+        if (func_->const_count == kFarConstantSlot)
+            func_->constants[func_->const_count++] = val_nil();
         int idx = func_->const_count;
         func_->constants[idx] = val;
         func_->const_count++;
+        if (slots_.count > 0)
+        {
+            const uint32_t mask = (uint32_t)slots_.count - 1;
+            uint32_t slot = constant_hash(val) & mask;
+            while (slots_.table[slot] >= 0)
+                slot = (slot + 1) & mask;
+            slots_.table[slot] = idx;
+        }
         return idx;
     }
 

@@ -1,6 +1,4 @@
-# expect: Function too large
-# A field read by name at module level after 300 constants cannot be encoded: a compile error,
-# not an instruction that reads another constant.
+# Names past constant 255 go through a register: a by-name field, a method, a class.
 class Box:
     value = 1
 words = [
@@ -307,4 +305,14 @@ words = [
 ]
 b = Box()
 b.zzz_late = 2
-print(b.zzz_late)
+assert b.zzz_late == 2
+b.zzz_late += 3
+assert b.zzz_late == 5
+
+class Late:
+    first = 7
+    def far_method(self):
+        return self.first + 1
+
+assert Late().far_method() == 8
+print("ok")

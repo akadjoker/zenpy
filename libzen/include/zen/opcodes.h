@@ -273,11 +273,17 @@ namespace zen
         ** compiler first loads the constant into R[C] with OP_LOADK. Added
         ** after OP_RETURNNIL so no existing opcode changes its number. */
         OP_CLASSFIELD_R,    /* as_class(R[A]).field_names[B] = as_string(R[C]) */
-        OP_CLASSFIELDDEF_R, /* LAST opcode — as_class(R[A]).field_defaults[B] = R[C].
-                            ** s_opnames (debug.cpp) and dispatch_table
-                            ** (vm_dispatch.cpp) are sized against this one and
-                            ** static_assert on it. Add new opcodes BELOW this line
-                            ** and move the mark, and add their entry to both tables. */
+        OP_CLASSFIELDDEF_R, /* as_class(R[A]).field_defaults[B] = R[C] */
+        /* An 8-bit operand cannot name a constant past 255, so a function that
+        ** big keeps constant 255 free (kFarConstantSlot) and copies the name
+        ** there right before the instruction that reads it. The by-name
+        ** handlers stay exactly as they are; code under 256 constants never
+        ** runs this. */
+        OP_LOADNAME, /* LAST opcode — constants[255] = constants[Bx].
+                     ** s_opnames (debug.cpp) and dispatch_table
+                     ** (vm_dispatch.cpp) are sized against this one and
+                     ** static_assert on it. Add new opcodes BELOW this line
+                     ** and move the mark, and add their entry to both tables. */
     };
 
 /* Encode/Decode — ABC format */

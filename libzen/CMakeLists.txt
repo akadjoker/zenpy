@@ -54,6 +54,11 @@ endif()
 target_compile_definitions(zen_static PUBLIC ${ZEN_DEFINITIONS})
 if(NOT MSVC)
     target_compile_options(zen_static PRIVATE $<$<CONFIG:Release>:-O3>)
+    # Computed goto: without these GCC merges the dispatch jumps and an unrelated
+    # change can move a benchmark by 20%.
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        set_source_files_properties(src/vm_dispatch.cpp PROPERTIES COMPILE_OPTIONS "-fno-gcse;-fno-crossjumping")
+    endif()
 endif()
 target_compile_definitions(zen_static PRIVATE $<$<CONFIG:Release>:NDEBUG>)
 set_target_properties(zen_static PROPERTIES OUTPUT_NAME zen POSITION_INDEPENDENT_CODE ON)

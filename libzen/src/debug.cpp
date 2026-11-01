@@ -137,6 +137,7 @@ namespace zen
         "RETURNNIL",
         "CLASSFIELD_R",
         "CLASSFIELDDEF_R",
+        "LOADNAME",
     };
 
     /* Indexed by OpCode: opcode_name() reads it as s_opnames[(int)op], so an
@@ -144,7 +145,7 @@ namespace zen
     ** and the disassembler silently prints the wrong one — which is exactly
     ** what the comment above describes happening. This makes it a build
     ** error instead. */
-    static_assert(sizeof(s_opnames) / sizeof(s_opnames[0]) == (size_t)OP_CLASSFIELDDEF_R + 1,
+    static_assert(sizeof(s_opnames) / sizeof(s_opnames[0]) == (size_t)OP_LOADNAME + 1,
                   "s_opnames is out of sync with the OpCode enum");
 
 

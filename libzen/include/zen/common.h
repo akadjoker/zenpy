@@ -30,6 +30,7 @@ namespace zen
     constexpr int kMaxRegs = 250;                   /* registers per call frame */
     constexpr int kMaxFrames = 2000;                /* max call depth */
     constexpr int kMaxFiberDepth = 64;              /* max nested fiber resumes (C stack) */
+    constexpr int kFarConstantSlot = 255;           /* see OP_LOADNAME */
     constexpr int kMaxConstants = 65536;            /* constant pool per function */
     constexpr int kOperatorSlotCount = 18;          /* fixed object operator slots */
     /* Width of the table when bytecode minor was 1-2 (before __len__ became

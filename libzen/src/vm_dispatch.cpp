@@ -1129,12 +1129,13 @@ namespace zen
             &&lbl_OP_RETURNNIL,
             &&lbl_OP_CLASSFIELD_R,
             &&lbl_OP_CLASSFIELDDEF_R,
+            &&lbl_OP_LOADNAME,
         };
 
         /* Same rule as s_opnames in debug.cpp, and worse when it breaks: a
         ** missing entry here shifts every later label, so DISPATCH() jumps
         ** into the wrong handler and the VM misbehaves with a clean build. */
-        static_assert(sizeof(dispatch_table) / sizeof(dispatch_table[0]) == (size_t)OP_CLASSFIELDDEF_R + 1,
+        static_assert(sizeof(dispatch_table) / sizeof(dispatch_table[0]) == (size_t)OP_LOADNAME + 1,
                       "dispatch_table is out of sync with the OpCode enum");
 
 #ifdef ZEN_OPCODE_PROFILE
@@ -6577,6 +6578,12 @@ namespace zen
             else
                 globals_[gidx] = R[dest];
 
+            NEXT();
+        }
+
+        CASE(OP_LOADNAME)
+        {
+            K[kFarConstantSlot] = K[ZEN_BX(*ip)];
             NEXT();
         }
 

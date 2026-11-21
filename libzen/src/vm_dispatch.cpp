@@ -836,6 +836,68 @@ namespace zen
         R[a] = val_obj((Obj *)ns);
     }
 
+    /* The interned ObjString for `name`, or nullptr when no such string exists:
+    ** field, property and method names are all interned, so a name that is not
+    ** cannot belong to any class. */
+    static ObjString *interned_name(GC *gc, ObjString *name)
+    {
+        if (name->obj.interned)
+            return name;
+        return find_interned(gc, name->chars, name->length, hash_string(name->chars, name->length));
+    }
+
+    int VM::instance_attr(Value receiver, ObjString *name, Value *out)
+    {
+        if (!is_instance(receiver))
+            return 0;
+        name = interned_name(&gc_, name);
+        if (!name)
+            return 0;
+        ObjInstance *inst = as_instance(receiver);
+        ObjClass *klass = inst->klass;
+        for (int32_t fi = 0; fi < klass->num_fields; fi++)
+        {
+            if (klass->field_names[fi] == name)
+            {
+                *out = fi < inst->num_fields ? inst->fields[fi] : val_nil();
+                return 1;
+            }
+        }
+        if (const NativeProperty *prop = class_find_property(klass, name))
+        {
+            if (!prop->getter)
+            {
+                runtime_error("'%s.%s' is write-only", klass->name->chars, name->chars);
+                return -1;
+            }
+            return property_get(this, prop, receiver, out) ? 1 : -1;
+        }
+        Value method;
+        if (find_method_in_chain(klass, name, &method) && (is_closure(method) || is_native(method)))
+        {
+            *out = val_obj((Obj *)new_bound_method(&gc_, receiver, method));
+            return 1;
+        }
+        return 0;
+    }
+
+    bool VM::instance_has_attr(Value receiver, ObjString *name)
+    {
+        if (!is_instance(receiver))
+            return false;
+        name = interned_name(&gc_, name);
+        if (!name)
+            return false;
+        ObjClass *klass = as_instance(receiver)->klass;
+        for (int32_t fi = 0; fi < klass->num_fields; fi++)
+            if (klass->field_names[fi] == name)
+                return true;
+        if (const NativeProperty *prop = class_find_property(klass, name))
+            return prop->getter != nullptr;
+        Value method;
+        return find_method_in_chain(klass, name, &method) && (is_closure(method) || is_native(method));
+    }
+
     /* OP_EVAL compilation, out of line. A Compiler is ~82 KB and eval needs two
     ** of them; as locals of execute() they inflated its frame to ~170 KB, and
     ** with stack-clash protection every host->script entry probed all of it.

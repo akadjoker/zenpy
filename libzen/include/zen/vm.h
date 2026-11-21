@@ -580,6 +580,15 @@ namespace zen
     public:
         bool had_error() const { return had_error_; }
 
+        /* `obj.name` read as a value, for natives such as getattr/hasattr:
+        ** instance field, then native property (its getter runs), then a
+        ** method (a bound method) — the order OP_GETFIELD uses. Returns 1 and
+        ** sets *out when found, 0 when the instance has no such attribute and
+        ** -1 when a getter raised a runtime error. instance_has_attr is the
+        ** same lookup without calling a getter. */
+        int instance_attr(Value receiver, ObjString *name, Value *out);
+        bool instance_has_attr(Value receiver, ObjString *name);
+
         /* Intern a method name → slot index (0..255). Same name → same slot. */
         int intern_selector(const char *name, int len);
         int find_selector(const char *name, int len) const;

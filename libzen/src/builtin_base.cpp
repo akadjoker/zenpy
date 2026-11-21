@@ -748,28 +748,15 @@ namespace zen
         return 1;
     }
 
-    /* getattr(obj, name[, default]) / hasattr(obj, name): instance fields. */
-    static bool py_get_field(Value obj, ObjString *name, Value *out)
-    {
-        if (!is_instance(obj)) return false;
-        ObjInstance *inst = as_instance(obj);
-        ObjClass *k = inst->klass;
-        for (int32_t fi = 0; fi < k->num_fields; fi++)
-        {
-            ObjString *fn = k->field_names[fi];
-            if (fn->length == name->length && memcmp(fn->chars, name->chars, (size_t)name->length) == 0)
-            {
-                *out = fi < inst->num_fields ? inst->fields[fi] : val_nil();
-                return true;
-            }
-        }
-        return false;
-    }
+    /* getattr(obj, name[, default]) / hasattr(obj, name): an instance's fields,
+    ** native properties and methods, as `obj.name` resolves them. */
     static int nat_getattr(VM *vm, Value *args, int nargs)
     {
         if (nargs < 2 || !is_string(args[1])) { vm->runtime_error("getattr() expects (object, name[, default])"); return -1; }
         Value v;
-        if (py_get_field(args[0], as_string(args[1]), &v)) { args[0] = v; return 1; }
+        int found = vm->instance_attr(args[0], as_string(args[1]), &v);
+        if (found < 0) return -1;
+        if (found > 0) { args[0] = v; return 1; }
         if (nargs >= 3) { args[0] = args[2]; return 1; }
         vm->runtime_error("object has no attribute '%s'", as_string(args[1])->chars);
         return -1;
@@ -777,8 +764,7 @@ namespace zen
     static int nat_hasattr(VM *vm, Value *args, int nargs)
     {
         if (nargs < 2 || !is_string(args[1])) { vm->runtime_error("hasattr() expects (object, name)"); return -1; }
-        Value v;
-        args[0] = val_bool(py_get_field(args[0], as_string(args[1]), &v));
+        args[0] = val_bool(vm->instance_has_attr(args[0], as_string(args[1])));
         return 1;
     }
 

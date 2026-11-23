@@ -9,6 +9,7 @@
 */
 
 #include "compiler.h"
+#include "zenconf.h"
 
 #include <cstdlib>
 
@@ -305,16 +306,32 @@ namespace zen
 
         if (!silent_)
         {
-            fprintf(stderr, "[line %d] Error", token.line);
+            /* Through zen_writeerr, as runtime errors go, so an embedder's
+               console gets them; the File line is the runtime trace's, so
+               one reader finds the place of either kind of error. */
+            char text[768];
+            int n;
             if (token.type == TOK_EOF)
-                fprintf(stderr, " at end");
+                n = snprintf(text, sizeof(text), "[line %d] Error at end: %s\n", token.line, msg);
             else if (token.type != TOK_ERROR)
-                fprintf(stderr, " at '%.*s'", token.length, token.start);
-            fprintf(stderr, ": %s\n", msg);
+                n = snprintf(text, sizeof(text), "[line %d] Error at '%.*s': %s\n", token.line, token.length,
+                             token.start, msg);
+            else
+                n = snprintf(text, sizeof(text), "[line %d] Error: %s\n", token.line, msg);
+            if (n > 0)
+                zen_writeerr(text, (size_t)(n < (int)sizeof(text) ? n : (int)sizeof(text) - 1));
+            if (current_file_)
+            {
+                n = snprintf(text, sizeof(text), "  File \"%s\", line %d\n", current_file_, token.line);
+                if (n > 0)
+                    zen_writeerr(text, (size_t)(n < (int)sizeof(text) ? n : (int)sizeof(text) - 1));
+            }
 
             if (error_count_ >= kMaxCompileErrors)
             {
-                fprintf(stderr, "Too many compile errors (%d). Aborting parse.\n", error_count_);
+                n = snprintf(text, sizeof(text), "Too many compile errors (%d). Aborting parse.\n", error_count_);
+                if (n > 0)
+                    zen_writeerr(text, (size_t)n);
             }
         }
 

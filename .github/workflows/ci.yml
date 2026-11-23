@@ -1,9 +1,10 @@
 name: CI
 
+# Only a release starts this: a v* tag, or a run started by hand. Ordinary
+# pushes and pull requests build nothing.
 on:
   push:
-    branches: [main]
-  pull_request:
+    tags: ['v*']
   workflow_dispatch:
 
 concurrency:

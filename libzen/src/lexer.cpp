@@ -625,6 +625,15 @@ namespace zen
             return t;
         }
 
+        /* Raw string r"..." : a TOK_STRING whose text keeps its prefix, so the
+        ** compiler knows not to process escapes. */
+        if (length == 1 && (start_[0] == 'r' || start_[0] == 'R') && !is_at_end() &&
+            (*current_ == '"' || *current_ == '\''))
+        {
+            char q = advance_char();
+            return scan_string(q);
+        }
+
         /* Single underscore is TOK_UNDERSCORE */
         if (length == 1 && start_[0] == '_')
             return make_token(TOK_UNDERSCORE);

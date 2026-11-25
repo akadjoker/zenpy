@@ -261,6 +261,10 @@ namespace zen
               /* --- Fiber API --- */
         ObjFiber *new_fiber(ObjClosure *closure, int stack_size = 256, int max_frames = kMaxFrames);
         Value resume_fiber(ObjFiber *fiber, Value val);
+        /* One step of a generator, as next() takes it: true with the
+        ** yielded value, false when it has finished or failed (had_error()
+        ** tells which). Natives use it to consume a generator. */
+        bool generator_next(ObjFiber *gen, Value *out);
 
         /* --- File I/O (for import) --- */
         void add_search_path(const char *dir);
@@ -588,6 +592,11 @@ namespace zen
         ** same lookup without calling a getter. */
         int instance_attr(Value receiver, ObjString *name, Value *out);
         bool instance_has_attr(Value receiver, ObjString *name);
+        /* `obj.name = val` on an instance, as OP_SETFIELD stores it: an
+        ** existing field, else a native property's setter, else a new field.
+        ** 1 when stored, 0 when the receiver is not an instance, -1 on a
+        ** runtime error (read-only property, setter failure). */
+        int instance_set_attr(Value receiver, ObjString *name, Value val);
 
         /* Intern a method name → slot index (0..255). Same name → same slot. */
         int intern_selector(const char *name, int len);

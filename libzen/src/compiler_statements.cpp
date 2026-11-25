@@ -306,7 +306,7 @@ namespace zen
                     else if (check(TOK_FLOAT)) { advance(); default_vals[di] = val_float(strtod(previous_.start, nullptr)); }
                     else if (check(TOK_STRING)) {
                         advance();
-                        int ki = state_->emitter.add_escaped_string_constant(previous_.start + 1, previous_.length - 2);
+                        int ki = string_token_constant(previous_);
                         default_vals[di].type = VAL_INT;
                         default_vals[di].as.integer = ki;
                         default_is_strk[di] = true;
@@ -518,10 +518,17 @@ namespace zen
 
         /* Parse colon + block of methods */
         consume(TOK_COLON, "Expected ':' after class name.");
-        consume(TOK_NEWLINE, "Expected newline after ':'.");
-        consume(TOK_INDENT, "Expected indented class body.");
+        /* `class Empty: pass` (or a docstring) on one line has no body block. */
+        const bool one_line = match(TOK_PASS) || match(TOK_STRING);
+        if (one_line)
+            match(TOK_NEWLINE);
+        else
+        {
+            consume(TOK_NEWLINE, "Expected newline after ':'.");
+            consume(TOK_INDENT, "Expected indented class body.");
+        }
 
-        while (!check(TOK_DEDENT) && !check(TOK_EOF))
+        while (!one_line && !check(TOK_DEDENT) && !check(TOK_EOF))
         {
             /* Skip blank lines */
             while (match(TOK_NEWLINE)) {}
@@ -636,7 +643,7 @@ namespace zen
                             else if (check(TOK_FLOAT)) { advance(); default_vals[di] = val_float(strtod(previous_.start, nullptr)); }
                             else if (check(TOK_STRING)) {
                                 advance();
-                                int ki = state_->emitter.add_escaped_string_constant(previous_.start + 1, previous_.length - 2);
+                                int ki = string_token_constant(previous_);
                                 default_vals[di].type = VAL_INT;
                                 default_vals[di].as.integer = ki;
                                 default_is_strk[di] = true;
@@ -750,8 +757,9 @@ namespace zen
 
                 match(TOK_NEWLINE);
             }
-            else if (match(TOK_PASS))
+            else if (match(TOK_PASS) || match(TOK_STRING))
             {
+                /* `pass`, or a docstring: nothing to compile. */
                 match(TOK_NEWLINE);
             }
             else if (check(TOK_IDENTIFIER))
@@ -849,7 +857,8 @@ namespace zen
             }
         }
 
-        consume(TOK_DEDENT, "Expected end of class body.");
+        if (!one_line)
+            consume(TOK_DEDENT, "Expected end of class body.");
 
         /* Emit OP_CLASSFIELD for each field — pre-registers names in klass at creation time.
         ** This makes SETFIELD_IDX safe (only needs to grow inst->fields, not klass). */
@@ -1065,50 +1074,62 @@ namespace zen
     ** import math          — loads module ObjMap into global "math"
     ** ========================================================= */
 
+    bool Compiler::match_as()
+    {
+        if (!check(TOK_IDENTIFIER) || current_.length != 2 || memcmp(current_.start, "as", 2) != 0)
+            return false;
+        advance();
+        return true;
+    }
+
     void Compiler::import_statement()
     {
-        /* Accept both identifiers and 'struct' keyword as module name */
-        if (!match(TOK_IDENTIFIER))
+        do
         {
-            error("Expected module name after 'import'.");
-            return;
-        }
+            if (!match(TOK_IDENTIFIER))
+            {
+                error("Expected module name after 'import'.");
+                return;
+            }
 
-        /* Build dotted module path: "foo.bar.baz" */
-        char mod_path[256];
-        int mlen = previous_.length < 250 ? previous_.length : 250;
-        memcpy(mod_path, previous_.start, mlen);
-        const char *alias_start = previous_.start;
-        int alias_len = previous_.length;
-        int line = previous_.line;
-        while (match(TOK_DOT))
-        {
-            consume(TOK_IDENTIFIER, "Expected identifier after '.' in module path.");
-            if (mlen < 254)
-                mod_path[mlen++] = '.';
-            int add = previous_.length < (254 - mlen) ? previous_.length : (254 - mlen);
-            memcpy(mod_path + mlen, previous_.start, add);
-            mlen += add;
-            /* The binding name is the last component */
-            alias_start = previous_.start;
-            alias_len = previous_.length;
-        }
-        mod_path[mlen] = '\0';
+            /* Build dotted module path: "foo.bar.baz" */
+            char mod_path[256];
+            int mlen = previous_.length < 250 ? previous_.length : 250;
+            memcpy(mod_path, previous_.start, mlen);
+            const char *alias_start = previous_.start;
+            int alias_len = previous_.length;
+            int line = previous_.line;
+            while (match(TOK_DOT))
+            {
+                consume(TOK_IDENTIFIER, "Expected identifier after '.' in module path.");
+                if (mlen < 254)
+                    mod_path[mlen++] = '.';
+                int add = previous_.length < (254 - mlen) ? previous_.length : (254 - mlen);
+                memcpy(mod_path + mlen, previous_.start, add);
+                mlen += add;
+                /* The binding name is the last component */
+                alias_start = previous_.start;
+                alias_len = previous_.length;
+            }
+            mod_path[mlen] = '\0';
+            if (match_as())
+            {
+                consume(TOK_IDENTIFIER, "Expected a name after 'as'.");
+                alias_start = previous_.start;
+                alias_len = previous_.length;
+            }
 
-        /* Add module path string as a constant */
-        ObjString *mod_str = intern_string(gc_, mod_path, mlen,
-                                           hash_string(mod_path, mlen));
-        int ki = state_->emitter.add_constant(val_obj((Obj *)mod_str));
+            ObjString *mod_str = intern_string(gc_, mod_path, mlen,
+                                               hash_string(mod_path, mlen));
+            int ki = state_->emitter.add_constant(val_obj((Obj *)mod_str));
+            int reg = alloc_reg();
+            state_->emitter.emit_abx(OP_IMPORT, reg, ki, line);
 
-        /* Allocate temp register, emit OP_IMPORT */
-        int reg = alloc_reg();
-        state_->emitter.emit_abx(OP_IMPORT, reg, ki, line);
-
-        /* Store result as global with last component name
-        ** e.g. "import pkg.utils" → global "utils" */
-        int gidx = find_or_add_global(alias_start, alias_len);
-        state_->emitter.emit_abx(OP_SETGLOBAL, reg, gidx, line);
-        free_reg(reg);
+            /* "import pkg.utils" binds "utils"; "import pkg.utils as u" binds "u" */
+            int gidx = find_or_add_global(alias_start, alias_len);
+            state_->emitter.emit_abx(OP_SETGLOBAL, reg, gidx, line);
+            free_reg(reg);
+        } while (match(TOK_COMMA));
     }
 
     /* =========================================================
@@ -1184,8 +1205,13 @@ namespace zen
             const int field_operand = name_operand(fki, field_name.line);
             state_->emitter.emit_abc(OP_GETFIELD, dest, mod_reg, field_operand, field_name.line);
 
-            /* Make it a global */
-            int gidx = find_or_add_global(field_name.start, field_name.length);
+            Token bound = field_name;
+            if (match_as())
+            {
+                consume(TOK_IDENTIFIER, "Expected a name after 'as'.");
+                bound = previous_;
+            }
+            int gidx = find_or_add_global(bound.start, bound.length);
             state_->emitter.emit_abx(OP_SETGLOBAL, dest, gidx, field_name.line);
             free_reg(dest);
 
@@ -1582,6 +1608,145 @@ namespace zen
     ** Compiles to equality tests + jumps (no new opcodes).
     ** ========================================================= */
 
+    static void add_fail(int *fails, int &fail_count, int max_fails, int jump)
+    {
+        if (fail_count < max_fails)
+            fails[fail_count++] = jump;
+    }
+
+    /* A pattern with `|` alternatives: each alternative's failures go to the
+    ** next one, the last one's to the case's; a success skips the rest. */
+    int Compiler::match_pattern(int subject, int *fails, int &fail_count, int max_fails)
+    {
+        static const int kMaxAlt = 32;
+        int alt_fails[kMaxAlt];
+        int alt_count = 0;
+        match_closed_pattern(subject, alt_fails, alt_count, kMaxAlt);
+        int ok_jumps[kMaxAlt];
+        int ok_count = 0;
+        while (match(TOK_PIPE))
+        {
+            if (ok_count < kMaxAlt)
+                ok_jumps[ok_count++] = state_->emitter.emit_jump(OP_JMP, 0, previous_.line);
+            for (int i = 0; i < alt_count; i++)
+                state_->emitter.patch_jump(alt_fails[i]);
+            alt_count = 0;
+            match_closed_pattern(subject, alt_fails, alt_count, kMaxAlt);
+        }
+        for (int i = 0; i < alt_count; i++)
+            add_fail(fails, fail_count, max_fails, alt_fails[i]);
+        for (int i = 0; i < ok_count; i++)
+            state_->emitter.patch_jump(ok_jumps[i]);
+        return 0;
+    }
+
+    /* One pattern: `_`, a capture name, a sequence `[p, q]` / `(p, q)`, a
+    ** group `(p)`, or a value (literal or dotted name) compared with ==. */
+    int Compiler::match_closed_pattern(int subject, int *fails, int &fail_count, int max_fails)
+    {
+        const int line = current_.line;
+        if (match(TOK_UNDERSCORE))
+            return 0;
+
+        if (check(TOK_LBRACKET) || check(TOK_LPAREN))
+        {
+            const bool is_list = check(TOK_LBRACKET);
+            const TokenType close = is_list ? TOK_RBRACKET : TOK_RPAREN;
+
+            /* Count the elements first: the length test comes before any index. */
+            LexerState saved_lex = lexer_.save_state();
+            Token saved_cur = current_;
+            Token saved_prev = previous_;
+            advance();
+            int depth = 0;
+            int count = 0;
+            bool pending = false;
+            bool comma = false;
+            while (!check(TOK_EOF) && !check(TOK_NEWLINE))
+            {
+                if (depth == 0 && check(close))
+                    break;
+                if (check(TOK_LBRACKET) || check(TOK_LPAREN) || check(TOK_LBRACE))
+                    depth++;
+                else if (check(TOK_RBRACKET) || check(TOK_RPAREN) || check(TOK_RBRACE))
+                    depth--;
+                else if (depth == 0 && check(TOK_COMMA))
+                {
+                    comma = true;
+                    if (pending)
+                        count++;
+                    pending = false;
+                    advance();
+                    continue;
+                }
+                pending = true;
+                advance();
+            }
+            if (pending)
+                count++;
+            lexer_.restore_state(saved_lex);
+            current_ = saved_cur;
+            previous_ = saved_prev;
+
+            advance(); /* '[' or '(' */
+            if (!is_list && !comma)
+            {
+                match_pattern(subject, fails, fail_count, max_fails);
+                consume(TOK_RPAREN, "Expected ')' after the pattern.");
+                return 0;
+            }
+
+            int len = alloc_reg();
+            state_->emitter.emit_abc(OP_LEN, len, subject, 1, line);
+            int index = alloc_reg();
+            state_->emitter.emit_asbx(OP_LOADI, index, count, line);
+            state_->emitter.emit_abc(OP_EQ, len, len, index, line);
+            add_fail(fails, fail_count, max_fails, state_->emitter.emit_jump(OP_JMPIFNOT, len, line));
+            for (int i = 0; i < count; i++)
+            {
+                int element = alloc_reg();
+                state_->emitter.emit_asbx(OP_LOADI, index, i, line);
+                state_->emitter.emit_abc(OP_GETINDEX, element, subject, index, line);
+                match_pattern(element, fails, fail_count, max_fails);
+                if (i + 1 < count)
+                    consume(TOK_COMMA, "Expected ',' between the patterns of a sequence.");
+                else
+                    match(TOK_COMMA);
+            }
+            consume(close, is_list ? "Expected ']' after the sequence pattern."
+                                   : "Expected ')' after the sequence pattern.");
+            return 0;
+        }
+
+        if (check(TOK_IDENTIFIER))
+        {
+            /* A bare name captures the subject; `a.b` is a value. */
+            LexerState saved_lex = lexer_.save_state();
+            Token saved_cur = current_;
+            Token saved_prev = previous_;
+            advance();
+            const bool capture = !check(TOK_DOT) && !check(TOK_LPAREN) && !check(TOK_LBRACKET);
+            Token name = previous_;
+            if (capture)
+            {
+                declare_function_local(name);
+                store_to_lhs(name, subject);
+                return 0;
+            }
+            lexer_.restore_state(saved_lex);
+            current_ = saved_cur;
+            previous_ = saved_prev;
+        }
+
+        int value = parse_precedence(PREC_BITXOR, -1);
+        int test = alloc_reg();
+        state_->emitter.emit_abc(OP_EQ, test, subject, value, line);
+        add_fail(fails, fail_count, max_fails, state_->emitter.emit_jump(OP_JMPIFNOT, test, line));
+        free_reg(test);
+        free_reg(value);
+        return 0;
+    }
+
     void Compiler::match_statement()
     {
         int subject = expression(-1);
@@ -1619,15 +1784,19 @@ namespace zen
             }
             advance(); /* consume 'case' */
 
-            /* Parse the case pattern as an expression */
-            int pattern = expression(-1);
-
-            /* Emit: tmp = (subject == pattern), jump-if-not to next case */
-            int tmp = alloc_reg();
-            state_->emitter.emit_abc(OP_EQ, tmp, subject, pattern, previous_.line);
-            free_reg(pattern);
-            int skip_jump = state_->emitter.emit_jump(OP_JMPIFNOT, tmp, previous_.line);
-            free_reg(tmp);
+            /* Every failed test of the pattern or of its guard jumps to the
+            ** next case. */
+            static const int kMaxFails = 64;
+            int fails[kMaxFails];
+            int fail_count = 0;
+            match_pattern(subject, fails, fail_count, kMaxFails);
+            if (match(TOK_IF))
+            {
+                int guard = expression(-1);
+                if (fail_count < kMaxFails)
+                    fails[fail_count++] = state_->emitter.emit_jump(OP_JMPIFNOT, guard, previous_.line);
+                free_reg(guard);
+            }
 
             /* Parse body as colon-block (colon_block consumes ':' itself) */
             colon_block();
@@ -1636,8 +1805,9 @@ namespace zen
             if (end_count < 128)
                 end_jumps[end_count++] = state_->emitter.emit_jump(OP_JMP, 0, previous_.line);
 
-            /* Patch skip to here (next case) */
-            state_->emitter.patch_jump(skip_jump);
+            /* Patch every failure to here (next case) */
+            for (int fi = 0; fi < fail_count; fi++)
+                state_->emitter.patch_jump(fails[fi]);
         }
 
         if (check(TOK_DEDENT)) advance();
@@ -1771,18 +1941,52 @@ namespace zen
     {
         begin_scope();
 
-        /* Loop variable(s) — detect tuple unpack: for k, v in ... */
-        if (!match(TOK_UNDERSCORE)) consume(TOK_IDENTIFIER, "Expected variable name after 'for'.");
+        /* Loop variable(s): `for v`, `for k, v`, and one level of nesting,
+        ** `for i, (a, b)`. Each name records the element it comes from:
+        ** var_outer[] in the iterated value, var_inner[] inside that (-1: none). */
         Token var_names[8];
-        int var_count = 1;
-        var_names[0] = previous_;
-
-        while (check(TOK_COMMA) && var_count < 8)
+        int var_outer[8];
+        int var_inner[8];
+        int var_count = 0;
+        int top_count = 0;
+        bool nested = false;
+        do
         {
-            advance(); /* consume comma */
-            consume(TOK_IDENTIFIER, "Expected variable name in for-unpack.");
-            var_names[var_count++] = previous_;
-        }
+            if (match(TOK_LPAREN))
+            {
+                nested = true;
+                int inner = 0;
+                do
+                {
+                    if (!match(TOK_UNDERSCORE))
+                        consume(TOK_IDENTIFIER, "Expected variable name in for-unpack.");
+                    if (var_count < 8)
+                    {
+                        var_names[var_count] = previous_;
+                        var_outer[var_count] = top_count;
+                        var_inner[var_count] = inner;
+                        var_count++;
+                    }
+                    inner++;
+                } while (match(TOK_COMMA));
+                consume(TOK_RPAREN, "Expected ')' after the names in for-unpack.");
+            }
+            else
+            {
+                if (!match(TOK_UNDERSCORE))
+                    consume(TOK_IDENTIFIER, var_count == 0 ? "Expected variable name after 'for'."
+                                                           : "Expected variable name in for-unpack.");
+                if (var_count < 8)
+                {
+                    var_names[var_count] = previous_;
+                    var_outer[var_count] = top_count;
+                    var_inner[var_count] = -1;
+                    var_count++;
+                }
+            }
+            top_count++;
+        } while (match(TOK_COMMA));
+        const bool unpack = var_count > 1 || nested;
 
         consume(TOK_IN, "Expected 'in' after variable name.");
 
@@ -1806,7 +2010,7 @@ namespace zen
         ** Same observable behaviour as iterating the range object: the
         ** iteration count is fixed on entry, rebinding `i` in the body
         ** does not alter the schedule, and step 0 is the same error. */
-        if (var_count == 1 && builtin_range_call_ahead())
+        if (!unpack && builtin_range_call_ahead())
         {
             advance(); /* range */
             advance(); /* ( */
@@ -1899,7 +2103,7 @@ namespace zen
 
         /* Loop variable(s) */
         int var_reg;
-        if (var_count == 1)
+        if (!unpack)
         {
             var_reg = add_local(var_names[0]);
         }
@@ -1928,17 +2132,27 @@ namespace zen
         loop.start_offset = loop_start;
 
         /* Tuple unpack: R[var_reg] is an array — extract into individual locals */
-        if (var_count > 1)
+        if (unpack)
         {
             /* locals were added after var_reg, so they start at var_reg+1 */
             int base_local = var_reg + 1;
             int idx_tmp = alloc_reg(); /* temporary reg to hold index constant */
+            int elem_tmp = nested ? alloc_reg() : -1;
             for (int vi = 0; vi < var_count; vi++)
             {
                 int dest = base_local + vi;
-                state_->emitter.emit_asbx(OP_LOADI, idx_tmp, vi, previous_.line);
-                state_->emitter.emit_abc(OP_GETINDEX, dest, var_reg, idx_tmp, previous_.line);
+                state_->emitter.emit_asbx(OP_LOADI, idx_tmp, var_outer[vi], previous_.line);
+                if (var_inner[vi] < 0)
+                {
+                    state_->emitter.emit_abc(OP_GETINDEX, dest, var_reg, idx_tmp, previous_.line);
+                    continue;
+                }
+                state_->emitter.emit_abc(OP_GETINDEX, elem_tmp, var_reg, idx_tmp, previous_.line);
+                state_->emitter.emit_asbx(OP_LOADI, idx_tmp, var_inner[vi], previous_.line);
+                state_->emitter.emit_abc(OP_GETINDEX, dest, elem_tmp, idx_tmp, previous_.line);
             }
+            if (elem_tmp >= 0)
+                free_reg(elem_tmp);
             free_reg(idx_tmp);
         }
 
@@ -2318,6 +2532,19 @@ namespace zen
     ** Expression statement (assignment or bare expression)
     ** ========================================================= */
 
+    bool Compiler::declare_function_local(const Token &name)
+    {
+        if (state_->parent == nullptr || name.type == TOK_UNDERSCORE ||
+            resolve_local(state_, name) != -1 || is_declared_global(name))
+            return false;
+        add_local(name);
+        const int local = state_->local_count - 1;
+        /* Function scope, as `name = expr` makes it: Python has no block scope. */
+        state_->locals[local].depth = 1;
+        start_local(local);
+        return true;
+    }
+
     void Compiler::store_to_lhs(const Token &name, int src_reg)
     {
         /* Unpacked values have no single constructor expression behind
@@ -2424,6 +2651,15 @@ namespace zen
 
             consume(TOK_EQ, "Expected '=' in multi-assign.");
 
+            /* New names inside a function are its locals, not globals. They
+            ** take their registers now, below the right-hand side's. */
+            bool declared = false;
+            for (int i = 0; i < lhs_count; i++)
+                if (targets[i].kind == LHSTarget::NAME)
+                    declared = declare_function_local(targets[i].name) || declared;
+            if (declared)
+                saved = state_->next_reg;
+
                 /* ---- Evaluate RHS into temps above lhs infra regs ---- */
             int rhs_base = state_->next_reg;
             int rhs_start = state_->emitter.current_offset();
@@ -2483,18 +2719,57 @@ namespace zen
             }
             else
             {
-                /* Single-expression RHS: patch CALL nresults */
+                /* Single-expression RHS. A call that ends it gives its
+                ** results straight into the targets (patch its nresults);
+                ** anything else is a sequence, indexed element by element. */
                 int call_offset = -1;
-                for (int off = state_->emitter.current_offset() - 1; off >= rhs_start; off--)
+                auto is_call = [](Instruction instr) {
+                    const uint32_t op = instr >> 24;
+                    return op == (uint32_t)OP_CALL || op == (uint32_t)OP_CALLGLOBAL ||
+                           op == (uint32_t)OP_INVOKE || op == (uint32_t)OP_INVOKE_VT;
+                };
+                /* The start of the last instruction: a call may carry
+                ** extra words after it. */
+                const int last = state_->emitter.last_op_start();
+                if (last >= rhs_start)
                 {
-                    Instruction instr = state_->emitter.instruction_at(off);
-                    uint32_t op = (instr >> 24);
-                    if (op == (uint32_t)OP_CALL || op == (uint32_t)OP_CALLGLOBAL ||
-                        op == (uint32_t)OP_INVOKE || op == (uint32_t)OP_INVOKE_VT) { call_offset = off; break; }
+                    Instruction instr = state_->emitter.instruction_at(last);
+                    if (is_call(instr))
+                        call_offset = last;
+                    else if ((OpCode)ZEN_OP(instr) == OP_MOVE)
+                    {
+                        /* `call; MOVE dest, result`: the call still ends the
+                        ** expression, its first result copied to dest. Only
+                        ** the few words a call takes are searched. */
+                        for (int off = last - 1; off >= rhs_start && off >= last - 3; off--)
+                        {
+                            Instruction prev = state_->emitter.instruction_at(off);
+                            if (is_call(prev) && (int)ZEN_A(prev) == (int)ZEN_B(instr))
+                            {
+                                call_offset = off;
+                                break;
+                            }
+                        }
+                    }
                 }
                 if (call_offset < 0)
                 {
-                    error("Multi-assign right-hand side must be a function/method call or tuple.");
+                    const int holder = alloc_reg();
+                    emit_move(holder, r0);
+                    const int index = alloc_reg();
+                    for (int i = 0; i < lhs_count; i++)
+                    {
+                        state_->emitter.emit_asbx(OP_LOADI, index, i, previous_.line);
+                        state_->emitter.emit_abc(OP_GETINDEX, rhs_base + i, holder, index, previous_.line);
+                    }
+                    for (int i = 0; i < lhs_count; i++)
+                    {
+                        if (targets[i].kind == LHSTarget::NAME)
+                            store_to_lhs(targets[i].name, rhs_base + i);
+                        else
+                            state_->emitter.emit_abc(OP_SETINDEX,
+                                targets[i].container, targets[i].index, rhs_base + i, previous_.line);
+                    }
                     state_->next_reg = saved;
                     return;
                 }

@@ -94,8 +94,8 @@ math.abs(3.14)    # → 3.14
 ```python
 import math
 
-math.ceil(3.2)    # → 4.0
-math.floor(3.8)   # → 3.0
+math.ceil(3.2)    # → 4 (an int, as in Python)
+math.floor(3.8)   # → 3
 math.round(3.5)   # → 4.0
 math.round(3.4)   # → 3.0
 ```

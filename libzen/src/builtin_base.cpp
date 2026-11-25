@@ -683,8 +683,10 @@ namespace zen
             case OBJ_SET:     name = "set"; break;
             case OBJ_CLASS:   name = "type"; break;
             case OBJ_INSTANCE:
-                name = as_instance(v)->klass->name->chars;
-                break;
+                /* The class itself, so `type(obj) is Cls` holds; its
+                ** __name__ is still the name. */
+                args[0] = val_obj((Obj *)as_instance(v)->klass);
+                return 1;
             case OBJ_FUNC: case OBJ_CLOSURE: case OBJ_NATIVE: case OBJ_BOUND_METHOD:
                 name = "function"; break;
             case OBJ_BUFFER: name = "buffer"; break;
@@ -765,6 +767,31 @@ namespace zen
     {
         if (nargs < 2 || !is_string(args[1])) { vm->runtime_error("hasattr() expects (object, name)"); return -1; }
         args[0] = val_bool(vm->instance_has_attr(args[0], as_string(args[1])));
+        return 1;
+    }
+    static int nat_setattr(VM *vm, Value *args, int nargs)
+    {
+        if (nargs < 3 || !is_string(args[1])) { vm->runtime_error("setattr() expects (object, name, value)"); return -1; }
+        int stored = vm->instance_set_attr(args[0], as_string(args[1]), args[2]);
+        if (stored < 0) return -1;
+        if (stored == 0) { vm->runtime_error("setattr() needs an instance of a class"); return -1; }
+        args[0] = val_nil();
+        return 1;
+    }
+    static int nat_issubclass(VM *vm, Value *args, int nargs)
+    {
+        if (nargs < 2 || !is_class(args[0])) { vm->runtime_error("issubclass() arg 1 must be a class"); return -1; }
+        ObjClass *klass = as_class(args[0]);
+        bool result = false;
+        const int count = is_array(args[1]) ? arr_count(as_array(args[1])) : 1;
+        for (int i = 0; i < count && !result; i++)
+        {
+            Value target = is_array(args[1]) ? as_array(args[1])->data[i] : args[1];
+            if (!is_class(target)) { vm->runtime_error("issubclass() arg 2 must be a class or a tuple of classes"); return -1; }
+            for (ObjClass *k = klass; k && !result; k = k->parent)
+                result = k == as_class(target);
+        }
+        args[0] = val_bool(result);
         return 1;
     }
 
@@ -1145,33 +1172,34 @@ namespace zen
     ** ========================================================= */
     static int nat_enumerate(VM *vm, Value *args, int nargs)
     {
-        (void)nargs;
         GC *gc = &vm->get_gc();
-        Value iterable = args[0];
-        ObjArray *result = new_array(gc);
-
-        if (is_obj(iterable) && iterable.as.obj->type == OBJ_ARRAY)
+        if (nargs < 1)
         {
-            ObjArray *src = as_array(iterable);
-            for (int32_t i = 0; i < arr_count(src); i++)
-            {
-                ObjArray *pair = new_array(gc);
-                array_push(gc, pair, val_int(i));
-                array_push(gc, pair, src->data[i]);
-                array_push(gc, result, val_obj((Obj *)pair));
-            }
+            vm->runtime_error("enumerate() takes an iterable");
+            return -1;
         }
-        else if (is_obj(iterable) && iterable.as.obj->type == OBJ_STRING)
+        Value start_value = val_int(0);
+        if (nargs >= 2)
+            start_value = args[1];
+        else
+            kwarg_get(vm, "start", &start_value);
+        if (!is_int(start_value))
         {
-            ObjString *s = as_string(iterable);
-            for (int32_t i = 0; i < (int32_t)s->length; i++)
-            {
-                ObjArray *pair = new_array(gc);
-                array_push(gc, pair, val_int(i));
-                ObjString *ch = create_string(gc, s->chars + i, 1);
-                array_push(gc, pair, val_obj((Obj *)ch));
-                array_push(gc, result, val_obj((Obj *)pair));
-            }
+            vm->runtime_error("enumerate(): start must be an int");
+            return -1;
+        }
+        const int64_t start = start_value.as.integer;
+
+        ct::Vector<Value> items;
+        if (!py_collect(vm, args[0], items, "enumerate"))
+            return -1;
+        ObjArray *result = new_array(gc);
+        for (size_t i = 0; i < items.size(); i++)
+        {
+            ObjArray *pair = new_array(gc);
+            array_push(gc, pair, val_int(start + (int64_t)i));
+            array_push(gc, pair, items[i]);
+            array_push(gc, result, val_obj((Obj *)pair));
         }
 
         args[0] = val_obj((Obj *)result);
@@ -1402,14 +1430,12 @@ namespace zen
         }
         if (is_fiber(v))
         {
-            /* Consuming a generator means resuming it, which re-enters
-            ** execute() — a native cannot do that. Say so instead of
-            ** "not iterable", which sends people looking for the wrong
-            ** thing when the generator is perfectly iterable in a loop. */
-            vm->runtime_error("%s: cannot consume a generator here — "
-                              "use a comprehension ([x for x in gen()]) or "
-                              "next() in a loop", who);
-            return false;
+            /* The native runs with the collector paused, so what the
+            ** generator yields stays alive in `out` until it is returned. */
+            Value item;
+            while (vm->generator_next(as_fiber(v), &item))
+                out.push_back(item);
+            return !vm->had_error();
         }
         vm->runtime_error("%s: object is not iterable", who);
         return false;
@@ -1839,6 +1865,38 @@ namespace zen
         return 1;
     }
 
+    /* len(x) written as a call is the OP_LEN intrinsic; this is len as a
+    ** value, for key=len, map(len, ...) and callable(len). */
+    static int nat_len(VM *vm, Value *args, int nargs)
+    {
+        Value v = nargs >= 1 ? args[0] : val_nil();
+        if (is_string(v)) args[0] = val_int(safe_string_len(v));
+        else if (is_array(v)) args[0] = val_int(arr_count(as_array(v)));
+        else if (is_map(v)) args[0] = val_int(as_map(v)->count);
+        else if (is_set(v)) args[0] = val_int(as_set(v)->count);
+        else if (is_buffer(v)) args[0] = val_int(as_buffer(v)->count);
+        else if (is_range(v))
+        {
+            ct::Vector<Value> items;
+            if (!py_collect(vm, v, items, "len")) return -1;
+            args[0] = val_int((int64_t)items.size());
+        }
+        else if (is_instance(v) && !is_nil(as_instance(v)->klass->operator_slots[VM::SLOT_LEN]))
+        {
+            Value r = vm->invoke_operator(v, VM::SLOT_LEN, nullptr, 0);
+            if (vm->had_error()) return -1;
+            args[0] = r;
+        }
+        else
+        {
+            ct::String type;
+            py_append_value(vm, type, v, true);
+            vm->runtime_error("object %s has no len()", type.c_str());
+            return -1;
+        }
+        return 1;
+    }
+
     static int nat_callable(VM *, Value *args, int nargs)
     {
         Value v = nargs >= 1 ? args[0] : val_nil();
@@ -1955,8 +2013,11 @@ namespace zen
         {"divmod", nat_divmod, 2},
         {"pow", nat_pow, -1},
         {"callable", nat_callable, 1},
+        {"len", nat_len, 1},
         {"getattr", nat_getattr, -1},
         {"hasattr", nat_hasattr, 2},
+        {"setattr", nat_setattr, 3},
+        {"issubclass", nat_issubclass, 2},
         {"int", nat_int, 1},
         {"float", nat_float, 1},
         {"char", nat_char, 1},
@@ -1986,7 +2047,7 @@ namespace zen
         {"gc_tune", nat_gc_tune, 2},
         {"gc_stats", nat_gc_stats, 0},
         {"clock",    nat_clock,    0},
-        {"enumerate", nat_enumerate, 1},
+        {"enumerate", nat_enumerate, -1},
         {"zip",      nat_zip,      -1},
         {"map",      nat_map,      2},
         {"filter",   nat_filter,   2},
@@ -2119,6 +2180,10 @@ namespace zen
             .method("count",      signal_count,       0)
             .method("clear",      signal_clear,       0)
             .end();
+
+        /* The script the host runs is __main__; import_script_module sets
+        ** the module's own name while a module runs. */
+        vm->def_global("__name__", val_obj((Obj *)vm->make_string("__main__")));
     }
 
     const NativeLib zen_lib_base = {

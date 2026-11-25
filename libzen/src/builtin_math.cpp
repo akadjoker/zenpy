@@ -65,8 +65,34 @@ namespace zen
     MATH_1(log, ::log)
     MATH_1(log2, ::log2)
     MATH_1(log10, ::log10)
-    MATH_1(ceil, ::ceil)
-    MATH_1(floor, ::floor)
+#define MATH_TO_INT(name, fn)                                                 \
+    static int nat_math_##name(VM *vm, Value *args, int nargs)                \
+    {                                                                         \
+        if (nargs != 1)                                                       \
+        {                                                                     \
+            vm->runtime_error(#name "() expected 1 argument, got %d", nargs); \
+            return 0;                                                         \
+        }                                                                     \
+        if (is_int(args[0]))                                                  \
+            return 1;                                                         \
+        if (is_vec(args[0]))                                                  \
+        {                                                                     \
+            vm->runtime_error(#name "() expects a number, got a vector");     \
+            return 0;                                                         \
+        }                                                                     \
+        const double r = fn(to_number(args[0]));                              \
+        if (!std::isfinite(r) || r >= 9223372036854775808.0 ||                \
+            r < -9223372036854775808.0)                                       \
+        {                                                                     \
+            vm->runtime_error(#name "() cannot convert %g to an integer", r); \
+            return 0;                                                         \
+        }                                                                     \
+        args[0] = val_int((int64_t)r);                                        \
+        return 1;                                                             \
+    }
+
+    MATH_TO_INT(ceil, ::ceil)
+    MATH_TO_INT(floor, ::floor)
     MATH_2(pow, ::pow)
     MATH_1(abs, ::fabs)
 

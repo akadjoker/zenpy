@@ -195,7 +195,7 @@ default:
         /* Module functions don't take receiver (no self) */
         int nret = call_native(this, nat, args, arg_count);
         if (nret >= 0)
-            copy_native_results(&R[base], args, nret, nresults);
+            copy_native_results(&gc_, &R[base], args, nret, nresults);
         else
             RT_ERROR("native function '%s' returned error", mname);
         break;

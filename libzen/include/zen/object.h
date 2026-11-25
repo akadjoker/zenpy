@@ -393,7 +393,7 @@ namespace zen
         int32_t count;        /* live entries */
         int32_t capacity;     /* node array capacity */
         int32_t bucket_count; /* power of 2 */
-        int32_t free_head;    /* head of free list (-1 = none) */
+        int32_t free_head;    /* next unused node: nodes are taken in order */
         int32_t *buckets;     /* bucket_count entries, -1 = empty */
         MapNode *nodes;       /* flat node array */
         bool is_module;       /* true = module map, skip built-in methods */

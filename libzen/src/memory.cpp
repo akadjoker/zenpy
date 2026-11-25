@@ -450,7 +450,7 @@ namespace zen
         map->count = 0;
         map->capacity = 0;
         map->bucket_count = 0;
-        map->free_head = -1;
+        map->free_head = 0;
         map->buckets = nullptr;
         map->nodes = nullptr;
         map->is_module = false;
@@ -885,32 +885,58 @@ namespace zen
         size_t new_bytes = sizeof(MapNode) * new_cap;
         map->nodes = (MapNode *)realloc(map->nodes, new_bytes);
         gc->bytes_allocated += new_bytes - old_bytes;
-
-        /* Link new slots into free list */
         for (int32_t i = old_cap; i < new_cap; i++)
         {
             map->nodes[i].hash = 0xFFFFFFFFu;
-            map->nodes[i].next = (i + 1 < new_cap) ? i + 1 : map->free_head;
+            map->nodes[i].next = -1;
         }
-        map->free_head = old_cap;
         map->capacity = new_cap;
     }
 
+    /* Slides the live nodes down over the deleted ones, keeping their order,
+    ** and rebuilds the chains over the new indices. */
+    static void map_compact_nodes(ObjMap *map)
+    {
+        int32_t write = 0;
+        for (int32_t read = 0; read < map->free_head; read++)
+        {
+            if (map->nodes[read].hash == 0xFFFFFFFFu)
+                continue;
+            if (write != read)
+                map->nodes[write] = map->nodes[read];
+            write++;
+        }
+        for (int32_t i = write; i < map->capacity; i++)
+        {
+            map->nodes[i].key = val_nil();
+            map->nodes[i].value = val_nil();
+            map->nodes[i].hash = 0xFFFFFFFFu;
+            map->nodes[i].next = -1;
+        }
+        map->free_head = write;
+        map_rebuild_buckets(map);
+    }
+
+    /* A new key always takes the slot after the last one used, so walking
+    ** the nodes in index order is insertion order, as a Python dict is. */
     static inline int32_t map_alloc_node(GC *gc, ObjMap *map)
     {
-        if (__builtin_expect(map->free_head == -1, 0))
-            map_grow_nodes(gc, map);
-        int32_t idx = map->free_head;
-        map->free_head = map->nodes[idx].next;
-        return idx;
+        if (__builtin_expect(map->free_head >= map->capacity, 0))
+        {
+            if (map->capacity - map->count >= map->capacity / 4 && map->capacity > 0)
+                map_compact_nodes(map);
+            else
+                map_grow_nodes(gc, map);
+        }
+        return map->free_head++;
     }
 
     static inline void map_free_node(ObjMap *map, int32_t idx)
     {
         map->nodes[idx].key = val_nil();
-        map->nodes[idx].hash = 0xFFFFFFFFu; /* free sentinel */
-        map->nodes[idx].next = map->free_head;
-        map->free_head = idx;
+        map->nodes[idx].value = val_nil();
+        map->nodes[idx].hash = 0xFFFFFFFFu; /* deleted: skipped until compaction */
+        map->nodes[idx].next = -1;
     }
 
     bool map_set(GC *gc, ObjMap *map, Value key, Value val)
@@ -1053,7 +1079,7 @@ namespace zen
         map->count = 0;
         map->capacity = 0;
         map->bucket_count = 0;
-        map->free_head = -1;
+        map->free_head = 0;
     }
 
     void map_keys(GC *gc, ObjMap *map, ObjArray *out)

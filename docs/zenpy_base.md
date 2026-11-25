@@ -45,6 +45,10 @@ Check value types. Predicate helpers return `bool`; `typeof` and `type` return s
 | `isMap` | 1 | Check if value is map/dictionary. |
 | `isFunction` | 1 | Check if value is function or closure. |
 | `isinstance` | 2 | Check if object is instance of class: `isinstance(obj, ClassName)`. |
+| `issubclass` | 2 | Check if a class derives from another, or from one of a tuple of classes. |
+| `type` | 1 | The class of an instance (`type(obj) is Player`); a type name for other values. |
+| `len` | 1 | Length of a string, list, dict, set, range or an object with `__len__`; also a value (`key=len`). |
+| `getattr` / `hasattr` / `setattr` | 2–3 | Read, test or write an attribute by name. |
 
 **Example:**
 ```python
@@ -140,7 +144,7 @@ Functional programming utilities.
 
 | Function | Arity | Description |
 |----------|-------|-------------|
-| `enumerate` | 1 | Enumerate an array or string: `[[0, item0], [1, item1], ...]`. |
+| `enumerate` | 1–2 | Enumerate any iterable, generators included: `[[0, item0], [1, item1], ...]`; `start=` or a second argument sets the first index. |
 | `zip` | -1 | Zip multiple arrays to an array of tuples. |
 | `map` | 2 | Transform an array: `map(func, array)`. |
 | `filter` | 2 | Filter an array: `filter(predicate, array)`. |

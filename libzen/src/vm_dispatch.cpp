@@ -19,8 +19,39 @@
 namespace zen
 {
 
-    static inline void copy_native_results(Value *dst, Value *src, int nret, int nresults)
+    /* Several values into one target are a list, and one list into several
+    ** targets is unpacked: `p = get_position()` and `a, b = f()` where f
+    ** returns [1, 2] both behave as Python's tuples do. */
+    static Value pack_results(GC *gc, const Value *src, int count)
     {
+        gc_pause(gc);
+        ObjArray *arr = new_array(gc);
+        for (int j = 0; j < count; j++)
+            array_push(gc, arr, src[j]);
+        gc_resume(gc);
+        return val_obj((Obj *)arr);
+    }
+
+    static void unpack_result(Value *dst, Value list, int wanted)
+    {
+        ObjArray *arr = as_array(list);
+        const int count = arr_count(arr);
+        for (int j = 0; j < wanted; j++)
+            dst[j] = j < count ? arr->data[j] : val_nil();
+    }
+
+    static inline void copy_native_results(GC *gc, Value *dst, Value *src, int nret, int nresults)
+    {
+        if (__builtin_expect(nresults == 1 && nret > 1, 0))
+        {
+            dst[0] = pack_results(gc, src, nret);
+            return;
+        }
+        if (__builtin_expect(nresults > 1 && nret == 1 && is_array(src[0]), 0))
+        {
+            unpack_result(dst, src[0], nresults);
+            return;
+        }
         int wanted = nresults <= 0 ? 0 : nresults;
         int copy_count = nret > 0 ? (nret < wanted ? nret : wanted) : 0;
         for (int j = 0; j < copy_count; j++)
@@ -896,6 +927,83 @@ namespace zen
             return prop->getter != nullptr;
         Value method;
         return find_method_in_chain(klass, name, &method) && (is_closure(method) || is_native(method));
+    }
+
+    int VM::instance_set_attr(Value receiver, ObjString *name, Value val)
+    {
+        if (!is_instance(receiver))
+            return 0;
+        name = interned_name(&gc_, name);
+        if (!name)
+            return 0;
+        ObjInstance *inst = as_instance(receiver);
+        ObjClass *klass = inst->klass;
+        int32_t class_idx = -1;
+        for (int32_t fi = 0; fi < klass->num_fields; fi++)
+        {
+            if (klass->field_names[fi] == name)
+            {
+                class_idx = fi;
+                break;
+            }
+        }
+        if (class_idx >= 0 && class_idx < inst->num_fields)
+        {
+            inst->fields[class_idx] = val;
+            return 1;
+        }
+        if (class_idx < 0 && (klass->num_props > 0 || klass->parent))
+        {
+            /* Not a field anywhere: a native property (own or inherited)
+            ** takes the store instead of a new script field that would
+            ** shadow it. */
+            if (const NativeProperty *prop = class_find_property(klass, name))
+            {
+                if (!prop->setter)
+                {
+                    runtime_error("'%s.%s' is read-only", klass->name->chars, name->chars);
+                    return -1;
+                }
+                return property_set(this, prop, receiver, val) ? 1 : -1;
+            }
+        }
+        if (class_idx < 0)
+        {
+            class_idx = klass->num_fields;
+            klass->num_fields = class_idx + 1;
+            gc_pause(&gc_);
+            klass->field_names = (ObjString **)zen_realloc(
+                &gc_, klass->field_names,
+                sizeof(ObjString *) * class_idx,
+                sizeof(ObjString *) * (class_idx + 1));
+            gc_resume(&gc_);
+            klass->field_names[class_idx] = name;
+        }
+        /* Grow the instance's fields; all of them live in the arena. */
+        int32_t old_n = inst->num_fields;
+        int32_t new_n = class_idx + 1;
+        gc_pause(&gc_);
+        if (inst->fields_inline)
+        {
+            Value *detached = (Value *)zen_alloc(&gc_, sizeof(Value) * new_n);
+            if (old_n > 0 && inst->fields) /* memcpy(dst, nullptr, 0) is UB */
+                memcpy(detached, inst->fields, sizeof(Value) * old_n);
+            inst->fields = detached;
+            inst->fields_inline = false;
+        }
+        else
+        {
+            inst->fields = (Value *)zen_realloc(
+                &gc_, inst->fields,
+                sizeof(Value) * old_n,
+                sizeof(Value) * new_n);
+        }
+        gc_resume(&gc_);
+        for (int32_t fi = old_n; fi < new_n; fi++)
+            inst->fields[fi] = val_nil();
+        inst->fields[class_idx] = val;
+        inst->num_fields = new_n;
+        return 1;
     }
 
     /* OP_EVAL compilation, out of line. A Compiler is ~82 KB and eval needs two
@@ -2690,7 +2798,7 @@ namespace zen
                     int nret = call_native(this, nat, &R[a + 1], nargs);
                     if (had_error_)
                         return;
-                    copy_native_results(&R[a], &R[a + 1], nret, nresults);
+                    copy_native_results(&gc_, &R[a], &R[a + 1], nret, nresults);
                     DISPATCH();
                 }
                 /* kwmap != nullptr never gets here: the check above already
@@ -2809,7 +2917,7 @@ namespace zen
                 kwargs_ = nullptr;
                 if (had_error_)
                     return;
-                copy_native_results(&R[a], &R[a + 1], nret, nresults);
+                copy_native_results(&gc_, &R[a], &R[a + 1], nret, nresults);
                 DISPATCH();
             }
 
@@ -3100,7 +3208,7 @@ namespace zen
                         int nret = call_native(this, nat, &R[call_a + 1], call_nargs);
                         if (had_error_)
                             return;
-                        copy_native_results(&R[call_a], &R[call_a + 1], nret, call_nresults);
+                        copy_native_results(&gc_, &R[call_a], &R[call_a + 1], nret, call_nresults);
                         DISPATCH();
                     }
                 }
@@ -3255,7 +3363,15 @@ namespace zen
             /* Fast path: single return (most common), then void, then multi */
             if (__builtin_expect(copy_count == 1, 1))
             {
-                caller_base[ret_reg] = R[a];
+                if (__builtin_expect(ret_count == 1 && nresults > 1, 0))
+                    caller_base[ret_reg] = pack_results(&gc_, &R[a], nresults);
+                else if (__builtin_expect(ret_count > 1 && is_array(R[a]), 0))
+                {
+                    unpack_result(&caller_base[ret_reg], R[a], ret_count);
+                    copy_count = ret_count;
+                }
+                else
+                    caller_base[ret_reg] = R[a];
             }
             else if (__builtin_expect(copy_count <= 0, 0))
             {
@@ -3993,6 +4109,27 @@ namespace zen
                               : is_class(receiver) ? as_class(receiver)->name : nullptr;
                 if (nm) { R[ZEN_A(i)] = val_obj((Obj *)nm); goto getfield_done; }
             }
+            if (is_class(receiver))
+            {
+                /* Cls.field is the value the class body gave it; Cls.method
+                ** is the plain function. */
+                ObjClass *klass = as_class(receiver);
+                for (int32_t fi = 0; fi < klass->num_fields; fi++)
+                {
+                    if (klass->field_names[fi] == name)
+                    {
+                        R[ZEN_A(i)] = fi < klass->num_field_defaults ? klass->field_defaults[fi] : val_nil();
+                        goto getfield_done;
+                    }
+                }
+                Value method;
+                if (find_method_in_chain(klass, name, &method))
+                {
+                    R[ZEN_A(i)] = method;
+                    goto getfield_done;
+                }
+                RT_ERROR("class '%s' has no attribute '%s'", klass->name->chars, name->chars);
+            }
             RT_ERROR("cannot access field '%s' on this type", name->chars);
         getfield_done:
             NEXT();
@@ -4008,8 +4145,20 @@ namespace zen
 
             if (is_class(receiver))
             {
-                /* Setting a method on a class object */
                 ObjClass *klass = as_class(receiver);
+                /* Cls.field = v changes the value the class body gave the
+                ** field, which the next instances start with. */
+                for (int32_t fi = 0; fi < klass->num_fields; fi++)
+                {
+                    if (klass->field_names[fi] == name && fi < klass->num_field_defaults)
+                    {
+                        klass->field_defaults[fi] = val;
+                        if (val.type == VAL_OBJ)
+                            gc_write_barrier(&gc_, (Obj *)klass, val.as.obj);
+                        goto setfield_done;
+                    }
+                }
+                /* Setting a method on a class object */
                 if (klass->sealed)
                     RT_ERROR("class '%s' is closed; methods cannot be changed at runtime", klass->name->chars);
                 map_set(&gc_, klass->methods, val_obj((Obj *)name), val);
@@ -4098,74 +4247,12 @@ namespace zen
                         goto setfield_done;
                     }
                 }
-                /* Field exists in class template but not yet in this instance? Grow. */
-                /* Or brand new field — register in class + grow instance. */
-                {
-                    /* Check if class already knows this field name */
-                    int32_t class_idx = -1;
-                    for (int32_t fi = 0; fi < klass->num_fields; fi++)
-                    {
-                        if (klass->field_names[fi] == name)
-                        {
-                            class_idx = fi;
-                            break;
-                        }
-                    }
-                    if (class_idx < 0 && (klass->num_props > 0 || klass->parent))
-                    {
-                        /* Not a field anywhere: a native property (own or
-                        ** inherited) takes the store instead of a new
-                        ** script field that would shadow it. */
-                        const NativeProperty *prop = class_find_property(klass, name);
-                        if (prop)
-                        {
-                            SAVE_IP();
-                            if (!prop->setter)
-                                RT_ERROR("'%s.%s' is read-only", klass->name->chars, name->chars);
-                            if (!property_set(this, prop, receiver, val))
-                                return;
-                            goto setfield_done;
-                        }
-                    }
-                    if (class_idx < 0)
-                    {
-                        /* New field — register in class */
-                        class_idx = klass->num_fields;
-                        klass->num_fields = class_idx + 1;
-                        gc_pause(&gc_);
-                        klass->field_names = (ObjString **)zen_realloc(
-                            &gc_, klass->field_names,
-                            sizeof(ObjString *) * class_idx,
-                            sizeof(ObjString *) * (class_idx + 1));
-                        gc_resume(&gc_);
-                        klass->field_names[class_idx] = name;
-                    }
-                    /* Grow instance fields — all use arena via zen_realloc. */
-                    int32_t old_n = inst->num_fields;
-                    int32_t new_n = class_idx + 1;
-                    gc_pause(&gc_);
-                    if (inst->fields_inline)
-                    {
-                        Value *detached = (Value *)zen_alloc(&gc_, sizeof(Value) * new_n);
-                        if (old_n > 0 && inst->fields) /* memcpy(dst, nullptr, 0) is UB */
-                            memcpy(detached, inst->fields, sizeof(Value) * old_n);
-                        inst->fields = detached;
-                        inst->fields_inline = false;
-                    }
-                    else
-                    {
-                        inst->fields = (Value *)zen_realloc(
-                            &gc_, inst->fields,
-                            sizeof(Value) * old_n,
-                            sizeof(Value) * new_n);
-                    }
-                    gc_resume(&gc_);
-                    for (int32_t fi = old_n; fi < new_n; fi++)
-                        inst->fields[fi] = val_nil();
-                    inst->fields[class_idx] = val;
-                    inst->num_fields = new_n;
-                    goto setfield_done;
-                }
+                /* A field this instance has not grown to yet, a native
+                ** property, or a brand new field. */
+                SAVE_IP();
+                if (instance_set_attr(receiver, name, val) < 0)
+                    return;
+                goto setfield_done;
             }
             if (is_vec(receiver))
             {
@@ -4929,7 +5016,7 @@ namespace zen
                     int nret = call_native(this, nat, &R[base + 1], arg_count);
                     kwargs_ = nullptr;
                     if (nret >= 0)
-                        copy_native_results(&R[base], &R[base + 1], nret, nresults);
+                        copy_native_results(&gc_, &R[base], &R[base + 1], nret, nresults);
                     else
                         RT_ERROR("native method '%s' returned error", mname);
                 }
@@ -4961,6 +5048,29 @@ namespace zen
             else if (is_vec(receiver))
             {
 #include "invoke_vec.inl"
+            }
+            else if (is_class(receiver))
+            {
+                /* Cls.method(obj, ...): the class's own function, with the
+                ** instance passed by hand — `Base.__init__(self, x)`. */
+                Value fn;
+                if (!find_method_in_chain(as_class(receiver), method, &fn))
+                    RT_ERROR("class '%s' has no method '%s'", as_class(receiver)->name->chars, mname);
+                if (arg_count < 1)
+                    RT_ERROR("%s.%s() needs the instance as its first argument",
+                             as_class(receiver)->name->chars, mname);
+                SAVE_IP();
+                Value bound = val_obj((Obj *)new_bound_method(&gc_, args[0], fn));
+                R[base] = bound;
+                kwargs_ = kwmap;
+                Value result = call_fn(bound, args + 1, arg_count - 1);
+                kwargs_ = nullptr;
+                if (had_error_)
+                    return;
+                LOAD_STATE();
+                R[base] = result;
+                for (int ri = 1; ri < nresults; ri++)
+                    R[base + ri] = val_nil();
             }
             else
             {
@@ -5074,7 +5184,7 @@ namespace zen
                 {
                     RT_ERROR("generic native method '%s' returned error", mname);
                 }
-                copy_native_results(&R[base], value_args, nret, nresults);
+                copy_native_results(&gc_, &R[base], value_args, nret, nresults);
                 /* Advance past word2+word3 ourselves — NEXT() only adds 1
                 ** more, for a total of 3, matching this instruction's real
                 ** width (ip is still on word1 at this point). */
@@ -5246,7 +5356,7 @@ namespace zen
                             return;
                         RT_ERROR("native method '%s' returned error", nat->name ? nat->name->chars : "?");
                     }
-                    copy_native_results(&R[base], &R[base + 1], nret, nresults);
+                    copy_native_results(&gc_, &R[base], &R[base + 1], nret, nresults);
                     DISPATCH();
                 }
                 goto op_invoke_entry;

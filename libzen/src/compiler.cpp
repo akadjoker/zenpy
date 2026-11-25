@@ -810,21 +810,7 @@ namespace zen
 
         if (match(TOK_STRING))
         {
-            /* Same quote handling as string_literal(): single or triple. */
-            const char *str = previous_.start + 1;
-            int len = previous_.length - 2;
-            if (previous_.length >= 6 && previous_.start[0] == previous_.start[1] &&
-                previous_.start[1] == previous_.start[2])
-            {
-                str = previous_.start + 3;
-                len = previous_.length - 6;
-            }
-            out_const_index = state_->emitter.add_escaped_string_constant(str, len);
-            if (state_->emitter.has_escape_error())
-            {
-                error(state_->emitter.escape_error());
-                state_->emitter.clear_escape_error();
-            }
+            out_const_index = string_token_constant(previous_);
             return true;
         }
         if (match(TOK_TRUE))
@@ -1115,6 +1101,35 @@ namespace zen
                 return r;
             }
             state_->emitter.emit_abc(OP_GETUPVAL, r, upval, 0, previous_.line);
+            if (can_assign && (check(TOK_PLUS_EQ) || check(TOK_MINUS_EQ) ||
+                               check(TOK_STAR_EQ) || check(TOK_SLASH_EQ) ||
+                               check(TOK_PERCENT_EQ) || check(TOK_DSLASH_EQ) ||
+                               check(TOK_DSTAR_EQ) || check(TOK_AMP_EQ) || check(TOK_PIPE_EQ) ||
+                               check(TOK_CARET_EQ) || check(TOK_LSHIFT_EQ) || check(TOK_RSHIFT_EQ)))
+            {
+                Token op = current_;
+                advance();
+                int rhs = expression(-1);
+                OpCode arith = OP_ADD;
+                switch (op.type)
+                {
+                case TOK_MINUS_EQ:   arith = OP_SUB;  break;
+                case TOK_STAR_EQ:    arith = OP_MUL;  break;
+                case TOK_SLASH_EQ:   arith = OP_DIV;  break;
+                case TOK_PERCENT_EQ: arith = OP_MOD;  break;
+                case TOK_DSLASH_EQ:  arith = OP_IDIV; break;
+                case TOK_DSTAR_EQ:   arith = OP_POW;  break;
+                case TOK_AMP_EQ:     arith = OP_BAND; break;
+                case TOK_PIPE_EQ:    arith = OP_BOR;  break;
+                case TOK_CARET_EQ:   arith = OP_BXOR; break;
+                case TOK_LSHIFT_EQ:  arith = OP_SHL;  break;
+                case TOK_RSHIFT_EQ:  arith = OP_SHR;  break;
+                default: break;
+                }
+                state_->emitter.emit_abc(arith, r, r, rhs, previous_.line);
+                free_reg(rhs);
+                state_->emitter.emit_abc(OP_SETUPVAL, r, upval, 0, previous_.line);
+            }
             return r;
         }
 
@@ -1324,14 +1339,22 @@ namespace zen
         {
             if (from >= to)
                 return;
+            /* Each comma-separated part binds its last name: the module's
+            ** last component, or what follows `as`. */
             if (line[from].type == TOK_IMPORT)
             {
                 int last = -1;
-                for (int i = from + 1; i < to; i++)
-                    if (line[i].type == TOK_IDENTIFIER)
+                for (int i = from + 1; i <= to; i++)
+                {
+                    if (i == to || line[i].type == TOK_COMMA)
+                    {
+                        if (last >= 0)
+                            add(defined, defined_count, line[last]);
+                        last = -1;
+                    }
+                    else if (line[i].type == TOK_IDENTIFIER)
                         last = i;
-                if (last >= 0)
-                    add(defined, defined_count, line[last]);
+                }
                 return;
             }
             if (line[from].type == TOK_FROM)
@@ -1342,7 +1365,14 @@ namespace zen
                     if (line[i].type == TOK_IMPORT)
                         names = true;
                     else if (names && line[i].type == TOK_IDENTIFIER)
-                        add(defined, defined_count, line[i]);
+                    {
+                        const bool renamed = i + 1 < to && line[i + 1].type == TOK_IDENTIFIER &&
+                                             line[i + 1].length == 2 && memcmp(line[i + 1].start, "as", 2) == 0;
+                        const bool is_as = line[i].length == 2 && memcmp(line[i].start, "as", 2) == 0 &&
+                                           i + 1 < to && line[i + 1].type == TOK_IDENTIFIER;
+                        if (!renamed && !is_as)
+                            add(defined, defined_count, line[i]);
+                    }
                 }
                 return;
             }

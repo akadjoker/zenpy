@@ -354,15 +354,18 @@ namespace zen
     ** String literal
     ** ========================================================= */
 
-    int Compiler::string_literal(Token token, int dest)
+    int Compiler::string_token_constant(Token token)
     {
-        int reg = (dest >= 0) ? dest : alloc_reg();
+        const bool raw = token.start[0] == 'r' || token.start[0] == 'R';
+        if (raw)
+        {
+            token.start++;
+            token.length--;
+        }
 
         /* Strip quotes (single or triple) */
         const char *str = token.start + 1;
         int len = token.length - 2;
-
-        /* Check for triple quotes */
         if (token.length >= 6 &&
             token.start[0] == token.start[1] && token.start[1] == token.start[2])
         {
@@ -370,12 +373,20 @@ namespace zen
             len = token.length - 6;
         }
 
-        int ki = state_->emitter.add_escaped_string_constant(str, len);
+        int ki = raw ? state_->emitter.add_verbatim_string_constant(str, len)
+                     : state_->emitter.add_escaped_string_constant(str, len);
         if (state_->emitter.has_escape_error())
         {
             error(state_->emitter.escape_error());
             state_->emitter.clear_escape_error();
         }
+        return ki;
+    }
+
+    int Compiler::string_literal(Token token, int dest)
+    {
+        int reg = (dest >= 0) ? dest : alloc_reg();
+        int ki = string_token_constant(token);
         state_->emitter.emit_abx(OP_LOADK, reg, ki, token.line);
         return reg;
     }
@@ -2549,14 +2560,50 @@ namespace zen
             Clause &c = clauses[nc++];
             c.nfilters = 0;
             begin_scope();
+            /* Names as a for statement takes them, `(a, b)` nesting included:
+            ** outer[] is the element of the iterated value, inner[] the one
+            ** inside it (-1: none). */
             Token names[8];
+            int outer[8];
+            int inner[8];
             int nnames = 0;
+            int ntop = 0;
+            bool nested = false;
             do
             {
-                if (!match(TOK_UNDERSCORE)) consume(TOK_IDENTIFIER, "Expected variable name after 'for'.");
-                if (nnames < 8) names[nnames++] = previous_;
+                if (match(TOK_LPAREN))
+                {
+                    nested = true;
+                    int in = 0;
+                    do
+                    {
+                        if (!match(TOK_UNDERSCORE)) consume(TOK_IDENTIFIER, "Expected variable name after 'for'.");
+                        if (nnames < 8)
+                        {
+                            names[nnames] = previous_;
+                            outer[nnames] = ntop;
+                            inner[nnames] = in;
+                            nnames++;
+                        }
+                        in++;
+                    } while (match(TOK_COMMA));
+                    consume(TOK_RPAREN, "Expected ')' after the names in a comprehension.");
+                }
+                else
+                {
+                    if (!match(TOK_UNDERSCORE)) consume(TOK_IDENTIFIER, "Expected variable name after 'for'.");
+                    if (nnames < 8)
+                    {
+                        names[nnames] = previous_;
+                        outer[nnames] = ntop;
+                        inner[nnames] = -1;
+                        nnames++;
+                    }
+                }
+                ntop++;
             } while (match(TOK_COMMA) && !check(TOK_IN));
             consume(TOK_IN, "Expected 'in' after variable name.");
+            const bool unpack = nnames > 1 || nested;
             c.nnames = nnames;
 
             c.iter_reg = alloc_reg();
@@ -2566,7 +2613,7 @@ namespace zen
             state_->next_reg = c.iter_reg + 1; /* the index MUST be iter_reg + 1 */
             int idx_reg = alloc_reg();
             state_->emitter.emit_asbx(OP_LOADI, idx_reg, 0, line);
-            if (nnames == 1)
+            if (!unpack)
                 c.var_reg = add_local(names[0]);
             else
             {
@@ -2576,14 +2623,24 @@ namespace zen
             }
             c.entry_jump = state_->emitter.emit_jump(OP_JMP, 0, line);
             c.loop_start = state_->emitter.current_offset();
-            if (nnames > 1)
+            if (unpack)
             {
                 int idx_tmp = alloc_reg();
+                int elem_tmp = nested ? alloc_reg() : -1;
                 for (int vi = 0; vi < nnames; vi++)
                 {
-                    state_->emitter.emit_asbx(OP_LOADI, idx_tmp, vi, line);
-                    state_->emitter.emit_abc(OP_GETINDEX, c.var_reg + 1 + vi, c.var_reg, idx_tmp, line);
+                    state_->emitter.emit_asbx(OP_LOADI, idx_tmp, outer[vi], line);
+                    if (inner[vi] < 0)
+                    {
+                        state_->emitter.emit_abc(OP_GETINDEX, c.var_reg + 1 + vi, c.var_reg, idx_tmp, line);
+                        continue;
+                    }
+                    state_->emitter.emit_abc(OP_GETINDEX, elem_tmp, c.var_reg, idx_tmp, line);
+                    state_->emitter.emit_asbx(OP_LOADI, idx_tmp, inner[vi], line);
+                    state_->emitter.emit_abc(OP_GETINDEX, c.var_reg + 1 + vi, elem_tmp, idx_tmp, line);
                 }
+                if (elem_tmp >= 0)
+                    free_reg(elem_tmp);
                 free_reg(idx_tmp);
             }
             while (match(TOK_IF))
@@ -2924,7 +2981,10 @@ namespace zen
 
         begin_scope();
 
-        /* Parameters */
+        /* Parameters, with literal defaults as a def has them */
+        static const int kMaxLambdaDefaults = 16;
+        int default_consts[kMaxLambdaDefaults];
+        int default_count = 0;
         int arity = 0;
         if (!check(TOK_COLON))
         {
@@ -2933,6 +2993,18 @@ namespace zen
                 consume(TOK_IDENTIFIER, "Expected parameter name.");
                 add_local(previous_);
                 arity++;
+                if (match(TOK_EQ))
+                {
+                    int ki = -1;
+                    if (!class_field_literal(ki))
+                        error("A lambda default must be a number, string, True, False or None.");
+                    else if (default_count < kMaxLambdaDefaults)
+                        default_consts[default_count++] = ki;
+                    else
+                        error("Too many lambda defaults.");
+                }
+                else if (default_count > 0)
+                    error("Non-default parameter cannot follow a default parameter.");
             } while (match(TOK_COMMA));
         }
         consume(TOK_COLON, "Expected ':' after lambda parameters.");
@@ -2947,6 +3019,13 @@ namespace zen
 
         ObjFunc *fn = state_->emitter.end(state_->max_reg);
         fn->arity = arity;
+        fn->default_count = default_count;
+        if (default_count > 0)
+        {
+            fn->defaults = (Value *)zen_alloc(gc_, default_count * sizeof(Value));
+            for (int di = 0; di < default_count; di++)
+                fn->defaults[di] = fn->constants[default_consts[di]];
+        }
 
         /* Copy upvalue descriptors */
         int nuv = state_->upvalue_count;

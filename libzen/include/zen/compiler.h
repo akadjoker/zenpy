@@ -277,6 +277,7 @@ namespace zen
         void enum_declaration();
         void const_declaration();
         void import_statement();
+        bool match_as(); /* `as` is a plain identifier everywhere else */
         void using_statement();
         void from_import_statement();
 
@@ -323,6 +324,8 @@ namespace zen
         int infix_rule(Token op, int left, int dest, const OperandSnapshot *snap);
         int number(Token token, int dest);
         int string_literal(Token token, int dest);
+        /* The constant index of a string token: raw or escaped, single or triple quotes. */
+        int string_token_constant(Token token);
         int fstring_literal(Token token, int dest);
         int literal(Token token, int dest);
         int variable(Token token, int dest, bool can_assign);
@@ -495,6 +498,12 @@ namespace zen
         void end_scope();
         void close_captured_locals();
         void store_to_lhs(const Token &name, int src_reg);
+        /* Inside a function, a name assigned without `global`/`nonlocal` that
+        ** is not a local yet becomes one, as `name = expr` does. Returns true
+        ** when it declared one. */
+        bool declare_function_local(const Token &name);
+        int match_pattern(int subject, int *fails, int &fail_count, int max_fails);
+        int match_closed_pattern(int subject, int *fails, int &fail_count, int max_fails);
 
         /* --- Register allocation --- */
         int alloc_reg();

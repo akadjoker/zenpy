@@ -1840,6 +1840,48 @@ namespace zen
         return fiber->transfer_value;
     }
 
+    bool VM::generator_next(ObjFiber *gen, Value *out)
+    {
+        if (gen->state == FIBER_DONE || gen->state == FIBER_ERROR)
+            return false;
+        if (gen->state == FIBER_RUNNING)
+        {
+            runtime_error("a generator cannot consume itself");
+            return false;
+        }
+
+        ObjFiber *caller = current_fiber_;
+        gen->transfer_value = val_nil();
+        gen->caller = caller;
+        gen->state = FIBER_RUNNING;
+        if (caller)
+            caller->state = FIBER_SUSPENDED;
+        current_fiber_ = gen;
+        if (gen->yield_dest >= 0)
+        {
+            CallFrame &tf = gen->frames[gen->frame_count - 1];
+            tf.base[gen->yield_dest] = val_nil();
+            gen->yield_dest = -1;
+        }
+
+        ++fiber_depth_;
+        execute(gen);
+        --fiber_depth_;
+
+        current_fiber_ = caller;
+        if (caller)
+            caller->state = FIBER_RUNNING;
+        if (had_error_ || gen->state == FIBER_ERROR)
+        {
+            had_error_ = true;
+            return false;
+        }
+        if (gen->state == FIBER_DONE)
+            return false;
+        *out = gen->transfer_value;
+        return true;
+    }
+
     /* =========================================================
     ** Error
     ** ========================================================= */
@@ -2844,11 +2886,28 @@ namespace zen
         mod_fiber->stack_top = mod_fiber->stack + mod_func->num_regs;
         mod_fiber->state = FIBER_RUNNING;
 
+        /* __name__ is the module's own while it runs; the importer's comes
+        ** back after (globals are shared, so the old value is held by a
+        ** host reference meanwhile). */
+        const int name_slot = find_global("__name__");
+        int saved_name_ref = -1;
+        if (name_slot >= 0)
+        {
+            saved_name_ref = ref(globals_[name_slot]);
+            globals_[name_slot] = val_obj((Obj *)make_string(mod_name));
+        }
+
         /* Save current fiber and execute module */
         ObjFiber *saved_fiber = current_fiber_;
         current_fiber_ = mod_fiber;
         execute(mod_fiber);
         current_fiber_ = saved_fiber;
+
+        if (name_slot >= 0)
+        {
+            globals_[name_slot] = deref(saved_name_ref);
+            unref(saved_name_ref);
+        }
 
         if (had_error_)
         {

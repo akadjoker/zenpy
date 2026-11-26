@@ -17,6 +17,16 @@ if(ZEN_HOST_OUTPUT)
     list(APPEND ZEN_DEFINITIONS ZEN_HOST_OUTPUT)
 endif()
 
+# The ct containers. A host that has its own copy passes its include directory, and libzen is built
+# against it: two different ct copies in one program share the same inline symbols (ct::HeapAlloc,
+# ct::String), the linker keeps one of each, and a block allocated by one copy is freed by the other.
+set(ZEN_CT_INCLUDE_DIR "" CACHE PATH "Include directory of the host's ct; empty uses third_party/ct")
+if(ZEN_CT_INCLUDE_DIR)
+    set(ZEN_CT_INCLUDES ${ZEN_CT_INCLUDE_DIR})
+else()
+    set(ZEN_CT_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+endif()
+
 # Core library sources
 file(GLOB CORE_SRCS CONFIGURE_DEPENDS src/*.cpp)
 
@@ -42,7 +52,7 @@ endforeach()
 
 # --- libzen (static library) ---
 add_library(zen_static STATIC ${CORE_SRCS})
-target_include_directories(zen_static PUBLIC include include/zen PRIVATE src third_party ${ZEN_VENDOR_INCLUDES})
+target_include_directories(zen_static PUBLIC include include/zen PRIVATE src ${ZEN_CT_INCLUDES} ${ZEN_VENDOR_INCLUDES})
 target_link_libraries(zen_static PUBLIC ${ZEN_VENDOR_LIBS} ${CMAKE_DL_LIBS})
 if(WIN32)
     target_link_libraries(zen_static PUBLIC ws2_32)
@@ -79,7 +89,7 @@ endif()
 option(ZEN_BUILD_DEBUG_LIBRARY "Also build zen_debug, libzen with the debug hook" OFF)
 if(ZEN_BUILD_DEBUG_LIBRARY)
     add_library(zen_debug STATIC ${CORE_SRCS})
-    target_include_directories(zen_debug PUBLIC include include/zen PRIVATE src third_party ${ZEN_VENDOR_INCLUDES})
+    target_include_directories(zen_debug PUBLIC include include/zen PRIVATE src ${ZEN_CT_INCLUDES} ${ZEN_VENDOR_INCLUDES})
     target_link_libraries(zen_debug PUBLIC ${ZEN_VENDOR_LIBS} ${CMAKE_DL_LIBS})
     if(WIN32)
         target_link_libraries(zen_debug PUBLIC ws2_32)

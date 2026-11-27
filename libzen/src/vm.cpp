@@ -2389,6 +2389,7 @@ namespace zen
 
     Value VM::invoke(Value instance, const char *method_name, Value *args, int nargs)
     {
+        had_error_ = false;
         if (nargs < 0 || (nargs > 0 && !args))
         {
             runtime_error("invoke received invalid arguments");
@@ -2486,6 +2487,7 @@ namespace zen
 
     Value VM::invoke(Value instance, int slot, Value *args, int nargs)
     {
+        had_error_ = false;
         if (!is_instance(instance))
         {
             runtime_error("cannot invoke a method on a non-instance");
@@ -2558,6 +2560,7 @@ namespace zen
 
     Value VM::invoke_operator(Value instance, int slot, Value *args, int nargs)
     {
+        had_error_ = false;
         if (!is_instance(instance))
         {
             runtime_error("cannot invoke an operator on a non-instance");

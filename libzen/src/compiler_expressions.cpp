@@ -1822,7 +1822,7 @@ namespace zen
             find_method_in_chain(current_class_.start, current_class_.length, field) != nullptr)
         {
             const bool assign_ahead =
-                can_assign && (check(TOK_EQ) || check(TOK_PLUS_EQ) || check(TOK_MINUS_EQ) ||
+                can_assign && (check(TOK_EQ) || inject_here() || check(TOK_PLUS_EQ) || check(TOK_MINUS_EQ) ||
                                check(TOK_STAR_EQ) || check(TOK_SLASH_EQ) || check(TOK_PERCENT_EQ) ||
                                check(TOK_DSLASH_EQ) || check(TOK_DSTAR_EQ) || check(TOK_AMP_EQ) ||
                                check(TOK_PIPE_EQ) || check(TOK_CARET_EQ) || check(TOK_LSHIFT_EQ) ||
@@ -1849,10 +1849,11 @@ namespace zen
             if (fidx >= 0 && fidx <= 255)
             {
                 /* Assignment: self.field = expr */
-                if (can_assign && match(TOK_EQ))
+                if (can_assign && match_assign())
                 {
                     int rhs_start = state_->emitter.current_offset();
-                    int val = expression(-1);
+                    const bool injected = inject_reg_ >= 0;
+                    int val = assigned_value();
                     {
                         bool rhs_none = state_->emitter.current_offset() == rhs_start + 1 &&
                                         ZEN_OP(state_->emitter.instruction_at(rhs_start)) == OP_LOADNIL &&
@@ -1893,7 +1894,7 @@ namespace zen
                             state_->emitter.rewrite_opcode_at(rhs_start, OP_FIELD_MULADD);
                         }
                     }
-                    if (val != reg)
+                    if (val != reg && !injected)
                         free_reg(val);
                     if (obj != reg)
                         free_reg(obj);
@@ -1985,9 +1986,10 @@ namespace zen
         }
 
         /* Assignment: obj.field = expr */
-        if (can_assign && match(TOK_EQ))
+        if (can_assign && match_assign())
         {
-            int val = expression(-1);
+            const bool injected = inject_reg_ >= 0;
+            int val = assigned_value();
             int name_ki = state_->emitter.add_string_constant(field.start, field.length);
             const int name = name_operand(name_ki, previous_.line);
             if (checked_fidx >= 0)
@@ -1998,7 +2000,8 @@ namespace zen
             else
                 state_->emitter.emit_abc(OP_SETFIELD, obj, name, val, previous_.line);
             emit_receiver_writeback(origin, obj, previous_.line);
-            free_reg(val);
+            if (!injected)
+                free_reg(val);
             if (obj != reg)
                 free_reg(obj);
             return reg;
@@ -2342,7 +2345,7 @@ namespace zen
         int reg = (dest >= 0) ? dest : alloc_reg();
 
         /* Assignment: obj[idx] = expr */
-        if (can_assign && match(TOK_EQ))
+        if (can_assign && match_assign())
         {
             /* Preserve a container/index that lives in a temporary across
             ** the RHS evaluation. A local needs no copy: it is read after
@@ -2352,20 +2355,22 @@ namespace zen
             ** algorithm — two MOVEs per store otherwise. */
             int obj_hold = obj;
             int idx_hold = index;
-            if (!is_local_reg(obj))
+            const bool injected = inject_reg_ >= 0;
+            if (!injected && !is_local_reg(obj))
             {
                 obj_hold = alloc_reg();
                 emit_move(obj_hold, obj);
             }
-            if (!is_local_reg(index))
+            if (!injected && !is_local_reg(index))
             {
                 idx_hold = alloc_reg();
                 emit_move(idx_hold, index);
             }
 
-            int val = expression(-1);
+            int val = assigned_value();
             state_->emitter.emit_abc(OP_SETINDEX, obj_hold, idx_hold, val, previous_.line);
-            free_reg(val);
+            if (!injected)
+                free_reg(val);
             if (idx_hold != index)
                 free_reg(idx_hold);
             if (obj_hold != obj)

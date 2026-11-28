@@ -54,6 +54,8 @@ namespace zen
         typed_call_reg_ = -1;
         last_expr_ctor_valid_ = false;
         multi_assign_rhs_ = false;
+        inject_reg_ = -1;
+        inject_end_ = nullptr;
         cmp_chain_end_ = -1;
         fn_written_global_count_ = 0;
         fn_written_globals_full_ = false;
@@ -141,6 +143,8 @@ namespace zen
         typed_call_reg_ = -1;
         last_expr_ctor_valid_ = false;
         multi_assign_rhs_ = false;
+        inject_reg_ = -1;
+        inject_end_ = nullptr;
         cmp_chain_end_ = -1;
         fn_written_global_count_ = 0;
         fn_written_globals_full_ = false;

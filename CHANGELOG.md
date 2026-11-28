@@ -4,6 +4,8 @@ All notable changes to Zen are documented in this file.
 
 ## Unreleased
 
+- A multi-assign takes attributes, indices and groups of them as targets, not only names: `self.x, self.y = pair()`, `xs[i], xs[j] = xs[j], xs[i]`, `d["a"], obj.b = 1, 2`, `(a, o.b), c = ...`. The right-hand side runs first, then each target is evaluated and stored from left to right, as in CPython (`t, xs[t] = 1, 5` writes `xs[1]`). The same targets work in `for p.a, xs[i] in pairs:`. Covered by `tests/85_multi_assign_targets.py`, `tests/86_multi_assign_vec.py`, `tests/errors/multi_assign_*.py` and `tests/diff/12_multi_assign_targets.py`.
+- `xs[i], xs[j] = xs[j], xs[i]` compiles to two fewer MOVEs: the container is no longer copied before the right-hand side.
 - `len(x)`, `next(g)` and `eval(s)` no longer take the register of a later value as scratch when the caller reserved a block of registers: `b, c, d = len(xs), j, len(xs)` left the list in `c` instead of `j`. Covered by `tests/87_intrinsic_results.py`.
 
 ## [1.0.0] - 2026-05-18

@@ -1139,12 +1139,16 @@ namespace zen
         if (name.length == 4 && memcmp(name.start, "next", 4) == 0 && check(TOK_LPAREN))
         {
             advance(); /* consume '(' */
+            const int top = state_->next_reg;
             int r = (dest >= 0) ? dest : alloc_reg();
             int arg = expression(-1);
             consume(TOK_RPAREN, "Expected ')' after argument to next().");
             state_->emitter.emit_abc(OP_NEXT, r, arg, 0, previous_.line);
             free_reg(arg);
-            state_->next_reg = r + 1;
+            /* A destination the caller picked may sit below registers it
+            ** has reserved for later operands (`a, b, c = next(g), x, next(g)`):
+            ** only what the argument took above `top` is released. */
+            state_->next_reg = (dest >= 0 && top > r + 1) ? top : r + 1;
             if (state_->next_reg > state_->max_reg) state_->max_reg = state_->next_reg;
             return r;
         }
@@ -1153,12 +1157,13 @@ namespace zen
         if (name.length == 3 && memcmp(name.start, "len", 3) == 0 && check(TOK_LPAREN))
         {
             advance(); /* consume '(' */
+            const int top = state_->next_reg;
             int r = (dest >= 0) ? dest : alloc_reg();
             int arg = expression(-1);
             consume(TOK_RPAREN, "Expected ')' after argument to len().");
             state_->emitter.emit_abc(OP_LEN, r, arg, 0, previous_.line);
             free_reg(arg);
-            state_->next_reg = r + 1;
+            state_->next_reg = (dest >= 0 && top > r + 1) ? top : r + 1;
             if (state_->next_reg > state_->max_reg) state_->max_reg = state_->next_reg;
             return r;
         }

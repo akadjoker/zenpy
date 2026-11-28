@@ -2,6 +2,10 @@
 
 All notable changes to Zen are documented in this file.
 
+## Unreleased
+
+- `len(x)`, `next(g)` and `eval(s)` no longer take the register of a later value as scratch when the caller reserved a block of registers: `b, c, d = len(xs), j, len(xs)` left the list in `c` instead of `j`. Covered by `tests/87_intrinsic_results.py`.
+
 ## [1.0.0] - 2026-05-18
 
 ### ✨ Major Features

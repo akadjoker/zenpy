@@ -1950,43 +1950,56 @@ namespace zen
         int var_count = 0;
         int top_count = 0;
         bool nested = false;
-        do
+
+        /* A target that is an attribute or an index (`for p.x, xs[i] in
+        ** pairs`) is stored like a multi-assign target, from the source
+        ** text again at the top of each iteration. */
+        const bool general = for_targets_complex();
+        const LexerState tgt_lex = lexer_.save_state();
+        const Token tgt_cur = current_;
+        const Token tgt_prev = previous_;
+        if (general)
+            skip_for_targets();
+        else
         {
-            if (match(TOK_LPAREN))
+            do
             {
-                nested = true;
-                int inner = 0;
-                do
+                if (match(TOK_LPAREN))
+                {
+                    nested = true;
+                    int inner = 0;
+                    do
+                    {
+                        if (!match(TOK_UNDERSCORE))
+                            consume(TOK_IDENTIFIER, "Expected variable name in for-unpack.");
+                        if (var_count < 8)
+                        {
+                            var_names[var_count] = previous_;
+                            var_outer[var_count] = top_count;
+                            var_inner[var_count] = inner;
+                            var_count++;
+                        }
+                        inner++;
+                    } while (match(TOK_COMMA));
+                    consume(TOK_RPAREN, "Expected ')' after the names in for-unpack.");
+                }
+                else
                 {
                     if (!match(TOK_UNDERSCORE))
-                        consume(TOK_IDENTIFIER, "Expected variable name in for-unpack.");
+                        consume(TOK_IDENTIFIER, var_count == 0 ? "Expected variable name after 'for'."
+                                                               : "Expected variable name in for-unpack.");
                     if (var_count < 8)
                     {
                         var_names[var_count] = previous_;
                         var_outer[var_count] = top_count;
-                        var_inner[var_count] = inner;
+                        var_inner[var_count] = -1;
                         var_count++;
                     }
-                    inner++;
-                } while (match(TOK_COMMA));
-                consume(TOK_RPAREN, "Expected ')' after the names in for-unpack.");
-            }
-            else
-            {
-                if (!match(TOK_UNDERSCORE))
-                    consume(TOK_IDENTIFIER, var_count == 0 ? "Expected variable name after 'for'."
-                                                           : "Expected variable name in for-unpack.");
-                if (var_count < 8)
-                {
-                    var_names[var_count] = previous_;
-                    var_outer[var_count] = top_count;
-                    var_inner[var_count] = -1;
-                    var_count++;
                 }
-            }
-            top_count++;
-        } while (match(TOK_COMMA));
-        const bool unpack = var_count > 1 || nested;
+                top_count++;
+            } while (match(TOK_COMMA));
+        }
+        const bool unpack = general || var_count > 1 || nested;
 
         consume(TOK_IN, "Expected 'in' after variable name.");
 
@@ -2111,8 +2124,25 @@ namespace zen
         {
             /* Tuple unpack: use a temp reg for the iterated value, then unpack */
             var_reg = alloc_reg(); /* temp — holds the array/tuple from iterator */
-            for (int vi = 0; vi < var_count; vi++)
-                add_local(var_names[vi]);
+            if (general)
+            {
+                const LexerState after_lex = lexer_.save_state();
+                const Token after_cur = current_;
+                const Token after_prev = previous_;
+                lexer_.restore_state(tgt_lex);
+                current_ = tgt_cur;
+                previous_ = tgt_prev;
+                bool declared = false;
+                scan_target_list(kTargetsLoopLocals, &declared);
+                lexer_.restore_state(after_lex);
+                current_ = after_cur;
+                previous_ = after_prev;
+            }
+            else
+            {
+                for (int vi = 0; vi < var_count; vi++)
+                    add_local(var_names[vi]);
+            }
         }
 
         /* Loop info */
@@ -2131,8 +2161,28 @@ namespace zen
         int loop_start = state_->emitter.current_offset();
         loop.start_offset = loop_start;
 
+        if (general)
+        {
+            const LexerState after_lex = lexer_.save_state();
+            const Token after_cur = current_;
+            const Token after_prev = previous_;
+            lexer_.restore_state(tgt_lex);
+            current_ = tgt_cur;
+            previous_ = tgt_prev;
+            const int top = state_->next_reg;
+            bool declared = false;
+            const int count = scan_target_list(kTargetsKeep, &declared);
+            lexer_.restore_state(tgt_lex);
+            current_ = tgt_cur;
+            previous_ = tgt_prev;
+            store_target_list(count == 1 ? var_reg : unpack_to_temps(var_reg, count));
+            state_->next_reg = top;
+            lexer_.restore_state(after_lex);
+            current_ = after_cur;
+            previous_ = after_prev;
+        }
         /* Tuple unpack: R[var_reg] is an array — extract into individual locals */
-        if (unpack)
+        else if (unpack)
         {
             /* locals were added after var_reg, so they start at var_reg+1 */
             int base_local = var_reg + 1;
@@ -2570,6 +2620,279 @@ namespace zen
         infer_assigned_class_global(gidx);
     }
 
+    static const int kMaxAssignTargets = 64;
+
+    static bool is_target_end(TokenType t)
+    {
+        return t == TOK_COMMA || t == TOK_EQ || t == TOK_RPAREN || t == TOK_RBRACKET ||
+               t == TOK_IN || t == TOK_NEWLINE || t == TOK_EOF || t == TOK_SEMICOLON;
+    }
+
+    static bool is_open_bracket(TokenType t)
+    {
+        return t == TOK_LPAREN || t == TOK_LBRACKET || t == TOK_LBRACE;
+    }
+
+    static bool is_close_bracket(TokenType t)
+    {
+        return t == TOK_RPAREN || t == TOK_RBRACKET || t == TOK_RBRACE;
+    }
+
+    bool Compiler::assignment_ahead()
+    {
+        const LexerState ls = lexer_.save_state();
+        int depth = 0;
+        bool found = false;
+        for (Token t = current_;; t = lexer_.next_token())
+        {
+            if (t.type == TOK_EOF || t.type == TOK_ERROR || t.type == TOK_NEWLINE || t.type == TOK_SEMICOLON)
+                break;
+            if (is_open_bracket(t.type))
+                depth++;
+            else if (is_close_bracket(t.type))
+                depth--;
+            else if (depth == 0 && t.type == TOK_EQ)
+            {
+                found = true;
+                break;
+            }
+        }
+        lexer_.restore_state(ls);
+        return found;
+    }
+
+    Token Compiler::peek_token()
+    {
+        const LexerState ls = lexer_.save_state();
+        const Token t = lexer_.next_token();
+        lexer_.restore_state(ls);
+        return t;
+    }
+
+    bool Compiler::target_group_ahead()
+    {
+        if (!check(TOK_LPAREN) && !check(TOK_LBRACKET))
+            return false;
+        const bool paren = check(TOK_LPAREN);
+        const LexerState ls = lexer_.save_state();
+        int depth = 1;
+        bool comma = false;
+        for (;;)
+        {
+            const Token t = lexer_.next_token();
+            if (t.type == TOK_EOF || t.type == TOK_ERROR)
+            {
+                depth = -1;
+                break;
+            }
+            if (is_open_bracket(t.type))
+                depth++;
+            else if (is_close_bracket(t.type) && --depth == 0)
+                break;
+            else if (depth == 1 && t.type == TOK_COMMA)
+                comma = true;
+        }
+        /* `(a)` is only a parenthesised target; `(a,)` and `[a]` unpack. */
+        const bool group = depth == 0 && (!paren || comma) && is_target_end(lexer_.next_token().type);
+        lexer_.restore_state(ls);
+        return group;
+    }
+
+    void Compiler::skip_target()
+    {
+        int depth = 0;
+        while (!check(TOK_EOF))
+        {
+            const TokenType t = current_.type;
+            if (is_open_bracket(t))
+                depth++;
+            else if (is_close_bracket(t))
+            {
+                if (depth == 0)
+                    break;
+                depth--;
+            }
+            else if (depth == 0 && is_target_end(t))
+                break;
+            advance();
+        }
+    }
+
+    int Compiler::scan_target_list(int declare, bool *declared)
+    {
+        int count = 0;
+        for (;;)
+        {
+            if (is_target_end(current_.type) || is_close_bracket(current_.type))
+            {
+                error_at_current("Expected an assignment target.");
+                return count;
+            }
+            if (target_group_ahead())
+            {
+                advance();
+                scan_target_list(declare, declared);
+                if (!match(TOK_RPAREN) && !match(TOK_RBRACKET))
+                    error_at_current("Expected a closing bracket after the targets.");
+            }
+            else
+            {
+                const Token first = current_;
+                const bool plain = (first.type == TOK_IDENTIFIER || first.type == TOK_UNDERSCORE) &&
+                                   is_target_end(peek_token().type);
+                if (plain && declare == kTargetsFunctionLocals && declare_function_local(first))
+                    *declared = true;
+                else if (plain && declare == kTargetsLoopLocals)
+                {
+                    add_local(first);
+                    *declared = true;
+                }
+                skip_target();
+            }
+            count++;
+            if (abort_parse_ || !match(TOK_COMMA) || is_target_end(current_.type))
+                break;
+        }
+        return count;
+    }
+
+    int Compiler::unpack_to_temps(int src, int count)
+    {
+        const int base = alloc_reg();
+        for (int j = 1; j < count; j++)
+            alloc_reg();
+        const int index = alloc_reg();
+        for (int j = 0; j < count; j++)
+        {
+            state_->emitter.emit_asbx(OP_LOADI, index, j, previous_.line);
+            state_->emitter.emit_abc(OP_GETINDEX, base + j, src, index, previous_.line);
+        }
+        free_reg(index);
+        return base;
+    }
+
+    bool Compiler::for_targets_complex()
+    {
+        const LexerState ls = lexer_.save_state();
+        int depth = 0;
+        bool complex = false;
+        for (Token t = current_;; t = lexer_.next_token())
+        {
+            if (t.type == TOK_EOF || t.type == TOK_ERROR || t.type == TOK_NEWLINE || t.type == TOK_COLON)
+                break;
+            if (t.type == TOK_IN && depth == 0)
+                break;
+            if (t.type == TOK_DOT || t.type == TOK_LBRACKET)
+                complex = true;
+            if (is_open_bracket(t.type))
+                depth++;
+            else if (is_close_bracket(t.type))
+                depth--;
+        }
+        lexer_.restore_state(ls);
+        return complex;
+    }
+
+    void Compiler::skip_for_targets()
+    {
+        int depth = 0;
+        while (!check(TOK_EOF) && !check(TOK_NEWLINE) && !(depth == 0 && check(TOK_IN)))
+        {
+            if (is_open_bracket(current_.type))
+                depth++;
+            else if (is_close_bracket(current_.type))
+                depth--;
+            advance();
+        }
+    }
+
+    void Compiler::store_target_list(int src_base)
+    {
+        for (int i = 0;; i++)
+        {
+            const int src = src_base + i;
+            if (target_group_ahead())
+            {
+                advance();
+                const LexerState ls = lexer_.save_state();
+                const Token cur = current_;
+                const Token prev = previous_;
+                bool declared = false;
+                const int count = scan_target_list(kTargetsKeep, &declared);
+                lexer_.restore_state(ls);
+                current_ = cur;
+                previous_ = prev;
+                if (abort_parse_)
+                    return;
+
+                const int top = state_->next_reg;
+                store_target_list(unpack_to_temps(src, count));
+                state_->next_reg = top;
+                if (!match(TOK_RPAREN) && !match(TOK_RBRACKET))
+                    error_at_current("Expected a closing bracket after the targets.");
+            }
+            else
+                store_target(src);
+            if (abort_parse_ || !match(TOK_COMMA) || is_target_end(current_.type))
+                break;
+        }
+    }
+
+    void Compiler::store_target(int src)
+    {
+        const Token first = current_;
+        if ((first.type == TOK_IDENTIFIER || first.type == TOK_UNDERSCORE) &&
+            is_target_end(peek_token().type))
+        {
+            advance();
+            store_to_lhs(first, src);
+            return;
+        }
+
+        const LexerState ls = lexer_.save_state();
+        const Token cur = current_;
+        const Token prev = previous_;
+        skip_target();
+        const char *end = current_.start;
+        lexer_.restore_state(ls);
+        current_ = cur;
+        previous_ = prev;
+
+        const int top = state_->next_reg;
+        inject_reg_ = src;
+        inject_end_ = end;
+        expression(-1);
+        if (inject_reg_ >= 0)
+        {
+            inject_reg_ = -1;
+            error("Cannot assign to this expression.");
+        }
+        inject_end_ = nullptr;
+        state_->next_reg = top;
+    }
+
+    bool Compiler::inject_here() const
+    {
+        return inject_reg_ >= 0 && current_.start == inject_end_;
+    }
+
+    bool Compiler::match_assign()
+    {
+        if (inject_reg_ >= 0)
+            return inject_here();
+        return match(TOK_EQ);
+    }
+
+    int Compiler::assigned_value()
+    {
+        if (inject_reg_ < 0)
+            return expression(-1);
+        const int reg = inject_reg_;
+        inject_reg_ = -1;
+        last_expr_ctor_valid_ = false;
+        return reg;
+    }
+
     void Compiler::expression_statement()
     {
         int saved = state_->next_reg;
@@ -2585,7 +2908,7 @@ namespace zen
         bool is_subscript_lhs = (previous_.type == TOK_RBRACKET);
         bool is_name_lhs      = (previous_.type == TOK_IDENTIFIER);
 
-        if (check(TOK_COMMA) && (is_name_lhs || is_subscript_lhs))
+        if (check(TOK_COMMA) && (is_name_lhs || is_subscript_lhs || assignment_ahead()))
         {
             /* Rewind all emitted code for the first LHS expression */
             state_->emitter.shrink_to(code_saved);
@@ -2595,81 +2918,32 @@ namespace zen
             current_  = cur_saved;
             previous_ = prev_saved;
 
-            /* ---- Parse LHS target list ---- */
-            static const int kMaxLHS = 8;
-            struct LHSTarget {
-                enum { NAME, SUBSCRIPT } kind;
-                Token name;        /* NAME */
-                int container;     /* SUBSCRIPT: reg holding container */
-                int index;         /* SUBSCRIPT: reg holding index */
-            } targets[kMaxLHS];
-            int lhs_count = 0;
-
-            auto parse_one_lhs = [&]() -> bool {
-                if (!match(TOK_IDENTIFIER) && !match(TOK_UNDERSCORE))
-                    error_at_current("Expected variable name in multi-assign.");
-                Token nm = previous_;
-                if (match(TOK_LBRACKET))
-                {
-                    /* subscript LHS: name[expr] */
-                    int cont = alloc_reg();
-                    /* resolve name → container reg */
-                    int local = resolve_local(state_, nm);
-                    if (local != -1) emit_move(cont, local);
-                    else {
-                        int upval = resolve_upvalue(state_, nm);
-                        if (upval != -1)
-                            state_->emitter.emit_abc(OP_GETUPVAL, cont, upval, 0, nm.line);
-                        else {
-                            int gidx = find_or_add_global(nm.start, nm.length);
-                            state_->emitter.emit_abx(OP_GETGLOBAL, cont, gidx, nm.line);
-                        }
-                    }
-                    int idx = expression(-1);
-                    consume(TOK_RBRACKET, "Expected ']' in LHS subscript.");
-                    if (lhs_count < kMaxLHS) {
-                        targets[lhs_count].kind      = LHSTarget::SUBSCRIPT;
-                        targets[lhs_count].container = cont;
-                        targets[lhs_count].index     = idx;
-                        lhs_count++;
-                    }
-                }
-                else
-                {
-                    if (lhs_count < kMaxLHS) {
-                        targets[lhs_count].kind = LHSTarget::NAME;
-                        targets[lhs_count].name = nm;
-                        lhs_count++;
-                    }
-                }
-                return true;
-            };
-
-            parse_one_lhs();
-            while (match(TOK_COMMA))
-                parse_one_lhs();
-
-            consume(TOK_EQ, "Expected '=' in multi-assign.");
-
             /* New names inside a function are its locals, not globals. They
             ** take their registers now, below the right-hand side's. */
             bool declared = false;
-            for (int i = 0; i < lhs_count; i++)
-                if (targets[i].kind == LHSTarget::NAME)
-                    declared = declare_function_local(targets[i].name) || declared;
+            const int lhs_count = scan_target_list(kTargetsFunctionLocals, &declared);
+            if (lhs_count > kMaxAssignTargets)
+                error("Too many targets in multi-assign.");
+            consume(TOK_EQ, "Expected '=' in multi-assign.");
+            if (abort_parse_)
+            {
+                state_->next_reg = saved;
+                return;
+            }
             if (declared)
                 saved = state_->next_reg;
 
-                /* ---- Evaluate RHS into temps above lhs infra regs ---- */
+            /* ---- Evaluate RHS into temps above lhs infra regs ---- */
             int rhs_base = state_->next_reg;
             int rhs_start = state_->emitter.current_offset();
-                state_->next_reg = rhs_base + lhs_count;
+            state_->next_reg = rhs_base + lhs_count;
             if (state_->next_reg > state_->max_reg) state_->max_reg = state_->next_reg;
             bool saved_multi_rhs = multi_assign_rhs_;
             multi_assign_rhs_ = true; /* keep the call patchable: see patch_c_at below */
             int r0 = expression(rhs_base);
             multi_assign_rhs_ = saved_multi_rhs;
 
+            int src_base = rhs_base;
             if (check(TOK_COMMA))
             {
                 /* Tuple RHS */
@@ -2707,15 +2981,6 @@ namespace zen
                 }
                 int needed = rhs_base + lhs_count;
                 if (needed > state_->max_reg) state_->max_reg = needed;
-                for (int i = 0; i < lhs_count; i++)
-                {
-                    int src = rhs_base + i;
-                    if (targets[i].kind == LHSTarget::NAME)
-                        store_to_lhs(targets[i].name, src);
-                    else
-                        state_->emitter.emit_abc(OP_SETINDEX,
-                            targets[i].container, targets[i].index, src, previous_.line);
-                }
             }
             else
             {
@@ -2762,31 +3027,34 @@ namespace zen
                         state_->emitter.emit_asbx(OP_LOADI, index, i, previous_.line);
                         state_->emitter.emit_abc(OP_GETINDEX, rhs_base + i, holder, index, previous_.line);
                     }
-                    for (int i = 0; i < lhs_count; i++)
-                    {
-                        if (targets[i].kind == LHSTarget::NAME)
-                            store_to_lhs(targets[i].name, rhs_base + i);
-                        else
-                            state_->emitter.emit_abc(OP_SETINDEX,
-                                targets[i].container, targets[i].index, rhs_base + i, previous_.line);
-                    }
-                    state_->next_reg = saved;
-                    return;
                 }
-                state_->emitter.patch_c_at(call_offset, lhs_count);
-                int result_base = (int)ZEN_A(state_->emitter.instruction_at(call_offset));
-                int needed = result_base + lhs_count;
-                if (needed > state_->max_reg) state_->max_reg = needed;
-                for (int i = 0; i < lhs_count; i++)
+                else
                 {
-                    int src = result_base + i;
-                    if (targets[i].kind == LHSTarget::NAME)
-                        store_to_lhs(targets[i].name, src);
-                    else
-                        state_->emitter.emit_abc(OP_SETINDEX,
-                            targets[i].container, targets[i].index, src, previous_.line);
+                    state_->emitter.patch_c_at(call_offset, lhs_count);
+                    src_base = (int)ZEN_A(state_->emitter.instruction_at(call_offset));
+                    int needed = src_base + lhs_count;
+                    if (needed > state_->max_reg) state_->max_reg = needed;
                 }
             }
+
+            /* Whatever is left above the values is scratch for the targets. */
+            if (state_->next_reg < src_base + lhs_count)
+                state_->next_reg = src_base + lhs_count;
+
+            /* The targets come first in the source but are compiled last:
+            ** a target's own sub-expressions (`xs[i]`, `obj().f`) run after
+            ** the right-hand side and after the targets to their left, as
+            ** in CPython. */
+            const LexerState rhs_end_lex = lexer_.save_state();
+            const Token rhs_end_cur = current_;
+            const Token rhs_end_prev = previous_;
+            lexer_.restore_state(lex_saved);
+            current_  = cur_saved;
+            previous_ = prev_saved;
+            store_target_list(src_base);
+            lexer_.restore_state(rhs_end_lex);
+            current_  = rhs_end_cur;
+            previous_ = rhs_end_prev;
 
             state_->next_reg = saved;
             return;

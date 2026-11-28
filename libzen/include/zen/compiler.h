@@ -301,6 +301,28 @@ namespace zen
         void expression_statement();
         void assignment_or_expr();
 
+        /* --- Multi-assign targets: `a, obj.b, xs[i], (c, d.e) = ...` ---
+        ** The right-hand side is compiled first, then each target is
+        ** compiled left to right from the source text again, with the
+        ** value already sitting in a register (see inject_reg_). */
+        bool assignment_ahead();
+        Token peek_token();
+        bool target_group_ahead();
+        void skip_target();
+        /* declare: kTargetsKeep leaves the names alone, kTargetsFunctionLocals
+        ** makes new names inside a function locals (assignment),
+        ** kTargetsLoopLocals gives every name a fresh local (for loop). */
+        enum { kTargetsKeep, kTargetsFunctionLocals, kTargetsLoopLocals };
+        int scan_target_list(int declare, bool *declared);
+        int unpack_to_temps(int src, int count);
+        void store_target_list(int src_base);
+        bool for_targets_complex();
+        void skip_for_targets();
+        void store_target(int src);
+        bool inject_here() const;
+        bool match_assign();
+        int assigned_value();
+
         /* --- Block parsing --- */
         void block();           /* consume INDENT, parse until DEDENT */
         void colon_block();     /* consume ':', expect NEWLINE+INDENT, parse block */
@@ -687,6 +709,13 @@ namespace zen
         ** to be the plain OP_INVOKE / OP_INVOKE_VT form (C = nresults),
         ** never OP_INVOKE_R / OP_INVOKE_VT_R (C = receiver register). */
         bool multi_assign_rhs_;
+        /* While a multi-assign target is compiled: the register holding the
+        ** value it receives, and the token that ends the target. The store
+        ** paths of dot_expr()/subscript_expr() take that value instead of
+        ** reading `= expr` ahead, but only where the target ends, so a
+        ** sub-expression such as the `x.y` in `f(x.y, z)` is left alone. */
+        int inject_reg_;
+        const char *inject_end_;
         /* The shape of the most recent simple comparison, left by
         ** comparison() for emit_cond_jump(): valid only while nothing else
         ** has been emitted since (end_offset == current offset). Lets

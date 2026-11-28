@@ -583,6 +583,8 @@ namespace zen
 
     public:
         bool had_error() const { return had_error_; }
+        /* A host that goes on after a failed load or call puts the flag back here. */
+        void clear_error() { had_error_ = false; }
 
         /* `obj.name` read as a value, for natives such as getattr/hasattr:
         ** instance field, then native property (its getter runs), then a

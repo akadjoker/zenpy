@@ -36,6 +36,10 @@ mensagem é cortada a 512 bytes e cada linha do traceback a 256.
 5. Um teste em `tests/` (no estilo dos que já existem) com um erro num método chamado por outro, um erro de compilação
    e um erro dentro de `invoke`: o hook recebe a mensagem, o ficheiro, a linha e os frames certos, uma vez por erro.
 6. `CHANGELOG.md` e a secção de embedding do `README.md`.
+7. (Pedido do prisma3d) Os jogos exportados correm **bytecode** compilado, não fonte. O hook tem de dar o ficheiro, a
+   linha e as funções dos frames também para código carregado de bytecode. Se a tabela de linhas ou os nomes não forem
+   guardados no bytecode, guardá-los e subir a versão do formato. O teste do ponto 5 repete o erro em `invoke` com o
+   módulo carregado de bytecode.
 
 ## Depois
 Kinetix2D: o `captureZenError` de `scripting/src/ZenScriptComponent.cpp` passa a usar o hook e deixa de ler texto.

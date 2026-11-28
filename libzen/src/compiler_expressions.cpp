@@ -602,6 +602,7 @@ namespace zen
         if (token.length == 4 && memcmp(token.start, "eval", 4) == 0 && check(TOK_LPAREN))
         {
             advance(); /* consume '(' */
+            const int top = state_->next_reg;
             int reg = (dest >= 0) ? dest : alloc_reg();
             /* Allocate arg slot one above result */
             int arg_reg = reg + 1;
@@ -610,7 +611,7 @@ namespace zen
             expression(arg_reg);
             consume(TOK_RPAREN, "Expected ')' after eval argument.");
             state_->emitter.emit_abc(OP_EVAL, reg, arg_reg, 0, token.line);
-            state_->next_reg = reg + 1;
+            state_->next_reg = (dest >= 0 && top > reg + 1) ? top : reg + 1;
             return reg;
         }
         return named_variable(token, dest, can_assign);
